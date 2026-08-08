@@ -1463,6 +1463,10 @@ private struct SettingsView: View {
                     }
                 }
 
+                SettingsSection(OpenTypeL10n.text("记忆面板（只读）", english: "Memory Panel (Read-only)")) {
+                    MemoryPanelView(model: model)
+                }
+
                 SettingsSection("AI 服务") {
                     Picker(
                         "转写语言",
@@ -2000,6 +2004,125 @@ private struct SettingsView: View {
     private var shortcutStatusColor: Color {
         model.shortcutReady && model.preferredShortcutActive ? .secondary : .orange
     }
+}
+
+/// Read-only display of the sidecar's memory system: the current entity
+/// dictionary (`GET /memory/terms`) and the consolidation run log
+/// (`GET /memory/consolidation-runs`) — the human-review surface described
+/// in the memory design doc §4.1. Purely a convenience view: it refreshes
+/// itself on appear and never mutates anything.
+private struct MemoryPanelView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(OpenTypeL10n.text(
+                "本地记忆服务记录的实体词典与最近的整理记录，仅供查看，不可在此编辑。",
+                english: "Entity dictionary and recent consolidation runs recorded by the local memory service. Read-only."
+            ))
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    OpenTypeL10n.text("实体词典", english: "Entity Terms"),
+                    systemImage: "text.book.closed"
+                )
+                .font(.system(size: 10.5, weight: .semibold))
+
+                if model.memoryTerms.isEmpty {
+                    Text(OpenTypeL10n.text("暂无记录", english: "No entries yet"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.memoryTerms) { term in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(term.canonicalTerm)
+                                    .font(.system(size: 10.5, weight: .medium))
+                                Spacer()
+                                Text(term.category)
+                                    .font(.system(size: 8.8, weight: .medium))
+                                    .foregroundStyle(.tertiary)
+                                Text(String(format: "%.0f%%", term.confidence * 100))
+                                    .font(.system(size: 8.8))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            if !term.aliases.isEmpty {
+                                Text(term.aliases.joined(separator: " · "))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            Color.primary.opacity(0.028),
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                    }
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    OpenTypeL10n.text("整理记录", english: "Consolidation Runs"),
+                    systemImage: "clock.arrow.2.circlepath"
+                )
+                .font(.system(size: 10.5, weight: .semibold))
+
+                if model.memoryConsolidationRuns.isEmpty {
+                    Text(OpenTypeL10n.text("暂无整理记录", english: "No consolidation runs yet"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.memoryConsolidationRuns) { run in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(Self.dateFormatter.string(
+                                    from: Date(timeIntervalSince1970: Double(run.ranAt) / 1000)
+                                ))
+                                .font(.system(size: 9.5, weight: .medium))
+
+                                if run.rolledBackAt != nil {
+                                    Spacer()
+                                    Label(
+                                        OpenTypeL10n.text("已回滚", english: "Rolled back"),
+                                        systemImage: "arrow.uturn.backward"
+                                    )
+                                    .font(.system(size: 8.5, weight: .medium))
+                                    .foregroundStyle(.orange)
+                                }
+                            }
+                            Text(run.summary)
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            Color.primary.opacity(0.028),
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                    }
+                }
+            }
+        }
+        .task {
+            await model.refreshMemoryPanel()
+        }
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 }
 
 private struct ProviderCredentialRow: View {

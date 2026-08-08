@@ -159,3 +159,53 @@ describe("MemoryStore consolidation trigger helpers", () => {
     expect(hours as number).toBeLessThanOrEqual(2.1);
   });
 });
+
+describe("MemoryStore.listConsolidationRuns", () => {
+  test("returns an empty array when no runs have happened", () => {
+    const store = makeStore();
+    expect(store.listConsolidationRuns()).toEqual([]);
+  });
+
+  test("returns run summaries ordered by ranAt DESC, excluding snapshotBeforeJSON", () => {
+    const store = makeStore();
+    const earlier = Date.now() - 60 * 60 * 1000;
+    const later = Date.now();
+    store.db.run(
+      `INSERT INTO memory_consolidation_runs
+        (ranAt, eventsConsidered, candidatesProposed, candidatesAccepted, summary, snapshotBeforeJSON, rolledBackAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [earlier, 10, 2, 1, "first run", '[{"huge":"snapshot"}]', null]
+    );
+    store.db.run(
+      `INSERT INTO memory_consolidation_runs
+        (ranAt, eventsConsidered, candidatesProposed, candidatesAccepted, summary, snapshotBeforeJSON, rolledBackAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [later, 20, 4, 3, "second run", '[{"huge":"snapshot2"}]', later + 1000]
+    );
+
+    const runs = store.listConsolidationRuns();
+
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toEqual({
+      id: expect.any(Number),
+      ranAt: later,
+      eventsConsidered: 20,
+      candidatesProposed: 4,
+      candidatesAccepted: 3,
+      summary: "second run",
+      rolledBackAt: later + 1000,
+    });
+    expect(runs[1]).toEqual({
+      id: expect.any(Number),
+      ranAt: earlier,
+      eventsConsidered: 10,
+      candidatesProposed: 2,
+      candidatesAccepted: 1,
+      summary: "first run",
+      rolledBackAt: null,
+    });
+    for (const run of runs) {
+      expect(run).not.toHaveProperty("snapshotBeforeJSON");
+    }
+  });
+});

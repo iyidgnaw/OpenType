@@ -2,6 +2,7 @@ import { unlinkSync, existsSync } from "node:fs";
 import { loadEnv } from "./env";
 import { openDatabase } from "./memory/db";
 import { MemoryStore } from "./memory/MemoryStore";
+import { buildMemoryRoutes } from "./memory/routes";
 import type { OneShotChatFn } from "./oneshot/client";
 import { buildOneShotRoutes } from "./oneshot/routes";
 import { createDeepSeekClient } from "./provider/deepseek";
@@ -15,6 +16,7 @@ export function buildApp(store: MemoryStore, chat: OneShotChatFn) {
       handler: () => Response.json({ status: "ok" }),
     },
     ...buildOneShotRoutes(store, chat),
+    ...buildMemoryRoutes(store),
   ]);
 }
 

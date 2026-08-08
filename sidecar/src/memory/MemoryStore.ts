@@ -27,6 +27,16 @@ export interface EntityTerm {
   supersedes: number | null;
 }
 
+export interface ConsolidationRunSummary {
+  id: number;
+  ranAt: number;
+  eventsConsidered: number;
+  candidatesProposed: number;
+  candidatesAccepted: number;
+  summary: string;
+  rolledBackAt: number | null;
+}
+
 interface EntityTermRow {
   id: number;
   canonicalTerm: string;
@@ -119,5 +129,21 @@ export class MemoryStore {
       return null;
     }
     return (Date.now() - row.ranAt) / (1000 * 60 * 60);
+  }
+
+  /**
+   * Human-review surface for the Settings "Memory" panel (design §4.1): a
+   * consolidation run log. Deliberately excludes snapshotBeforeJSON — that's
+   * large internal rollback state, not meant for display.
+   */
+  listConsolidationRuns(): ConsolidationRunSummary[] {
+    const rows = this.db
+      .query(
+        `SELECT id, ranAt, eventsConsidered, candidatesProposed, candidatesAccepted, summary, rolledBackAt
+         FROM memory_consolidation_runs
+         ORDER BY ranAt DESC`
+      )
+      .all() as ConsolidationRunSummary[];
+    return rows;
   }
 }

@@ -713,3 +713,31 @@ enum ErrorMessagePresenter {
         return detail
     }
 }
+
+/// One row of the sidecar's `GET /memory/terms` response — the entity
+/// dictionary shown read-only in the Settings "Memory" panel. Mirrors (a
+/// subset of) `EntityTerm` from `sidecar/src/memory/MemoryStore.ts`.
+struct EntityTermSummary: Decodable, Identifiable {
+    let canonicalTerm: String
+    let aliases: [String]
+    let category: String
+    let confidence: Double
+
+    var id: String { canonicalTerm }
+}
+
+/// One row of the sidecar's `GET /memory/consolidation-runs` response — the
+/// consolidation run log shown read-only in the Settings "Memory" panel.
+/// Mirrors `ConsolidationRunSummary` from `sidecar/src/memory/MemoryStore.ts`
+/// (which deliberately omits `snapshotBeforeJSON`, large internal rollback
+/// state not meant for display). `ranAt`/`rolledBackAt` are epoch
+/// milliseconds, matching `Date.now()` on the sidecar side.
+struct ConsolidationRunSummary: Decodable, Identifiable {
+    let id: Int
+    let ranAt: Int
+    let eventsConsidered: Int
+    let candidatesProposed: Int
+    let candidatesAccepted: Int
+    let summary: String
+    let rolledBackAt: Int?
+}

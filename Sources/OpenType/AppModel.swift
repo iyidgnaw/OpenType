@@ -19,6 +19,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastTranscript = ""
     @Published private(set) var lastApplication = ""
     @Published private(set) var configuredProviders: Set<AIProvider> = []
+    @Published private(set) var memoryTerms: [EntityTermSummary] = []
+    @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
     @Published var selectedTab: AppTab = .home
 
     let configuration: AppConfiguration
@@ -592,6 +594,40 @@ final class AppModel: ObservableObject {
     /// used by the `sidecarXReply` mode branch below.
     private struct SidecarXReplyRequestBody: Encodable { let originalPost: String; let viewpoint: String? }
     private struct SidecarXReplyResponseBody: Decodable { let result: String?; let error: String? }
+
+    private struct MemoryTermsResponseBody: Decodable { let terms: [EntityTermSummary] }
+    private struct MemoryConsolidationRunsResponseBody: Decodable { let runs: [ConsolidationRunSummary] }
+
+    /// Refreshes the read-only Settings "Memory" panel (design doc §4.1: the
+    /// human-review surface over the sidecar's entity dictionary and
+    /// consolidation run log) by hitting `GET /memory/terms` and
+    /// `GET /memory/consolidation-runs`. This backs a convenience display,
+    /// not the critical recording/transcription path, so a sidecar hiccup
+    /// (not started yet, transient failure) just yields an empty list plus a
+    /// logged message rather than throwing.
+    func refreshMemoryPanel() async {
+        do {
+            let response: MemoryTermsResponseBody = try await sidecarClient.request(
+                method: "GET",
+                path: "/memory/terms"
+            )
+            memoryTerms = response.terms
+        } catch {
+            memoryTerms = []
+            print("OpenType: failed to refresh memory terms from sidecar: \(error.localizedDescription)")
+        }
+
+        do {
+            let response: MemoryConsolidationRunsResponseBody = try await sidecarClient.request(
+                method: "GET",
+                path: "/memory/consolidation-runs"
+            )
+            memoryConsolidationRuns = response.runs
+        } catch {
+            memoryConsolidationRuns = []
+            print("OpenType: failed to refresh memory consolidation runs from sidecar: \(error.localizedDescription)")
+        }
+    }
 
     private func process(audioURL: URL) async {
         let startingMode = activeMode ?? configuration.selectedMode

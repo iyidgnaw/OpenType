@@ -2284,6 +2284,79 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertNil(event.supersedesEventId)
     }
 
+    // MARK: - SidecarClient
+
+    func testSidecarClientDecodesCannedHealthResponse() throws {
+        struct HealthResponse: Decodable, Equatable {
+            let status: String
+        }
+
+        let response: HealthResponse = try SidecarClient.decodeResponse(
+            fromRawOutput: #"{"status":"ok"}"#
+        )
+
+        XCTAssertEqual(response, HealthResponse(status: "ok"))
+    }
+
+    func testSidecarClientThrowsOnEmptyOutput() {
+        struct HealthResponse: Decodable {
+            let status: String
+        }
+
+        XCTAssertThrowsError(
+            try SidecarClient.decodeResponse(fromRawOutput: "") as HealthResponse
+        ) { error in
+            guard case SidecarClientError.emptyResponse = error else {
+                return XCTFail("Expected emptyResponse, got \(error)")
+            }
+        }
+    }
+
+    func testSidecarClientThrowsOnMalformedOutput() {
+        struct HealthResponse: Decodable {
+            let status: String
+        }
+
+        XCTAssertThrowsError(
+            try SidecarClient.decodeResponse(
+                fromRawOutput: "not json at all"
+            ) as HealthResponse
+        ) { error in
+            guard case SidecarClientError.responseDecodingFailed = error else {
+                return XCTFail("Expected responseDecodingFailed, got \(error)")
+            }
+        }
+    }
+
+    func testSidecarClientStartsHealthChecksAndStopsRealDevServer() async throws {
+        guard FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/bun") else {
+            throw XCTSkip("bun is not installed at /opt/homebrew/bin/bun on this machine")
+        }
+
+        // Unix domain socket paths are capped at 104 bytes on Darwin, so this
+        // deliberately avoids FileManager's (long) per-process temporary
+        // directory in favor of a short, fixed /tmp path.
+        let socketURL = URL(
+            fileURLWithPath: "/tmp/ot-\(UUID().uuidString.prefix(8)).sock"
+        )
+        let client = await SidecarClient(socketURL: socketURL)
+
+        try await client.start()
+
+        let isHealthy = try await client.healthCheck()
+        XCTAssertTrue(isHealthy)
+
+        await client.stop()
+
+        do {
+            let stillHealthy = try await client.healthCheck()
+            XCTAssertFalse(stillHealthy, "sidecar process should no longer respond after stop()")
+        } catch {
+            // Also acceptable: the request itself fails once the process
+            // and its socket are gone.
+        }
+    }
+
 }
 
 private final class InMemoryProviderTokenStore: ProviderTokenStoring {

@@ -15,3 +15,10 @@ Platforms/Android/local.properties
 *.jks
 *.keystore
 *.mobileprovision
+
+sidecar/node_modules/
+sidecar/dist/
+sidecar/*.sqlite3
+sidecar/*.sqlite3-*
+sidecar/.env.local
+sidecar/.env

@@ -39,7 +39,7 @@ swift test --filter <TestClassOrMethodName>   # run a single test
 open dist/OpenType.app
 ```
 
-`scripts/build-app.sh` builds release, assembles the `.app` bundle (binary, Info.plist, Sounds, en.lproj), strips quarantine, and codesigns with a stable designated requirement (`identifier "ai.rain.opentype"`) so TCC permissions (mic/Accessibility) survive rebuilds.
+`scripts/build-app.sh` builds release, compiles the `sidecar/` TypeScript/Bun server into a standalone `opentype-sidecar` binary (requires `bun` on PATH), assembles the `.app` bundle (binary, Info.plist, Sounds, en.lproj, the bundled sidecar binary), strips quarantine, and codesigns with a stable designated requirement (`identifier "ai.rain.opentype"`) so TCC permissions (mic/Accessibility) survive rebuilds.
 
 ### iOS (Xcode project, no CocoaPods/SPM deps)
 

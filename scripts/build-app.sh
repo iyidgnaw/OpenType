@@ -4,6 +4,11 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
+if ! command -v bun >/dev/null 2>&1; then
+  echo "error: bun not found on PATH. Install bun (https://bun.sh) to compile the sidecar binary." >&2
+  exit 1
+fi
+
 mkdir -p \
   "$project_dir/.build/clang-module-cache" \
   "$project_dir/.build/swiftpm-module-cache"
@@ -11,6 +16,11 @@ mkdir -p \
 CLANG_MODULE_CACHE_PATH="$project_dir/.build/clang-module-cache" \
 SWIFTPM_MODULECACHE_OVERRIDE="$project_dir/.build/swiftpm-module-cache" \
 swift build -c release --disable-sandbox
+
+(
+  cd "$project_dir/sidecar"
+  bun build ./src/server.ts --compile --outfile "$project_dir/sidecar/dist/opentype-sidecar"
+)
 
 app_dir="$project_dir/dist/OpenType.app"
 contents_dir="$app_dir/Contents"
@@ -27,6 +37,9 @@ ditto \
   "$project_dir/Resources/Localization/en.lproj" \
   "$resources_dir/en.lproj"
 chmod +x "$binary_dir/OpenType"
+
+cp "$project_dir/sidecar/dist/opentype-sidecar" "$resources_dir/opentype-sidecar"
+chmod +x "$resources_dir/opentype-sidecar"
 
 # Files received through WeChat can leave a quarantine attribute on the
 # workspace. A locally rebuilt app must not inherit that download quarantine,

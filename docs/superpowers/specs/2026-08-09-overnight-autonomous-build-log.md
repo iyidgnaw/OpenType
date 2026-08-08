@@ -152,4 +152,42 @@ done had to be "run the real packaged artifact," not just "the tests
 pass" — several tasks tonight smoke-tested against `bun run src/server.ts`
 (which auto-loads `.env.local` from cwd) and never would have caught this.
 
+## Final state (end of overnight run)
+
+All six planned pieces are built, tested, integrated, and verified against
+the actual packaged `.app` (not just dev-mode proxies for it):
+
+- **Sidecar scaffold**: Bun HTTP server over a Unix domain socket.
+- **C (memory v1)**: episodic event capture, entity dictionary, dreaming-style
+  consolidation with deterministic gating and rollback.
+- **B1 (one-shot)**: polish, translate, X Reply, ask-anything — real prompts/
+  fidelity checks ported from the existing Swift code, not reinvented.
+- **B2 (agent runtime v1)**: MCP client (stdio, policy-only no-side-effect-
+  tools restriction), a capped tool-calling loop, `/agent/run`.
+- **Swift wiring**: sidecar lifecycle (start on launch, stop on quit), five
+  new modes (askAnything, sidecarPolish, sidecarTranslate, sidecarXReply,
+  sidecarAgent) additive alongside the existing five, a Memory panel, a
+  Task List panel.
+- **Packaging**: `scripts/build-app.sh` compiles and bundles the sidecar
+  binary, including its runtime credentials — the one gap that would have
+  silently broken the shipped app (compiled binary couldn't find
+  `.env.local`) was caught by re-testing the actual packaged artifact, not
+  trusting dev-mode smoke tests, and is fixed.
+
+101/101 Swift tests, 77/77 sidecar tests passing. Final check: rebuilt
+`dist/OpenType.app` from a clean state and hit `/health`, `/oneshot/ask`,
+`/agent/run`, and `/memory/terms` directly against the bundled binary —
+all real DeepSeek-backed calls succeeded.
+
+**What's explicitly not done, by design** (see individual decisions above
+for why): module A's phonetic-correction algorithm (deliberately
+deprioritized — decision recorded separately, not a design topic anymore);
+`.command`/`.english`/`.xReply`'s old Swift-native paths were left
+untouched rather than replaced; MCP tool-calling has no real server to
+test against tonight (mocked-only coverage); the Task List panel is a
+single blocking call with a post-hoc log, not real-time streaming; no
+Memory-panel rollback UI yet (read-only); the SidecarClient curl-per-
+request transport and the hardcoded dev-mode repo path are known,
+logged simplifications for a future native-transport pass.
+
 <!-- Further entries appended chronologically below as autonomous calls are made. -->

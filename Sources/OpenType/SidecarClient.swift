@@ -9,8 +9,11 @@ enum SidecarClientError: Error, LocalizedError, Equatable {
     case timedOutWaitingForReadiness
     /// The `curl` subprocess exited non-zero, or failed to launch.
     case requestFailed(exitCode: Int32, stderr: String)
-    /// stdout from `curl` was empty or not valid JSON for the requested type.
-    case responseDecodingFailed(String)
+    /// The body didn't decode as the expected type. Carries the HTTP status
+    /// curl observed (0 if it couldn't be determined) so a decode failure
+    /// caused by an unexpected error page/shape is distinguishable from one
+    /// caused by a genuinely malformed 2xx body.
+    case responseDecodingFailed(status: Int, reason: String, body: String)
     /// stdout from `curl` was empty.
     case emptyResponse
 
@@ -22,8 +25,8 @@ enum SidecarClientError: Error, LocalizedError, Equatable {
             return "Timed out waiting for opentype-sidecar to become ready."
         case .requestFailed(let exitCode, let stderr):
             return "Sidecar request failed (curl exit \(exitCode)): \(stderr)"
-        case .responseDecodingFailed(let reason):
-            return "Failed to decode sidecar response: \(reason)"
+        case .responseDecodingFailed(let status, let reason, let body):
+            return "Failed to decode sidecar response (HTTP \(status)): \(reason) — body: \(body)"
         case .emptyResponse:
             return "Sidecar returned an empty response."
         }
@@ -198,17 +201,39 @@ final class SidecarClient {
             bodyData = nil
         }
 
-        let output = try await runCurl(
+        let rawOutput = try await runCurl(
             method: method,
             path: path,
             bodyData: bodyData
         )
-        return try Self.decodeResponse(fromRawOutput: output)
+        let (body, status) = Self.splitBodyAndStatus(fromRawOutput: rawOutput)
+        return try Self.decodeResponse(fromRawOutput: body, status: status ?? 0)
     }
 
-    /// Runs `curl` against the Unix socket and returns raw stdout text.
-    /// Separated from response decoding so the decoding logic can be unit
-    /// tested against canned strings without spawning a process.
+    /// Splits `curl -w '\n%{http_code}'`'s output into the response body and
+    /// the observed HTTP status. `nonisolated`/`static` so it's directly unit
+    /// testable. Falls back to treating the whole output as body (status
+    /// `nil`) if the trailing line isn't a bare integer, rather than
+    /// crashing — a defensive guard against `curl`'s output format ever
+    /// changing shape underneath this parsing.
+    nonisolated static func splitBodyAndStatus(
+        fromRawOutput output: String
+    ) -> (body: String, status: Int?) {
+        guard let lastNewline = output.lastIndex(of: "\n") else {
+            return (output, nil)
+        }
+        let trailing = output[output.index(after: lastNewline)...]
+        guard let status = Int(trailing) else {
+            return (output, nil)
+        }
+        return (String(output[output.startIndex..<lastNewline]), status)
+    }
+
+    /// Runs `curl` against the Unix socket and returns raw stdout text (the
+    /// response body followed by a newline and the HTTP status code, per
+    /// `-w '\n%{http_code}'` — see `splitBodyAndStatus`). Separated from
+    /// response decoding so the decoding logic can be unit tested against
+    /// canned strings without spawning a process.
     private func runCurl(
         method: String,
         path: String,
@@ -217,6 +242,7 @@ final class SidecarClient {
         var arguments = [
             "--unix-socket", socketURL.path,
             "-sS",
+            "-w", "\n%{http_code}",
             "-X", method
         ]
         if let bodyData, let bodyString = String(data: bodyData, encoding: .utf8) {
@@ -269,7 +295,8 @@ final class SidecarClient {
     /// `static` so it can be exercised directly from unit tests without
     /// needing a running process or MainActor hop.
     nonisolated static func decodeResponse<Response: Decodable>(
-        fromRawOutput output: String
+        fromRawOutput output: String,
+        status: Int = 0
     ) throws -> Response {
         guard let data = output.data(using: .utf8), !data.isEmpty else {
             throw SidecarClientError.emptyResponse
@@ -278,7 +305,9 @@ final class SidecarClient {
             return try JSONDecoder().decode(Response.self, from: data)
         } catch {
             throw SidecarClientError.responseDecodingFailed(
-                error.localizedDescription
+                status: status,
+                reason: error.localizedDescription,
+                body: output
             )
         }
     }

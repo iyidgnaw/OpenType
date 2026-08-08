@@ -2332,6 +2332,51 @@ final class OpenTypeTests: XCTestCase {
         }
     }
 
+    func testSidecarClientDecodeFailureIncludesObservedHTTPStatus() {
+        struct HealthResponse: Decodable {
+            let status: String
+        }
+
+        XCTAssertThrowsError(
+            try SidecarClient.decodeResponse(
+                fromRawOutput: "<html>Internal Server Error</html>",
+                status: 500
+            ) as HealthResponse
+        ) { error in
+            guard case SidecarClientError.responseDecodingFailed(let status, _, let body) = error else {
+                return XCTFail("Expected responseDecodingFailed, got \(error)")
+            }
+            XCTAssertEqual(status, 500)
+            XCTAssertEqual(body, "<html>Internal Server Error</html>")
+        }
+    }
+
+    func testSidecarClientSplitsCurlBodyFromTrailingStatusLine() {
+        let (body, status) = SidecarClient.splitBodyAndStatus(
+            fromRawOutput: "{\"result\":\"hi\"}\n200"
+        )
+        XCTAssertEqual(body, "{\"result\":\"hi\"}")
+        XCTAssertEqual(status, 200)
+    }
+
+    func testSidecarClientSplitsCurlBodyFromTrailingStatusLineOnErrorResponse() {
+        let (body, status) = SidecarClient.splitBodyAndStatus(
+            fromRawOutput: "{\"error\":\"missing_instruction\"}\n422"
+        )
+        XCTAssertEqual(body, "{\"error\":\"missing_instruction\"}")
+        XCTAssertEqual(status, 422)
+    }
+
+    func testSidecarClientSplitBodyAndStatusFallsBackWhenNoStatusLinePresent() {
+        // Defensive fallback if curl's `-w` output format ever changes shape
+        // underneath us: treat the whole thing as body rather than crash.
+        let (body, status) = SidecarClient.splitBodyAndStatus(
+            fromRawOutput: "{\"result\":\"hi\"}"
+        )
+        XCTAssertEqual(body, "{\"result\":\"hi\"}")
+        XCTAssertNil(status)
+    }
+
     func testSidecarClientStartsHealthChecksAndStopsRealDevServer() async throws {
         guard FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/bun") else {
             throw XCTSkip("bun is not installed at /opt/homebrew/bin/bun on this machine")

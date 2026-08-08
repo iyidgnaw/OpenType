@@ -41,6 +41,17 @@ chmod +x "$binary_dir/OpenType"
 cp "$project_dir/sidecar/dist/opentype-sidecar" "$resources_dir/opentype-sidecar"
 chmod +x "$resources_dir/opentype-sidecar"
 
+# A `bun build --compile` binary doesn't carry the source tree's
+# sidecar/.env.local with it, and doesn't know to look for one at an
+# arbitrary launch-time cwd. Bundle it (if present) as sidecar.env next to
+# the binary; SidecarClient.swift reads this file and injects its values
+# into the child process's environment before launching the bundled binary.
+# This file is local-only (sidecar/.env.local is gitignored) - it never
+# touches source control, only this local build output.
+if [ -f "$project_dir/sidecar/.env.local" ]; then
+  cp "$project_dir/sidecar/.env.local" "$resources_dir/sidecar.env"
+fi
+
 # Files received through WeChat can leave a quarantine attribute on the
 # workspace. A locally rebuilt app must not inherit that download quarantine,
 # otherwise Finder may refuse to launch an otherwise valid ad-hoc build.

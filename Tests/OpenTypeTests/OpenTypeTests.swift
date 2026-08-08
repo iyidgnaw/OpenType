@@ -2291,6 +2291,29 @@ final class OpenTypeTests: XCTestCase {
 
     // MARK: - SidecarClient
 
+    func testSidecarClientLoadsBundledEnvironmentFileWhenPresent() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ot-env-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let envFile = tempDir.appendingPathComponent("sidecar.env")
+        try "DEEPSEEK_API_KEY=sk-test-from-bundle\nDEEPSEEK_MODEL=deepseek-v4-flash\n"
+            .write(to: envFile, atomically: true, encoding: .utf8)
+
+        let values = SidecarClient.loadBundledEnvironment(resourcePath: tempDir.path)
+        XCTAssertEqual(values["DEEPSEEK_API_KEY"], "sk-test-from-bundle")
+        XCTAssertEqual(values["DEEPSEEK_MODEL"], "deepseek-v4-flash")
+    }
+
+    func testSidecarClientLoadsEmptyEnvironmentWhenBundledFileMissing() {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ot-env-missing-\(UUID().uuidString.prefix(8))")
+        // Deliberately not created - exercises the "no bundled env file" path.
+        let values = SidecarClient.loadBundledEnvironment(resourcePath: tempDir.path)
+        XCTAssertTrue(values.isEmpty)
+    }
+
     func testSidecarClientDecodesCannedHealthResponse() throws {
         struct HealthResponse: Decodable, Equatable {
             let status: String

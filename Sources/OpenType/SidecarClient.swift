@@ -97,6 +97,11 @@ final class SidecarClient {
 
         let process = Process()
         var environment = ProcessInfo.processInfo.environment
+        // Merge bundled sidecar.env values first, then always set the socket
+        // path last, so nothing in a bundled env file can ever override it.
+        for (key, value) in Self.loadBundledEnvironment() {
+            environment[key] = value
+        }
         environment["OPENTYPE_SIDECAR_SOCKET"] = socketURL.path
 
         let bundledBinaryPath = (Bundle.main.resourcePath ?? "")
@@ -141,6 +146,30 @@ final class SidecarClient {
             self.process = nil
             throw error
         }
+    }
+
+    /// Reads `<resourcePath>/sidecar.env` (KEY=VALUE lines, via the existing
+    /// `EnvironmentFileParser`) if present, for injection into the sidecar
+    /// child process's environment. A `bun build --compile` binary doesn't
+    /// carry `sidecar/.env.local` with it and has no reliable way to find the
+    /// source checkout at an arbitrary launch-time cwd, so `build-app.sh`
+    /// copies that file into `Contents/Resources/sidecar.env` at package
+    /// time — this is the only way the bundled binary learns provider
+    /// credentials. Returns `[:]` if the file doesn't exist (e.g. in dev-mode
+    /// runs, where Bun already auto-loads `.env.local` from the sidecar
+    /// source directory itself).
+    ///
+    /// - Parameter resourcePath: Overridable for testing; defaults to
+    ///   `Bundle.main.resourcePath`.
+    nonisolated static func loadBundledEnvironment(
+        resourcePath: String? = Bundle.main.resourcePath
+    ) -> [String: String] {
+        guard let resourcePath else { return [:] }
+        let envFilePath = resourcePath.appending("/sidecar.env")
+        guard let contents = try? String(contentsOfFile: envFilePath, encoding: .utf8) else {
+            return [:]
+        }
+        return EnvironmentFileParser.parse(contents)
     }
 
     /// Terminates the child process, if running, and clears our reference to

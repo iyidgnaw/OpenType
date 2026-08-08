@@ -131,4 +131,25 @@ sidecar-backed versions as new, additional entries instead, leaving the
 existing five modes' behavior untouched. Revisit consolidating them in
 v2 once the new path has real usage behind it.
 
+## Critical fix: packaged app had no API key at runtime
+
+Final integration check (running the actually-packaged `dist/OpenType.app`'s
+bundled sidecar binary directly, not just `bun run` from source) caught a
+real gap none of the per-task smoke tests would have: the compiled
+`opentype-sidecar` binary doesn't carry `sidecar/.env.local` with it, and
+has no way to find it at an arbitrary launch-time working directory — so
+every real API call failed with a 401 the moment the *packaged* app was
+what ran, even though every dev-mode smoke test all night passed. Fixed
+by having `build-app.sh` copy `.env.local` to `Contents/Resources/sidecar.env`
+(local-only, `.env.local` stays gitignored — this never touches git) and
+`SidecarClient.loadBundledEnvironment()` reads it and injects the values
+into the child process's environment before launching the bundled binary.
+Verified by rebuilding the full `.app` and hitting a real endpoint against
+the actual bundled binary with the actual injected env, not a simulation.
+
+This is the reason the very last verification step before calling this
+done had to be "run the real packaged artifact," not just "the tests
+pass" — several tasks tonight smoke-tested against `bun run src/server.ts`
+(which auto-loads `.env.local` from cwd) and never would have caught this.
+
 <!-- Further entries appended chronologically below as autonomous calls are made. -->

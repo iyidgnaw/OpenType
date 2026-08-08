@@ -24,3 +24,6 @@ sidecar/.env.local
 sidecar/.env
 sidecar/.data/
 sidecar/.*.bun-build
+**/.data/
+**/*.sqlite3
+**/*.sqlite3-*

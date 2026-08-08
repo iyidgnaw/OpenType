@@ -258,6 +258,11 @@ private struct OverlayView: View {
                 "说出观点，或直接让 OpenType 帮你回复…",
                 english: "Share your take, or let OpenType draft the reply…"
             )
+        case .sidecarAgent:
+            return OpenTypeL10n.text(
+                "说出希望 Agent Runtime 完成的任务…",
+                english: "Describe the task for the Agent Runtime…"
+            )
         }
     }
 

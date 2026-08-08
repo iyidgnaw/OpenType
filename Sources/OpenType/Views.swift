@@ -1467,6 +1467,10 @@ private struct SettingsView: View {
                     MemoryPanelView(model: model)
                 }
 
+                SettingsSection(OpenTypeL10n.text("任务日志（Agent Runtime）", english: "Task List (Agent Runtime)")) {
+                    AgentTaskLogView(model: model)
+                }
+
                 SettingsSection("AI 服务") {
                     Picker(
                         "转写语言",
@@ -2123,6 +2127,100 @@ private struct MemoryPanelView: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+/// Minimal display of the most recent `sidecarAgent` mode run's
+/// step-by-step log (`AppModel.lastAgentRunSteps`), returned all at once by
+/// the sidecar's `POST /agent/run` after it finishes — there is no
+/// real-time streaming yet, and only one run's worth of history is kept
+/// (no multi-run queue), so this simply observes the published property
+/// rather than fetching anything itself.
+private struct AgentTaskLogView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(OpenTypeL10n.text(
+                "最近一次 Agent (Sidecar) 任务的执行步骤，任务完成后一次性显示，仅供查看。",
+                english: "Step-by-step log of the most recent Agent (Sidecar) run, shown all at once when it finishes. Read-only."
+            ))
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if model.lastAgentRunSteps.isEmpty {
+                Text(OpenTypeL10n.text("暂无 Agent 任务", english: "No agent runs yet"))
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(model.lastAgentRunSteps.enumerated()), id: \.offset) { _, step in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: Self.symbol(for: step.type))
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Self.color(for: step.type))
+                                .frame(width: 14)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(Self.label(for: step.type))
+                                    .font(.system(size: 8.8, weight: .semibold))
+                                    .foregroundStyle(Self.color(for: step.type))
+                                Text(step.detail)
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            Color.primary.opacity(0.028),
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private static func symbol(for stepType: String) -> String {
+        switch stepType {
+        case "thinking": return "bubble.left.and.text.bubble.right"
+        case "tool_call": return "wrench.and.screwdriver.fill"
+        case "tool_result": return "arrow.turn.down.right"
+        case "done": return "checkmark.circle.fill"
+        case "error": return "exclamationmark.triangle.fill"
+        default: return "circle.fill"
+        }
+    }
+
+    private static func color(for stepType: String) -> Color {
+        switch stepType {
+        case "thinking": return .secondary
+        case "tool_call": return .blue
+        case "tool_result": return .purple
+        case "done": return .green
+        case "error": return .red
+        default: return .secondary
+        }
+    }
+
+    private static func label(for stepType: String) -> String {
+        switch stepType {
+        case "thinking":
+            return OpenTypeL10n.text("思考", english: "Thinking")
+        case "tool_call":
+            return OpenTypeL10n.text("调用工具", english: "Tool Call")
+        case "tool_result":
+            return OpenTypeL10n.text("工具结果", english: "Tool Result")
+        case "done":
+            return OpenTypeL10n.text("完成", english: "Done")
+        case "error":
+            return OpenTypeL10n.text("错误", english: "Error")
+        default:
+            return stepType
+        }
+    }
 }
 
 private struct ProviderCredentialRow: View {

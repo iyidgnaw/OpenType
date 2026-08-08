@@ -11,6 +11,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
     case sidecarPolish = "sidecarPolish"
     case sidecarTranslate = "sidecarTranslate"
     case sidecarXReply = "sidecarXReply"
+    case sidecarAgent = "sidecarAgent"
 
     var id: String { rawValue }
 
@@ -25,6 +26,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .sidecarPolish: return OpenTypeL10n.text("润色", english: "Polish")
         case .sidecarTranslate: return OpenTypeL10n.text("中转英 (Sidecar)", english: "Translate (Sidecar)")
         case .sidecarXReply: return OpenTypeL10n.text("X Reply (Sidecar)", english: "X Reply (Sidecar)")
+        case .sidecarAgent: return OpenTypeL10n.text("Agent (Sidecar)", english: "Agent (Sidecar)")
         }
     }
 
@@ -40,6 +42,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .sidecarPolish: return OpenTypeL10n.text("选中文字 · 按指令润色", english: "Select text · Polish by instruction")
         case .sidecarTranslate: return OpenTypeL10n.text("中文 → English (Sidecar)", english: "Chinese → English (Sidecar)")
         case .sidecarXReply: return OpenTypeL10n.text("有观点就说 · 没有也能回 (Sidecar)", english: "Join the conversation (Sidecar)")
+        case .sidecarAgent: return OpenTypeL10n.text("说出任务 · 交给 Agent Runtime (Sidecar)", english: "Describe a task · Agent Runtime (Sidecar)")
         }
     }
 
@@ -54,6 +57,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .sidecarPolish: return "sparkles.rectangle.stack.fill"
         case .sidecarTranslate: return "globe.americas.fill"
         case .sidecarXReply: return "bubble.left.and.bubble.right.fill"
+        case .sidecarAgent: return "gearshape.2.fill"
         }
     }
 
@@ -80,7 +84,8 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         .askAnything,
         .sidecarPolish,
         .sidecarTranslate,
-        .sidecarXReply
+        .sidecarXReply,
+        .sidecarAgent
     ]
 
     var explanation: String {
@@ -105,6 +110,11 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
             return OpenTypeL10n.text("中文口述，交给 Sidecar 写成地道英文", english: "Speak Chinese and let the sidecar produce natural English")
         case .sidecarXReply:
             return OpenTypeL10n.text("加入对话；交给 Sidecar 生成回复草稿", english: "Join the conversation with a sidecar-drafted reply")
+        case .sidecarAgent:
+            return OpenTypeL10n.text(
+                "说出任务，交给 Agent Runtime 完成；可能比其他模式慢，且可能调用工具",
+                english: "Describe a task and hand it to the Agent Runtime; may take longer than other modes and can use tools"
+            )
         }
     }
 
@@ -732,6 +742,16 @@ struct EntityTermSummary: Decodable, Identifiable {
 /// (which deliberately omits `snapshotBeforeJSON`, large internal rollback
 /// state not meant for display). `ranAt`/`rolledBackAt` are epoch
 /// milliseconds, matching `Date.now()` on the sidecar side.
+/// One entry of the sidecar's `POST /agent/run` response `steps` array — the
+/// step-by-step log of a single Agent Runtime call, shown read-only in the
+/// Task List panel (`AgentTaskLogView`). Mirrors the agent loop's internal
+/// step log on the sidecar side (`thinking`/`tool_call`/`tool_result`/
+/// `done`/`error`).
+struct AgentStepSummary: Decodable, Equatable {
+    let type: String
+    let detail: String
+}
+
 struct ConsolidationRunSummary: Decodable, Identifiable {
     let id: Int
     let ranAt: Int

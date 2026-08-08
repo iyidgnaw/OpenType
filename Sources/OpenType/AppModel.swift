@@ -21,6 +21,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var configuredProviders: Set<AIProvider> = []
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
+    @Published private(set) var lastAgentRunSteps: [AgentStepSummary] = []
     @Published var selectedTab: AppTab = .home
 
     let configuration: AppConfiguration
@@ -595,6 +596,15 @@ final class AppModel: ObservableObject {
     private struct SidecarXReplyRequestBody: Encodable { let originalPost: String; let viewpoint: String? }
     private struct SidecarXReplyResponseBody: Decodable { let result: String?; let error: String? }
 
+    /// Request/response bodies for the sidecar's `/agent/run` endpoint, used
+    /// by the `sidecarAgent` mode branch below. This runs a full agent loop
+    /// (potentially calling MCP tools) as a single blocking HTTP call and can
+    /// take noticeably longer than the other one-shot sidecar modes; `steps`
+    /// carries the full step-by-step log after the fact for display in the
+    /// Task List panel (`AgentTaskLogView`).
+    private struct AgentRunRequestBody: Encodable { let task: String; let context: String? }
+    private struct AgentRunResponseBody: Decodable { let result: String; let steps: [AgentStepSummary] }
+
     private struct MemoryTermsResponseBody: Decodable { let terms: [EntityTermSummary] }
     private struct MemoryConsolidationRunsResponseBody: Decodable { let runs: [ConsolidationRunSummary] }
 
@@ -822,6 +832,26 @@ final class AppModel: ObservableObject {
                     throw OpenTypeError.invalidResponse
                 }
                 result = reply
+            } else if mode == .sidecarAgent {
+                usedTextModel = true
+                effectiveTextModel = "deepseek-v4-flash"
+                lastAgentRunSteps = []
+                do {
+                    let response: AgentRunResponseBody = try await sidecarClient.request(
+                        method: "POST",
+                        path: "/agent/run",
+                        body: AgentRunRequestBody(
+                            task: transcript,
+                            context: capturedContext.selectedText
+                        )
+                    )
+                    lastAgentRunSteps = response.steps
+                    result = response.result
+                } catch {
+                    throw OpenTypeError.service(
+                        "Agent (Sidecar) 请求失败：\(error.localizedDescription)"
+                    )
+                }
             } else if mode == .raw,
                !configuration.hasCustomPrompt(for: .raw),
                !LightTranscriptionPolicy.shouldUseModel(for: transcript) {

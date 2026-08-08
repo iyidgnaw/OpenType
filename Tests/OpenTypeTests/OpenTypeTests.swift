@@ -1176,7 +1176,8 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(InputMode.askAnything.next, .sidecarPolish)
         XCTAssertEqual(InputMode.sidecarPolish.next, .sidecarTranslate)
         XCTAssertEqual(InputMode.sidecarTranslate.next, .sidecarXReply)
-        XCTAssertEqual(InputMode.sidecarXReply.next, .clean)
+        XCTAssertEqual(InputMode.sidecarXReply.next, .sidecarAgent)
+        XCTAssertEqual(InputMode.sidecarAgent.next, .clean)
         XCTAssertFalse(InputMode.visibleModes.contains(.command))
     }
 

@@ -7,6 +7,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
     case xReply
     case command
     case raw
+    case askAnything = "askAnything"
 
     var id: String { rawValue }
 
@@ -17,6 +18,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .instruction: return OpenTypeL10n.text("Agent 模式", english: "Agent")
         case .xReply: return "X Reply"
         case .raw: return OpenTypeL10n.text("文字转写", english: "Transcribe")
+        case .askAnything: return OpenTypeL10n.text("问答", english: "Ask Anything")
         }
     }
 
@@ -28,6 +30,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .xReply: return OpenTypeL10n.text("有观点就说 · 没有也能回", english: "Join the conversation")
         case .command: return OpenTypeL10n.text("有选区：按指令修改", english: "Selection: edit by instruction")
         case .raw: return OpenTypeL10n.text("去口癖 · 保留原话", english: "Clean filler · Keep your words")
+        case .askAnything: return OpenTypeL10n.text("提出问题 · 直接获得答案", english: "Speak a question · Get a direct answer")
         }
     }
 
@@ -38,6 +41,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .instruction: return "brain.head.profile"
         case .xReply: return "bubble.left.and.bubble.right.fill"
         case .raw: return "waveform"
+        case .askAnything: return "questionmark.bubble.fill"
         }
     }
 
@@ -60,7 +64,8 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         .english,
         .instruction,
         .xReply,
-        .raw
+        .raw,
+        .askAnything
     ]
 
     var explanation: String {
@@ -77,6 +82,8 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
             return OpenTypeL10n.text("智能编辑的选中文字分支", english: "Selected-text branch of Smart Edit")
         case .raw:
             return OpenTypeL10n.text("保留原话，只清理口癖、重复和基础标点", english: "Keep your wording; clean only filler, repetition, and punctuation")
+        case .askAnything:
+            return OpenTypeL10n.text("说出一个问题，直接获得答案，而不是整理后的原话", english: "Speak a question and get a direct answer, not a cleaned-up version of what you said")
         }
     }
 

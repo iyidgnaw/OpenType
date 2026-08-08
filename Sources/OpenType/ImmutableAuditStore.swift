@@ -74,6 +74,7 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         case .xReply: "xReply"
         case .command: "selectedEdit"
         case .raw: "transcribe"
+        case .askAnything: "askAnything"
         }
         self.rawTranscript = rawTranscript
         self.effectiveInput = effectiveInput

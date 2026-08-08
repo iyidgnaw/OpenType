@@ -437,6 +437,8 @@ struct AIServiceClient {
             return 0.45
         case .instruction, .command, .raw:
             return 0.2
+        case .askAnything:
+            return 0.2
         }
     }
 

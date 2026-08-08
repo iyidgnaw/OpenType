@@ -238,6 +238,11 @@ private struct OverlayView: View {
                 "保留原话，只清理口癖与重复…",
                 english: "Keep your words; clean only filler and repetition…"
             )
+        case .askAnything:
+            return OpenTypeL10n.text(
+                "说出你的问题，直接获得答案…",
+                english: "Ask your question — get a direct answer…"
+            )
         }
     }
 

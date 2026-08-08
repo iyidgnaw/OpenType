@@ -152,6 +152,11 @@ enum PromptBuilder {
             Add basic punctuation and paragraph breaks where clearly needed for readability.
             Do not summarize, reorganize ideas, improve the argument, change the style, make the wording more polished, or add any information. When unsure whether a word is meaningful, keep it.
             """
+        case .askAnything:
+            return """
+            MODE: ASK ANYTHING
+            The transcript is a question. Answer it directly and concisely.
+            """
         }
     }
 
@@ -258,6 +263,11 @@ enum PromptBuilder {
             <DICTATION>
             \(quoted)
             </DICTATION>
+            """
+        case .askAnything:
+            return """
+            QUESTION:
+            \(transcript)
             """
         }
     }
@@ -385,7 +395,7 @@ enum PromptBuilder {
             FINAL LANGUAGE CONTRACT — FOLLOW X REPLY MODE
             Follow the language behavior defined by X Reply Mode and any explicit current instruction. Never change it because of a stored or inferred profile preference.
             """
-        case .instruction, .command, .raw:
+        case .instruction, .command, .raw, .askAnything:
             return nil
         }
     }

@@ -6,6 +6,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var state: ProcessingState = .idle
     @Published private(set) var credentialStatus = "正在检查…"
     @Published private(set) var shortcutStatus = "正在注册…"
+    @Published private(set) var sidecarStatus = "正在启动…"
     @Published private(set) var shortcutKeys = HotKeyPreset.controlShiftSpace.keys
     @Published private(set) var shortcutBehavior: HotKeyBehavior = .holdToTalk
     @Published private(set) var shortcutReady = false
@@ -26,6 +27,7 @@ final class AppModel: ObservableObject {
     let providerVault = ProviderVault()
     private let auditStore = ImmutableAuditStore()
 
+    private let sidecarClient = SidecarClient()
     private let audioRecorder = AudioRecorder()
     private let liveSpeechTranscriber = LiveSpeechTranscriber()
     private let contextBridge = ContextBridge()
@@ -95,6 +97,28 @@ final class AppModel: ObservableObject {
         }
         loadCredential()
         start()
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.sidecarClient.start()
+                self.sidecarStatus = OpenTypeL10n.text(
+                    "Sidecar 已就绪",
+                    english: "Sidecar ready"
+                )
+            } catch {
+                self.sidecarStatus = OpenTypeL10n.text(
+                    "Sidecar 启动失败：\(error.localizedDescription)",
+                    english: "Sidecar failed to start: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    /// Stops the sidecar child process. Called from the app delegate's
+    /// `applicationWillTerminate` so the sidecar doesn't outlive the app.
+    func stopSidecar() {
+        sidecarClient.stop()
     }
 
     func start() {
@@ -546,6 +570,11 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Request/response bodies for the sidecar's `/oneshot/ask` endpoint,
+    /// used by the `askAnything` mode branch below.
+    private struct AskRequestBody: Encodable { let question: String }
+    private struct AskResponseBody: Decodable { let result: String }
+
     private func process(audioURL: URL) async {
         let startingMode = activeMode ?? configuration.selectedMode
         let practice = isPracticeSession
@@ -649,7 +678,22 @@ final class AppModel: ObservableObject {
 
             setState(.transforming)
             let result: String
-            if mode == .raw,
+            if mode == .askAnything {
+                usedTextModel = true
+                effectiveTextModel = "deepseek-v4-flash"
+                do {
+                    let response: AskResponseBody = try await sidecarClient.request(
+                        method: "POST",
+                        path: "/oneshot/ask",
+                        body: AskRequestBody(question: transcript)
+                    )
+                    result = response.result
+                } catch {
+                    throw OpenTypeError.service(
+                        "Ask Anything 请求失败：\(error.localizedDescription)"
+                    )
+                }
+            } else if mode == .raw,
                !configuration.hasCustomPrompt(for: .raw),
                !LightTranscriptionPolicy.shouldUseModel(for: transcript) {
                 result = LightTranscriptionPolicy.localResult(for: transcript)

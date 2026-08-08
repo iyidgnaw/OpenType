@@ -61,6 +61,10 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         false
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        model.stopSidecar()
+    }
+
     private func configureStatusItem() {
         let autosaveName = "OpenType"
         let preferredPositionKey = "NSStatusItem Preferred Position \(autosaveName)"

@@ -8,6 +8,9 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
     case command
     case raw
     case askAnything = "askAnything"
+    case sidecarPolish = "sidecarPolish"
+    case sidecarTranslate = "sidecarTranslate"
+    case sidecarXReply = "sidecarXReply"
 
     var id: String { rawValue }
 
@@ -19,6 +22,9 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .xReply: return "X Reply"
         case .raw: return OpenTypeL10n.text("文字转写", english: "Transcribe")
         case .askAnything: return OpenTypeL10n.text("问答", english: "Ask Anything")
+        case .sidecarPolish: return OpenTypeL10n.text("润色", english: "Polish")
+        case .sidecarTranslate: return OpenTypeL10n.text("中转英 (Sidecar)", english: "Translate (Sidecar)")
+        case .sidecarXReply: return OpenTypeL10n.text("X Reply (Sidecar)", english: "X Reply (Sidecar)")
         }
     }
 
@@ -31,6 +37,9 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .command: return OpenTypeL10n.text("有选区：按指令修改", english: "Selection: edit by instruction")
         case .raw: return OpenTypeL10n.text("去口癖 · 保留原话", english: "Clean filler · Keep your words")
         case .askAnything: return OpenTypeL10n.text("提出问题 · 直接获得答案", english: "Speak a question · Get a direct answer")
+        case .sidecarPolish: return OpenTypeL10n.text("选中文字 · 按指令润色", english: "Select text · Polish by instruction")
+        case .sidecarTranslate: return OpenTypeL10n.text("中文 → English (Sidecar)", english: "Chinese → English (Sidecar)")
+        case .sidecarXReply: return OpenTypeL10n.text("有观点就说 · 没有也能回 (Sidecar)", english: "Join the conversation (Sidecar)")
         }
     }
 
@@ -42,11 +51,14 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         case .xReply: return "bubble.left.and.bubble.right.fill"
         case .raw: return "waveform"
         case .askAnything: return "questionmark.bubble.fill"
+        case .sidecarPolish: return "sparkles.rectangle.stack.fill"
+        case .sidecarTranslate: return "globe.americas.fill"
+        case .sidecarXReply: return "bubble.left.and.bubble.right.fill"
         }
     }
 
     var requiresSelection: Bool {
-        self == .xReply || self == .command
+        self == .xReply || self == .command || self == .sidecarPolish
     }
 
     var supportsCustomPrompt: Bool {
@@ -65,7 +77,10 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         .instruction,
         .xReply,
         .raw,
-        .askAnything
+        .askAnything,
+        .sidecarPolish,
+        .sidecarTranslate,
+        .sidecarXReply
     ]
 
     var explanation: String {
@@ -84,6 +99,12 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
             return OpenTypeL10n.text("保留原话，只清理口癖、重复和基础标点", english: "Keep your wording; clean only filler, repetition, and punctuation")
         case .askAnything:
             return OpenTypeL10n.text("说出一个问题，直接获得答案，而不是整理后的原话", english: "Speak a question and get a direct answer, not a cleaned-up version of what you said")
+        case .sidecarPolish:
+            return OpenTypeL10n.text("选中文字后说出修改指令，交给 Sidecar 润色", english: "Select text, speak an instruction, and let the sidecar polish it")
+        case .sidecarTranslate:
+            return OpenTypeL10n.text("中文口述，交给 Sidecar 写成地道英文", english: "Speak Chinese and let the sidecar produce natural English")
+        case .sidecarXReply:
+            return OpenTypeL10n.text("加入对话；交给 Sidecar 生成回复草稿", english: "Join the conversation with a sidecar-drafted reply")
         }
     }
 

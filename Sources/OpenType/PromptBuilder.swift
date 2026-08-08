@@ -157,6 +157,12 @@ enum PromptBuilder {
             MODE: ASK ANYTHING
             The transcript is a question. Answer it directly and concisely.
             """
+        case .sidecarPolish, .sidecarTranslate, .sidecarXReply:
+            // Dead code at runtime: these modes bypass PromptBuilder entirely
+            // and route straight to the sidecar's /oneshot/* endpoints from
+            // AppModel.process(audioURL:). Kept sensible rather than stubbed
+            // only to satisfy the exhaustive switch.
+            return ""
         }
     }
 
@@ -269,6 +275,10 @@ enum PromptBuilder {
             QUESTION:
             \(transcript)
             """
+        case .sidecarPolish, .sidecarTranslate, .sidecarXReply:
+            // Dead code at runtime: see note above — these modes never reach
+            // PromptBuilder.
+            return ""
         }
     }
 
@@ -396,6 +406,10 @@ enum PromptBuilder {
             Follow the language behavior defined by X Reply Mode and any explicit current instruction. Never change it because of a stored or inferred profile preference.
             """
         case .instruction, .command, .raw, .askAnything:
+            return nil
+        case .sidecarPolish, .sidecarTranslate, .sidecarXReply:
+            // Dead code at runtime: see note above — these modes never reach
+            // PromptBuilder.
             return nil
         }
     }

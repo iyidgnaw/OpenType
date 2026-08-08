@@ -575,6 +575,24 @@ final class AppModel: ObservableObject {
     private struct AskRequestBody: Encodable { let question: String }
     private struct AskResponseBody: Decodable { let result: String }
 
+    /// Request/response bodies for the sidecar's `/oneshot/polish` endpoint,
+    /// used by the `sidecarPolish` mode branch below. `result`/`error` are
+    /// both optional because the sidecar returns one or the other depending
+    /// on HTTP status (200 vs 422), and `SidecarClient.request` decodes
+    /// whatever JSON body comes back without inspecting the status code.
+    private struct PolishRequestBody: Encodable { let selectedText: String; let instruction: String }
+    private struct PolishResponseBody: Decodable { let result: String?; let error: String? }
+
+    /// Request/response bodies for the sidecar's `/oneshot/translate`
+    /// endpoint, used by the `sidecarTranslate` mode branch below.
+    private struct TranslateRequestBody: Encodable { let transcript: String }
+    private struct TranslateResponseBody: Decodable { let result: String?; let error: String? }
+
+    /// Request/response bodies for the sidecar's `/oneshot/xreply` endpoint,
+    /// used by the `sidecarXReply` mode branch below.
+    private struct SidecarXReplyRequestBody: Encodable { let originalPost: String; let viewpoint: String? }
+    private struct SidecarXReplyResponseBody: Decodable { let result: String?; let error: String? }
+
     private func process(audioURL: URL) async {
         let startingMode = activeMode ?? configuration.selectedMode
         let practice = isPracticeSession
@@ -628,7 +646,8 @@ final class AppModel: ObservableObject {
                     audioURL: audioURL,
                     personalVocabulary: configuration.personalDictionary
                 )
-            } catch OpenTypeError.emptyRecording where startingMode == .xReply {
+            } catch OpenTypeError.emptyRecording where startingMode == .xReply
+                || startingMode == .sidecarXReply {
                 // Silence is a valid X Reply instruction: generate a useful
                 // conversational response from the selected post alone.
                 rawTranscript = ""
@@ -693,6 +712,80 @@ final class AppModel: ObservableObject {
                         "Ask Anything 请求失败：\(error.localizedDescription)"
                     )
                 }
+            } else if mode == .sidecarPolish {
+                usedTextModel = true
+                effectiveTextModel = "deepseek-v4-flash"
+                let response: PolishResponseBody
+                do {
+                    response = try await sidecarClient.request(
+                        method: "POST",
+                        path: "/oneshot/polish",
+                        body: PolishRequestBody(
+                            selectedText: capturedContext.selectedText ?? "",
+                            instruction: transcript
+                        )
+                    )
+                } catch {
+                    throw OpenTypeError.service(
+                        "润色请求失败：\(error.localizedDescription)"
+                    )
+                }
+                if response.error == "missing_instruction" {
+                    throw OpenTypeError.missingEditInstruction
+                }
+                guard let polished = response.result else {
+                    throw OpenTypeError.invalidResponse
+                }
+                result = polished
+            } else if mode == .sidecarTranslate {
+                usedTextModel = true
+                effectiveTextModel = "deepseek-v4-flash"
+                let response: TranslateResponseBody
+                do {
+                    response = try await sidecarClient.request(
+                        method: "POST",
+                        path: "/oneshot/translate",
+                        body: TranslateRequestBody(transcript: transcript)
+                    )
+                } catch {
+                    throw OpenTypeError.service(
+                        "中转英 (Sidecar) 请求失败：\(error.localizedDescription)"
+                    )
+                }
+                if response.error == "translation_fidelity_failed" {
+                    throw OpenTypeError.service(
+                        OpenTypeL10n.text(
+                            "中转英未能忠实转换原话，请再试一次",
+                            english: "English Mode did not faithfully transform the source. Please try again."
+                        )
+                    )
+                }
+                guard let translated = response.result else {
+                    throw OpenTypeError.invalidResponse
+                }
+                result = translated
+            } else if mode == .sidecarXReply {
+                usedTextModel = true
+                effectiveTextModel = "deepseek-v4-flash"
+                let response: SidecarXReplyResponseBody
+                do {
+                    response = try await sidecarClient.request(
+                        method: "POST",
+                        path: "/oneshot/xreply",
+                        body: SidecarXReplyRequestBody(
+                            originalPost: capturedContext.selectedText ?? "",
+                            viewpoint: transcript.isEmpty ? nil : transcript
+                        )
+                    )
+                } catch {
+                    throw OpenTypeError.service(
+                        "X Reply (Sidecar) 请求失败：\(error.localizedDescription)"
+                    )
+                }
+                guard let reply = response.result else {
+                    throw OpenTypeError.invalidResponse
+                }
+                result = reply
             } else if mode == .raw,
                !configuration.hasCustomPrompt(for: .raw),
                !LightTranscriptionPolicy.shouldUseModel(for: transcript) {

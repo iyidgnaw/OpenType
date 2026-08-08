@@ -243,6 +243,21 @@ private struct OverlayView: View {
                 "说出你的问题，直接获得答案…",
                 english: "Ask your question — get a direct answer…"
             )
+        case .sidecarPolish:
+            return OpenTypeL10n.text(
+                "已选中文字，请说润色要求…",
+                english: "Text selected. Say how you want it polished…"
+            )
+        case .sidecarTranslate:
+            return OpenTypeL10n.text(
+                "只转换为英文，不回答、不执行…",
+                english: "English transformation only — no answers or actions…"
+            )
+        case .sidecarXReply:
+            return OpenTypeL10n.text(
+                "说出观点，或直接让 OpenType 帮你回复…",
+                english: "Share your take, or let OpenType draft the reply…"
+            )
         }
     }
 

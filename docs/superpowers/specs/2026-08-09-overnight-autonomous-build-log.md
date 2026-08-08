@@ -60,4 +60,26 @@ for standalone dev) and the DeepSeek credentials from `.env.local`
 (gitignored). Verified with a real smoke test: booted the server, hit
 `/health` over the actual Unix socket with curl, got `{"status":"ok"}`.
 
+## Decision 4: Swift-to-sidecar transport is `curl --unix-socket` subprocess calls, not native NWConnection
+
+Foundation's `URLSession` doesn't support Unix domain sockets directly; the
+"correct" long-term answer is `Network.framework`'s `NWConnection` with a
+`.unix(path:)` endpoint and hand-rolled HTTP/1.1 framing. That's real
+implementation risk to take on unsupervised overnight. For this build:
+Swift shells out to `curl --unix-socket <path> http://localhost/<route>`
+per request via `Process`, matching the exact approach already verified
+manually against the sidecar's `/health` endpoint earlier tonight. Revisit
+with a native transport in v2 once the rest of the system is proven out —
+noted as a known simplification, not an oversight.
+
+## DeepSeek provider client (task 9 prep)
+
+Built and reviewed: `sidecar/src/provider/deepseek.ts` /
+`sidecar/test/provider/deepseek.test.ts`, 8 tests passing, typed
+`DeepSeekApiError` (status + body) for both non-2xx responses and
+malformed 200 bodies, dependency-injected `fetch` so no test hits the
+network. `tsc --noEmit` still blocked on `sidecar/node_modules` not being
+populated yet (`bun install` still running in the background as of this
+entry, fetching `@modelcontextprotocol/sdk` for the B2 task).
+
 <!-- Further entries appended chronologically below as autonomous calls are made. -->

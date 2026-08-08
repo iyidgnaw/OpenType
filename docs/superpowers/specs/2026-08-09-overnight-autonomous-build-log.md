@@ -119,4 +119,16 @@ request at a time against the npm registry, not actually hung); killing
 it early both times was the wrong call. Third attempt left running to
 completion under a real wait-loop instead of a fixed timeout.
 
+## Decision 6: add sidecar-backed Polish/Translate/X Reply as new modes, don't replace the old ones tonight
+
+Spec 2 frames Polish/Translate/X Reply as folding into the new B1 surface,
+which could mean replacing `.command`/`.english`/`.xReply`'s existing
+Swift/multi-provider implementation with sidecar calls. Doing that
+unsupervised risks regressing paths that work today (multi-provider
+choice, existing validation) for a swap whose only benefit tonight is
+"uses the new sidecar" — not worth the risk at this hour. Adding the
+sidecar-backed versions as new, additional entries instead, leaving the
+existing five modes' behavior untouched. Revisit consolidating them in
+v2 once the new path has real usage behind it.
+
 <!-- Further entries appended chronologically below as autonomous calls are made. -->

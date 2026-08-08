@@ -1,0 +1,323 @@
+import { describe, expect, test } from "bun:test";
+import { openDatabase } from "../../src/memory/db";
+import { MemoryStore, type EntityTerm } from "../../src/memory/MemoryStore";
+import { rollbackRun, runConsolidation, shouldConsolidate } from "../../src/memory/consolidator";
+
+function makeStore() {
+  const db = openDatabase(":memory:");
+  return new MemoryStore(db);
+}
+
+function seedEvents(store: MemoryStore, count: number): number[] {
+  const ids: number[] = [];
+  for (let i = 0; i < count; i++) {
+    ids.push(
+      store.recordEpisodicEvent({
+        mode: "transcribe",
+        rawTranscript: `raw ${i}`,
+        correctedTranscript: `corrected ${i}`,
+        effectiveInput: null,
+        selectedContext: null,
+        result: null,
+        applicationName: "TestApp",
+      })
+    );
+  }
+  return ids;
+}
+
+function candidatesResponse(candidates: unknown[]): string {
+  return JSON.stringify({ candidates });
+}
+
+describe("shouldConsolidate", () => {
+  test("false when there are no unconsolidated events at all", () => {
+    const store = makeStore();
+    expect(shouldConsolidate(store)).toBe(false);
+  });
+
+  test("false when there are events but fewer than 5", () => {
+    const store = makeStore();
+    seedEvents(store, 4);
+    expect(shouldConsolidate(store)).toBe(false);
+  });
+
+  test("true when never run before and >= 5 unconsolidated events exist", () => {
+    const store = makeStore();
+    seedEvents(store, 5);
+    expect(shouldConsolidate(store)).toBe(true);
+  });
+
+  test("false when a run happened less than 12 hours ago, even with enough events", () => {
+    const store = makeStore();
+    seedEvents(store, 10);
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    store.db.run(
+      `INSERT INTO memory_consolidation_runs
+        (ranAt, eventsConsidered, candidatesProposed, candidatesAccepted, summary, snapshotBeforeJSON, rolledBackAt)
+       VALUES (?, 1, 0, 0, 'x', '[]', NULL)`,
+      [oneHourAgo]
+    );
+    expect(shouldConsolidate(store)).toBe(false);
+  });
+
+  test("true when the last run was >= 12 hours ago and enough events exist", () => {
+    const store = makeStore();
+    seedEvents(store, 10);
+    const thirteenHoursAgo = Date.now() - 13 * 60 * 60 * 1000;
+    store.db.run(
+      `INSERT INTO memory_consolidation_runs
+        (ranAt, eventsConsidered, candidatesProposed, candidatesAccepted, summary, snapshotBeforeJSON, rolledBackAt)
+       VALUES (?, 1, 0, 0, 'x', '[]', NULL)`,
+      [thirteenHoursAgo]
+    );
+    expect(shouldConsolidate(store)).toBe(true);
+  });
+});
+
+describe("runConsolidation", () => {
+  test("accepts a candidate with confidence >= 0.6 and >= 2 supporting events", async () => {
+    const store = makeStore();
+    const ids = seedEvents(store, 3);
+    const callLLM = async () =>
+      candidatesResponse([
+        {
+          canonicalTerm: "天润",
+          aliases: ["tianrun", "添润"],
+          category: "org",
+          confidence: 0.65,
+          supportingEventIds: [ids[0], ids[1]],
+        },
+      ]);
+
+    const result = await runConsolidation(store, callLLM);
+
+    expect(result.aborted).toBe(false);
+    expect(result.candidatesProposed).toBe(1);
+    expect(result.candidatesAccepted).toBe(1);
+
+    const terms = store.allTerms();
+    expect(terms).toHaveLength(1);
+    expect(terms[0]?.canonicalTerm).toBe("天润");
+    expect(terms[0]?.aliases.sort()).toEqual(["tianrun", "添润"].sort());
+
+    // all fetched events (not just supporting ones) are marked processed
+    const rows = store.db.query("SELECT id, consolidatedAt FROM episodic_events").all() as Array<{
+      id: number;
+      consolidatedAt: number | null;
+    }>;
+    expect(rows.every((r) => r.consolidatedAt !== null)).toBe(true);
+    expect(store.unconsolidatedEventCount()).toBe(0);
+
+    const runs = store.db.query("SELECT * FROM memory_consolidation_runs").all() as Array<Record<string, unknown>>;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.candidatesAccepted).toBe(1);
+    expect(runs[0]?.eventsConsidered).toBe(3);
+  });
+
+  test("accepts a candidate with confidence >= 0.9 from a single supporting event", async () => {
+    const store = makeStore();
+    const ids = seedEvents(store, 5);
+    const callLLM = async () =>
+      candidatesResponse([
+        {
+          canonicalTerm: "Diyi Wang",
+          aliases: ["Diyi"],
+          category: "person",
+          confidence: 0.95,
+          supportingEventIds: [ids[0]],
+        },
+      ]);
+
+    const result = await runConsolidation(store, callLLM);
+    expect(result.candidatesAccepted).toBe(1);
+    expect(store.allTerms()).toHaveLength(1);
+  });
+
+  test("rejects a candidate with only 1 event and confidence below 0.9", async () => {
+    const store = makeStore();
+    const ids = seedEvents(store, 5);
+    const callLLM = async () =>
+      candidatesResponse([
+        {
+          canonicalTerm: "Maybe Person",
+          aliases: [],
+          category: "person",
+          confidence: 0.5,
+          supportingEventIds: [ids[0]],
+        },
+      ]);
+
+    const result = await runConsolidation(store, callLLM);
+
+    expect(result.aborted).toBe(false);
+    expect(result.candidatesProposed).toBe(1);
+    expect(result.candidatesAccepted).toBe(0);
+    expect(store.allTerms()).toHaveLength(0);
+
+    // the run still processed (considered) the events even though nothing was accepted
+    expect(store.unconsolidatedEventCount()).toBe(0);
+  });
+
+  test("merges a candidate that collides with an existing entity by alias, unioning aliases and keeping the higher confidence", async () => {
+    const store = makeStore();
+    const ids = seedEvents(store, 5);
+    const now = Date.now();
+    store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["天润", JSON.stringify(["tianrun"]), "org", 0.9, "owner", JSON.stringify([9999]), now, now, null]
+    );
+
+    const callLLM = async () =>
+      candidatesResponse([
+        {
+          canonicalTerm: "天润",
+          aliases: ["添润"],
+          category: "org",
+          confidence: 0.7, // lower than existing 0.9 -> must not decrease it
+          supportingEventIds: [ids[0], ids[1]],
+        },
+      ]);
+
+    const result = await runConsolidation(store, callLLM);
+    expect(result.candidatesAccepted).toBe(1);
+
+    const terms = store.allTerms();
+    expect(terms).toHaveLength(1); // merged, not duplicated
+    const merged = terms[0] as EntityTerm;
+    expect(merged.confidence).toBe(0.9); // kept the higher confidence
+    expect(merged.aliases.sort()).toEqual(["tianrun", "添润"].sort());
+    expect(merged.sourceEventIds.sort()).toEqual([9999, ids[0], ids[1]].sort());
+  });
+
+  test("merging can raise confidence when the candidate is more confident than the existing entry", async () => {
+    const store = makeStore();
+    const ids = seedEvents(store, 5);
+    const now = Date.now();
+    store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["Diyi Wang", JSON.stringify(["Diyi"]), "person", 0.6, "owner", JSON.stringify([]), now, now, null]
+    );
+
+    const callLLM = async () =>
+      candidatesResponse([
+        {
+          canonicalTerm: "Diyi Wang",
+          aliases: ["DW"],
+          category: "person",
+          confidence: 0.95,
+          supportingEventIds: [ids[0]],
+        },
+      ]);
+
+    await runConsolidation(store, callLLM);
+    const terms = store.allTerms();
+    expect(terms).toHaveLength(1);
+    expect(terms[0]?.confidence).toBe(0.95);
+  });
+
+  test("is a no-op when the LLM returns unparseable garbage: no events consolidated, no entity_terms change", async () => {
+    const store = makeStore();
+    seedEvents(store, 5);
+    const callLLM = async () => "this is not json at all {{{";
+
+    const result = await runConsolidation(store, callLLM);
+
+    expect(result.aborted).toBe(true);
+    expect(store.allTerms()).toHaveLength(0);
+    expect(store.unconsolidatedEventCount()).toBe(5);
+
+    const runs = store.db.query("SELECT * FROM memory_consolidation_runs").all();
+    expect(runs).toHaveLength(0);
+  });
+
+  test("is a no-op when the LLM returns valid JSON that doesn't match the expected shape", async () => {
+    const store = makeStore();
+    seedEvents(store, 5);
+    const callLLM = async () => JSON.stringify({ unexpected: "shape" });
+
+    const result = await runConsolidation(store, callLLM);
+
+    expect(result.aborted).toBe(true);
+    expect(store.allTerms()).toHaveLength(0);
+    expect(store.unconsolidatedEventCount()).toBe(5);
+  });
+});
+
+describe("rollbackRun", () => {
+  test("restores entity_terms to the pre-run snapshot and un-consolidates only that run's events", async () => {
+    const store = makeStore();
+    const firstIds = seedEvents(store, 3);
+
+    // First run: establishes a baseline entity.
+    await runConsolidation(store, async () =>
+      candidatesResponse([
+        {
+          canonicalTerm: "天润",
+          aliases: ["tianrun"],
+          category: "org",
+          confidence: 0.7,
+          supportingEventIds: [firstIds[0], firstIds[1]],
+        },
+      ])
+    );
+    const afterFirstRun = store.allTerms();
+    expect(afterFirstRun).toHaveLength(1);
+
+    const secondIds = seedEvents(store, 5);
+
+    // Second run: adds a second entity and touches the first entity's aliases.
+    const secondResult = await runConsolidation(store, async () =>
+      candidatesResponse([
+        {
+          canonicalTerm: "天润",
+          aliases: ["添润"],
+          category: "org",
+          confidence: 0.9,
+          supportingEventIds: [secondIds[0], secondIds[1]],
+        },
+        {
+          canonicalTerm: "New Project",
+          aliases: [],
+          category: "project",
+          confidence: 0.95,
+          supportingEventIds: [secondIds[2]],
+        },
+      ])
+    );
+    expect(secondResult.aborted).toBe(false);
+    expect(store.allTerms()).toHaveLength(2);
+    expect(secondResult.ranRunId).not.toBeNull();
+
+    rollbackRun(store, secondResult.ranRunId as number);
+
+    // entity_terms back to exactly the post-first-run state
+    const restored = store.allTerms();
+    expect(restored).toHaveLength(1);
+    expect(restored[0]?.aliases).toEqual(afterFirstRun[0]?.aliases);
+    expect(restored[0]?.confidence).toEqual(afterFirstRun[0]?.confidence);
+    expect(restored[0]?.id).toEqual(afterFirstRun[0]?.id);
+
+    // second run's events are un-consolidated again
+    const secondRows = store.db
+      .query(`SELECT id, consolidatedAt FROM episodic_events WHERE id IN (${secondIds.map(() => "?").join(",")})`)
+      .all(...secondIds) as Array<{ id: number; consolidatedAt: number | null }>;
+    expect(secondRows.every((r) => r.consolidatedAt === null)).toBe(true);
+
+    // first run's events remain consolidated
+    const firstRows = store.db
+      .query(`SELECT id, consolidatedAt FROM episodic_events WHERE id IN (${firstIds.map(() => "?").join(",")})`)
+      .all(...firstIds) as Array<{ id: number; consolidatedAt: number | null }>;
+    expect(firstRows.every((r) => r.consolidatedAt !== null)).toBe(true);
+
+    // the run row itself is marked rolled back
+    const runRow = store.db
+      .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+      .get(secondResult.ranRunId) as { rolledBackAt: number | null };
+    expect(runRow.rolledBackAt).not.toBeNull();
+  });
+});

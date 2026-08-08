@@ -1,0 +1,169 @@
+import { AGENT_SYSTEM_PROMPT } from "../oneshot/prompts";
+import type { McpToolSet } from "./mcpClient";
+
+/**
+ * Agent-loop message shape. Deliberately not reusing `OneShotChatFn` from
+ * `sidecar/src/oneshot/client.ts` (spec 3 §2 allows an equivalent instead) --
+ * that type's messages have no room for `tool_calls`/`tool_call_id`, which
+ * this loop needs for OpenAI-style tool-calling. Structurally identical to
+ * `DeepSeekMessage` in `sidecar/src/provider/deepseek.ts`, so
+ * `createDeepSeekClient(env).chat` satisfies `AgentChatFn` as-is.
+ */
+export interface AgentChatMessage {
+  role: string;
+  content: string | null;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface AgentChatResult {
+  content: string | null;
+  toolCalls?: unknown[];
+}
+
+export type AgentChatFn = (
+  messages: AgentChatMessage[],
+  options?: { tools?: unknown[] }
+) => Promise<AgentChatResult>;
+
+export type AgentProgressEvent =
+  | { type: "thinking"; detail: string }
+  | { type: "tool_call"; detail: string }
+  | { type: "tool_result"; detail: string }
+  | { type: "done"; detail: string }
+  | { type: "error"; detail: string };
+
+export interface RunAgentLoopInput {
+  task: string;
+  context?: string;
+  knownTerms?: string;
+}
+
+export interface RunAgentLoopDeps {
+  chat: AgentChatFn;
+  tools: McpToolSet;
+  onProgress?: (event: AgentProgressEvent) => void;
+}
+
+export interface RunAgentLoopResult {
+  result: string;
+  steps: AgentProgressEvent[];
+}
+
+/** Per spec 3 §3: "something in the 8-12 range"; 10 is this implementation's pick. */
+const MAX_ITERATIONS = 10;
+
+interface OpenAiToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+function isOpenAiToolCall(value: unknown): value is OpenAiToolCall {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<OpenAiToolCall>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.function === "object" &&
+    candidate.function !== null &&
+    typeof (candidate.function as { name?: unknown }).name === "string"
+  );
+}
+
+function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
+  const userContentParts = [`TASK:`, input.task];
+  if (input.context) {
+    userContentParts.push("", "CONTEXT:", input.context);
+  }
+  if (input.knownTerms) {
+    userContentParts.push("", input.knownTerms);
+  }
+
+  return [
+    { role: "system", content: AGENT_SYSTEM_PROMPT },
+    { role: "user", content: userContentParts.join("\n") },
+  ];
+}
+
+/**
+ * Runs the Agent-mode loop (spec 3 §3): build messages -> call the model with
+ * the connected MCP tools attached -> execute any requested tool calls ->
+ * loop back, until the model returns a plain final answer or the iteration
+ * cap is hit. A single blocking call for tonight -- `steps` is the full
+ * progress log, returned all at once at the end; `onProgress` is only a hook
+ * for a caller that wants to observe as it happens, not a stream.
+ */
+export async function runAgentLoop(
+  input: RunAgentLoopInput,
+  deps: RunAgentLoopDeps
+): Promise<RunAgentLoopResult> {
+  const { chat, tools, onProgress } = deps;
+  const messages = buildInitialMessages(input);
+  const steps: AgentProgressEvent[] = [];
+
+  function emit(event: AgentProgressEvent): void {
+    steps.push(event);
+    onProgress?.(event);
+  }
+
+  let lastContent: string | null = null;
+
+  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    emit({ type: "thinking", detail: `Thinking (step ${iteration + 1}/${MAX_ITERATIONS})...` });
+
+    const response = await chat(messages, { tools: tools.openAiTools });
+    lastContent = response.content ?? lastContent;
+
+    const toolCalls = (response.toolCalls ?? []).filter(isOpenAiToolCall);
+    if (toolCalls.length === 0) {
+      const result = response.content ?? "";
+      emit({ type: "done", detail: result });
+      return { result, steps };
+    }
+
+    messages.push({
+      role: "assistant",
+      content: response.content ?? null,
+      tool_calls: response.toolCalls,
+    });
+
+    for (const toolCall of toolCalls) {
+      emit({
+        type: "tool_call",
+        detail: `Calling ${toolCall.function.name}(${toolCall.function.arguments})`,
+      });
+
+      let toolResultContent: string;
+      try {
+        const parsedArgs = toolCall.function.arguments
+          ? JSON.parse(toolCall.function.arguments)
+          : {};
+        const toolResult = await tools.callTool(toolCall.function.name, parsedArgs);
+        toolResultContent = toolResult.content;
+        emit({ type: "tool_result", detail: toolResultContent });
+      } catch (err) {
+        toolResultContent = `Error calling tool ${toolCall.function.name}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        emit({ type: "error", detail: toolResultContent });
+      }
+
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        name: toolCall.function.name,
+        content: toolResultContent,
+      });
+    }
+  }
+
+  const cappedResult =
+    lastContent && lastContent.length > 0
+      ? lastContent
+      : "The agent ran out of steps before reaching a final answer.";
+  emit({ type: "error", detail: "Hit the iteration cap without a final answer." });
+  return { result: cappedResult, steps };
+}

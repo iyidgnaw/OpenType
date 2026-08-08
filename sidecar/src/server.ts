@@ -1,14 +1,22 @@
 import { unlinkSync, existsSync } from "node:fs";
+import { buildAgentRoutes } from "./agent/routes";
+import type { AgentChatFn } from "./agent/loop";
+import { connectConfiguredMcpServers, type McpToolSet } from "./agent/mcpClient";
 import { loadEnv } from "./env";
 import { openDatabase } from "./memory/db";
 import { MemoryStore } from "./memory/MemoryStore";
 import { buildMemoryRoutes } from "./memory/routes";
-import type { OneShotChatFn } from "./oneshot/client";
 import { buildOneShotRoutes } from "./oneshot/routes";
 import { createDeepSeekClient } from "./provider/deepseek";
 import { createRouter } from "./router";
 
-export function buildApp(store: MemoryStore, chat: OneShotChatFn) {
+/**
+ * `chat` is typed `AgentChatFn` (rather than the narrower `OneShotChatFn`)
+ * because it's shared with `/agent/run`, which needs the tool-calling
+ * message shape; `AgentChatFn` is structurally compatible with
+ * `OneShotChatFn`, so it still satisfies `buildOneShotRoutes` unchanged.
+ */
+export function buildApp(store: MemoryStore, chat: AgentChatFn, tools: McpToolSet) {
   return createRouter([
     {
       method: "GET",
@@ -17,14 +25,16 @@ export function buildApp(store: MemoryStore, chat: OneShotChatFn) {
     },
     ...buildOneShotRoutes(store, chat),
     ...buildMemoryRoutes(store),
+    ...buildAgentRoutes(store, chat, tools),
   ]);
 }
 
-function main() {
+async function main() {
   const env = loadEnv();
   const store = new MemoryStore(openDatabase(env.dbPath));
   const deepSeekClient = createDeepSeekClient(env);
-  const fetch = buildApp(store, deepSeekClient.chat);
+  const tools = await connectConfiguredMcpServers(process.env.OPENTYPE_MCP_SERVERS);
+  const fetch = buildApp(store, deepSeekClient.chat, tools);
 
   if (existsSync(env.socketPath)) {
     unlinkSync(env.socketPath);

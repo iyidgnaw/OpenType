@@ -1,8 +1,19 @@
 import type { SidecarEnv } from "../env";
 
+/**
+ * `tool_calls`/`tool_call_id`/`name` support the agent loop's OpenAI-style
+ * tool-calling messages (an assistant message requesting tool calls has
+ * `content: null` and a `tool_calls` array; a `role: "tool"` message reports
+ * one tool's result back via `tool_call_id`) -- an extension of the existing
+ * shape, not a redesign; every field beyond role/content stays optional so
+ * existing plain chat messages are unaffected.
+ */
 export interface DeepSeekMessage {
   role: string;
-  content: string;
+  content: string | null;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  name?: string;
 }
 
 export interface DeepSeekChatOptions {

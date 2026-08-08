@@ -82,4 +82,41 @@ network. `tsc --noEmit` still blocked on `sidecar/node_modules` not being
 populated yet (`bun install` still running in the background as of this
 entry, fetching `@modelcontextprotocol/sdk` for the B2 task).
 
+## Decision 5: Swift UI wiring scoped down to "lifecycle + one working end-to-end mode" first
+
+Full scope (new mode-surface entries for Polish/Translate/X Reply/Ask
+Anything, a Task List panel for B2, a Memory review/rollback panel for C)
+is too much for one remaining pass before B2 exists at all. Prioritizing:
+(1) AppModel starts/stops `SidecarClient` with the app lifecycle, (2) one
+new mode — Ask Anything — wired end-to-end through the real B1 endpoint,
+proving the whole redesigned pipeline (hotkey -> dictate -> sidecar ->
+result -> clipboard/insert) actually works for a real user, not just in
+isolated tests. Polish/Translate/X Reply UI entries, the Task List panel,
+and the Memory panel are follow-up passes once B2 exists and there's a
+concrete need to show its progress.
+
+## B1 endpoints (task 9)
+
+Reviewed and committed: `sidecar/src/oneshot/{prompts,fidelity,memoryContext,routes,client}.ts`.
+Ported `EnglishOutputPolicy`/`SpeechActGuard` fidelity checks faithfully
+from Swift rather than re-deriving them, and correctly caught/fixed a
+direction mismatch in `MemoryStore.search()` (built for near-exact
+lookup, not "which known terms appear in this sentence"). 58/58 tests
+passing, all four endpoints smoke-tested against the real DeepSeek API.
+
+## Packaging (task 12)
+
+Reviewed and committed: `scripts/build-app.sh` now compiles the sidecar
+to a standalone binary and bundles it into `Contents/Resources`. Verified
+`codesign --verify --deep --strict` passes and the bundled binary runs
+standalone. ~57MB added to the app bundle from the embedded Bun runtime —
+acceptable for a local MVP, worth revisiting for real distribution.
+
+`bun install` for `@modelcontextprotocol/sdk` (needed for B2) stalled
+twice under a naive timeout-based background check — turned out to be
+genuinely slow (resolving a large transitive dependency tree one HTTP
+request at a time against the npm registry, not actually hung); killing
+it early both times was the wrong call. Third attempt left running to
+completion under a real wait-loop instead of a fixed timeout.
+
 <!-- Further entries appended chronologically below as autonomous calls are made. -->

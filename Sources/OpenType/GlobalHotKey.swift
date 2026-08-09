@@ -195,6 +195,10 @@ final class GlobalHotKey {
         }
 
         if type == .keyDown {
+            if keyCode == Int64(kVK_Tab),
+               heldModeSwitchKeyCodes.contains(Int64(kVK_Option)) {
+                return handleModeSwitchTabKeyDown(event)
+            }
             if isActiveChordEvent(keyCode: keyCode, flags: event.flags) {
                 return Unmanaged.passUnretained(event)
             }
@@ -316,6 +320,32 @@ final class GlobalHotKey {
 
     private func cancelPendingLongPresses() {
         pendingLongPressTokens = [:]
+    }
+
+    /// Tab, alongside the existing Shift chord (`handleModeSwitchFlagsChanged`
+    /// below), while the recording modifier (left Option) is held: cycles the
+    /// mode. Unlike Shift, Tab is a regular key, not a modifier, so it comes
+    /// through as `.keyDown` (with OS auto-repeat if held) rather than a
+    /// single `.flagsChanged` — this always swallows the event (never lets
+    /// Tab reach the focused app while Option is down, since a stray
+    /// tab-navigation in the background app while the user means to switch
+    /// modes would be a worse outcome than a consumed keystroke) but only
+    /// fires `onCycleMode` once per physical press, skipping repeats.
+    private func handleModeSwitchTabKeyDown(
+        _ event: CGEvent
+    ) -> Unmanaged<CGEvent>? {
+        modifierChordWasUsed = true
+        cancelPendingLongPresses()
+        resetModifierTapSequence()
+        suppressedKeyCodes.insert(Int64(kVK_Tab))
+
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        if !isRepeat {
+            DispatchQueue.main.async { [weak self] in
+                self?.onCycleMode?()
+            }
+        }
+        return nil
     }
 
     private func handleModeSwitchFlagsChanged(_ keyCode: Int64) {

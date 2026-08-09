@@ -108,7 +108,8 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         statusItem = item
         updateStatusIcon(
             for: model.state,
-            colorTheme: model.configuration.colorTheme
+            colorTheme: model.configuration.colorTheme,
+            mode: model.configuration.selectedMode
         )
     }
 
@@ -116,11 +117,13 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     /// switcher (`MenuBarPopoverView`), not the full-featured `RootView` it
     /// used to host. Settings/History/Memory/Agent history all moved to
     /// `mainWindowController`'s real window instead, opened from this view's
-    /// gear button.
+    /// gear button. Widened/heightened from the original 264x246 (see
+    /// `MenuBarPopoverView`'s own sizing note) so the now vertically-stacked
+    /// mode cards have room and don't wrap their subtitle text.
     private func configurePopover() {
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 264, height: 246)
+        popover.contentSize = NSSize(width: 320, height: 340)
         popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView(model: model) { [weak self] in
@@ -137,17 +140,19 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     }
 
     private func observeStatusPresentation() {
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest4(
             model.$state.removeDuplicates(),
             model.configuration.$colorTheme.removeDuplicates(),
-            model.$runningAgentRunCount.removeDuplicates()
+            model.$runningAgentRunCount.removeDuplicates(),
+            model.configuration.$selectedMode.removeDuplicates()
         )
             .receive(on: RunLoop.main)
-            .sink { [weak self] state, colorTheme, runningAgentCount in
+            .sink { [weak self] state, colorTheme, runningAgentCount, mode in
                 self?.updateStatusIcon(
                     for: state,
                     colorTheme: colorTheme,
-                    runningAgentCount: runningAgentCount
+                    runningAgentCount: runningAgentCount,
+                    mode: mode
                 )
             }
             .store(in: &cancellables)
@@ -156,13 +161,15 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     private func updateStatusIcon(
         for state: ProcessingState,
         colorTheme: AppColorTheme,
-        runningAgentCount: Int = 0
+        runningAgentCount: Int = 0,
+        mode: InputMode
     ) {
         guard let button = statusItem?.button else { return }
         button.image = MenuBarStatusIcon.image(
             for: state,
             colorTheme: colorTheme,
-            runningAgentCount: runningAgentCount
+            runningAgentCount: runningAgentCount,
+            mode: mode
         )
     }
 
@@ -227,10 +234,20 @@ final class MainWindowController: NSWindowController {
 }
 
 enum MenuBarStatusIcon {
+    /// Per the product owner: the menu bar icon itself should say which mode
+    /// is active, glanceable without opening the popover — not just a
+    /// generic "OpenType is here" mark. One SF Symbol per mode, matching
+    /// `InputMode.symbol` (`Models.swift`) so the glyph here and the glyph on
+    /// that mode's card in the popover are always the same shape.
+    private static func glyphName(for mode: InputMode) -> String {
+        mode.symbol
+    }
+
     static func image(
         for state: ProcessingState,
         colorTheme: AppColorTheme = .ocean,
-        runningAgentCount: Int = 0
+        runningAgentCount: Int = 0,
+        mode: InputMode = .transcribe
     ) -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let pixelWidth = 36
@@ -253,7 +270,7 @@ enum MenuBarStatusIcon {
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
         context.imageInterpolation = .high
-        drawPixels(for: state, colorTheme: colorTheme)
+        drawPixels(for: state, colorTheme: colorTheme, mode: mode)
         if runningAgentCount > 0 {
             drawRunningAgentBadge(count: runningAgentCount)
         }
@@ -264,13 +281,17 @@ enum MenuBarStatusIcon {
         let image = NSImage(size: size)
         image.addRepresentation(representation)
         image.isTemplate = false
-        image.accessibilityDescription = "OpenType"
+        image.accessibilityDescription = OpenTypeL10n.text(
+            "OpenType — \(mode.title)",
+            english: "OpenType — \(mode.title)"
+        )
         return image
     }
 
     private static func drawPixels(
         for state: ProcessingState,
-        colorTheme: AppColorTheme
+        colorTheme: AppColorTheme,
+        mode: InputMode
     ) {
         let rect = NSRect(x: 0, y: 0, width: 36, height: 36)
         backgroundColor(for: state, colorTheme: colorTheme).setFill()
@@ -280,28 +301,36 @@ enum MenuBarStatusIcon {
             yRadius: 10
         ).fill()
 
-        NSColor.white.setFill()
-        let heights: [CGFloat] = [12, 22, 30, 20, 12]
-        let barWidth: CGFloat = 3
-        let gap: CGFloat = 2.8
-        let totalWidth = CGFloat(heights.count) * barWidth
-            + CGFloat(heights.count - 1) * gap
-        let startX = rect.midX - totalWidth / 2
+        drawModeGlyph(mode, in: rect)
+    }
 
-        for (index, height) in heights.enumerated() {
-            let x = startX + CGFloat(index) * (barWidth + gap)
-            let bar = NSRect(
-                x: x,
-                y: rect.midY - height / 2,
-                width: barWidth,
-                height: height
-            )
-            NSBezierPath(
-                roundedRect: bar,
-                xRadius: barWidth / 2,
-                yRadius: barWidth / 2
-            ).fill()
+    /// Renders `mode`'s SF Symbol in white, centered in `rect`. SF Symbols
+    /// draw as multicolor/hierarchical by default; `.paletteColors([.white])`
+    /// forces a flat white render so it reads clearly against the colored
+    /// background regardless of which symbol a given mode uses.
+    private static func drawModeGlyph(_ mode: InputMode, in rect: NSRect) {
+        let configuration = NSImage.SymbolConfiguration(
+            pointSize: 16,
+            weight: .semibold
+        ).applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
+
+        guard
+            let symbol = NSImage(
+                systemSymbolName: glyphName(for: mode),
+                accessibilityDescription: nil
+            )?.withSymbolConfiguration(configuration)
+        else {
+            return
         }
+
+        let symbolSize = symbol.size
+        let drawRect = NSRect(
+            x: rect.midX - symbolSize.width / 2,
+            y: rect.midY - symbolSize.height / 2,
+            width: symbolSize.width,
+            height: symbolSize.height
+        )
+        symbol.draw(in: drawRect)
     }
 
     /// Lightweight "N Agent tasks running" indicator (Part B, requirement 3):

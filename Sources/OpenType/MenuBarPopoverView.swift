@@ -22,14 +22,18 @@ struct MenuBarPopoverView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             header
             ModeGrid(model: model, configuration: configuration)
             Divider()
             statusArea
         }
-        .padding(14)
-        .frame(width: 264, height: 246)
+        .padding(16)
+        // Widened from the original 264pt and given room to grow vertically:
+        // at 264pt wide, 3-mode subtitles like "提出问题 · 弹窗直接回答" wrapped
+        // across 2-3 lines and clipped. `configurePopover()` in
+        // `OpenTypeApp.swift` sets the matching `NSPopover.contentSize`.
+        .frame(width: 320)
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(configuration.colorTheme.accent)
         .environment(\.locale, configuration.interfaceLanguage.locale)
@@ -67,15 +71,30 @@ struct MenuBarPopoverView: View {
     }
 
     private var statusArea: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 5) {
             Label(model.shortcutStatus, systemImage: "keyboard")
-                .font(.system(size: 9))
+                .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Previously undiscoverable: the mode-cycle chord (hold the
+            // recording modifier, tap Shift or Tab) already existed in
+            // GlobalHotKey.swift but nothing in the UI ever mentioned it.
+            Label(
+                OpenTypeL10n.text(
+                    "按住时点 Shift 或 Tab 切换模式",
+                    english: "While holding, tap Shift or Tab to switch modes"
+                ),
+                systemImage: "arrow.triangle.2.circlepath"
+            )
+            .font(.system(size: 10.5))
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+
             Label(model.sidecarStatus, systemImage: "bolt.horizontal.circle")
-                .font(.system(size: 9))
+                .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
@@ -87,7 +106,7 @@ struct MenuBarPopoverView: View {
                     ),
                     systemImage: "gearshape.2.fill"
                 )
-                .font(.system(size: 9, weight: .medium))
+                .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(Color.accentColor)
                 .lineLimit(1)
             }

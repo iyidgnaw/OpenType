@@ -301,20 +301,20 @@ private struct ShortcutHero: View {
     }
 }
 
+/// A vertical stack of equal-width rows, not a grid: with only 3 modes left
+/// (post-cleanup), a 2-then-1 grid squeezed the first two cards into half
+/// width each, which wrapped their subtitles into 2-3 lines and clipped the
+/// last one. Equal full-width rows give every mode the same room regardless
+/// of how long its title/subtitle text is.
 struct ModeGrid: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
 
     var body: some View {
-        Grid(horizontalSpacing: 8, verticalSpacing: 8) {
-            GridRow {
-                modeCard(.transcribe)
-                modeCard(.ask)
-            }
-            GridRow {
-                modeCard(.agent)
-                    .gridCellColumns(2)
-            }
+        VStack(spacing: 8) {
+            modeCard(.transcribe)
+            modeCard(.ask)
+            modeCard(.agent)
         }
     }
 
@@ -335,29 +335,31 @@ private struct ModeCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 9) {
+            HStack(spacing: 12) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(
                             isSelected
                                 ? Color.accentColor.opacity(0.14)
                                 : Color.primary.opacity(0.045)
                         )
                     Image(systemName: mode.symbol)
-                        .font(.system(size: 12.5, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(
                             isSelected ? Color.accentColor : Color.secondary
                         )
                 }
-                .frame(width: 30, height: 30)
+                .frame(width: 34, height: 34)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(mode.title)
-                        .font(.system(size: 11.5, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.primary)
                     Text(mode.shortTitle)
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 0)
@@ -368,8 +370,8 @@ private struct ModeCard: View {
                         .frame(width: 6, height: 6)
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, minHeight: 52)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 56)
             .contentShape(Rectangle())
             .openTypeSurface(cornerRadius: 13, selected: isSelected)
         }

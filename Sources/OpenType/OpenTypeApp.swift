@@ -28,6 +28,12 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     /// doesn't lose SwiftUI state like scroll position or an in-progress
     /// Settings edit.
     private var mainWindowController: MainWindowController?
+    /// When the status item was last clicked. Clicking it activates the app as
+    /// a side effect of showing the popover, and that activation must not be
+    /// mistaken for a Dock-icon click / Cmd-Tab (see `handleReactivation`).
+    /// A timestamp rather than a flag so it can never get stuck set: if the
+    /// activation notification never arrives, the window simply expires.
+    private var lastStatusItemClick: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -51,19 +57,50 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        // macOS 26 does not consistently call applicationShouldHandleReopen
-        // for LSUIElement apps. Reopening OpenType does make it active, so this
-        // is the reliable path for presenting its only user-facing window.
         guard didFinishLaunching else { return }
-        showPopover()
+        handleReactivation()
     }
 
     func applicationShouldHandleReopen(
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        showPopover()
+        handleReactivation()
         return true
+    }
+
+    /// Single entry point for "the user brought OpenType to the front".
+    ///
+    /// macOS 26 does not consistently call `applicationShouldHandleReopen` for
+    /// LSUIElement apps, so `applicationDidBecomeActive` has to stay a fallback
+    /// path here — but it fires for *every* activation, including the one the
+    /// status item triggers itself, so it can't blindly present a surface.
+    /// The three cases that reach this:
+    ///
+    /// 1. Status item click — the popover is already being shown by
+    ///    `togglePopover`; do nothing else, and above all never surface the
+    ///    main window.
+    /// 2. Dock icon click / Cmd-Tab / notification click while the main window
+    ///    is open — behave like a normal app: bring that window forward, no
+    ///    popover.
+    /// 3. Reopen with no main window (the app is accessory-only) — the popover
+    ///    is the only user-facing surface, so show it.
+    private func handleReactivation() {
+        if let clickedAt = lastStatusItemClick,
+           Date().timeIntervalSince(clickedAt) < 1.0 {
+            return
+        }
+
+        if let window = mainWindowController?.window,
+           window.isVisible || window.isMiniaturized {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        showPopover()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(
@@ -133,9 +170,28 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         )
     }
 
+    /// Opening the real window promotes OpenType to a regular app for as long
+    /// as that window is up, so it gets a Dock icon and is reachable via
+    /// Cmd-Tab like anything else with a window. `windowWillClose` demotes it
+    /// back to `.accessory` (menu-bar-only, no Dock icon).
     private func showMainWindow() {
-        let controller = mainWindowController ?? MainWindowController(model: model)
-        mainWindowController = controller
+        let controller: MainWindowController
+        if let existing = mainWindowController {
+            controller = existing
+        } else {
+            controller = MainWindowController(model: model)
+            controller.onWindowWillClose = {
+                // Deferred: the window is still on screen during
+                // `windowWillClose`, and flipping the policy mid-close can
+                // leave a stale Dock icon behind.
+                DispatchQueue.main.async {
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
+            mainWindowController = controller
+        }
+
+        NSApp.setActivationPolicy(.regular)
         controller.show()
     }
 
@@ -174,6 +230,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     }
 
     @objc private func togglePopover() {
+        lastStatusItemClick = Date()
         if popover.isShown {
             popover.performClose(nil)
         } else {
@@ -201,10 +258,13 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 /// titled window with standard close/miniaturize/resize chrome, since it
 /// hosts content (Settings, History, Memory panel, Agent Task List) the user
 /// is meant to sit in front of and interact with at length, not glance at
-/// and dismiss. OpenType stays an accessory app (no Dock icon) throughout;
-/// showing this window doesn't change that.
+/// and dismiss. While it's open OpenType runs as a regular (Dock-icon,
+/// Cmd-Tab-able) app — see `OpenTypeAppDelegate.showMainWindow` — and drops
+/// back to accessory-only when it closes, via `onWindowWillClose`.
 @MainActor
-final class MainWindowController: NSWindowController {
+final class MainWindowController: NSWindowController, NSWindowDelegate {
+    var onWindowWillClose: (() -> Void)?
+
     init(model: AppModel) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
@@ -220,6 +280,7 @@ final class MainWindowController: NSWindowController {
             rootView: RootView(model: model)
         )
         super.init(window: window)
+        window.delegate = self
     }
 
     @available(*, unavailable)
@@ -230,6 +291,10 @@ final class MainWindowController: NSWindowController {
     func show() {
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onWindowWillClose?()
     }
 }
 

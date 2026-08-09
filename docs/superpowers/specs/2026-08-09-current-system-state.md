@@ -80,6 +80,11 @@ These do **not** share storage and should not be confused:
 
 There is no cloud-provider setup step anywhere in this UI. The old "Setup" checklist used to gate readiness on a connected cloud provider (a DashScope API key); that gate and its Settings "Provider Vault" token-entry UI were dead — the pipeline hasn't used a user-configured cloud provider since ASR/text-generation moved to the sidecar — and were removed in this cleanup pass, along with the underlying `AIServiceClient`/`AIProvider`/`ProviderVault`/`CredentialProvider` Swift types (see git history around this doc's date for the diff). Setup readiness is now just microphone + Accessibility + (optionally) Speech Recognition permissions, plus the global hotkey registering successfully.
 
+Two presentation bugs in this split were fixed after the doc's first pass:
+
+- **`.dispatched` overlay never auto-hid.** `OverlayController.show(state:mode:)`'s dismiss switch had no `.dispatched` case, so the "已下发给 Agent" toast fell through to `default: break` and stayed on screen until the next overlay replaced it. Now dismissed after 1.6s — longer than the 0.9s `.success`/`.copied` case because it carries a second line of copy.
+- **No Dock icon / Cmd-Tab, and activation could surface the wrong surface.** The app pinned `.accessory` for its whole lifetime and `applicationDidBecomeActive` unconditionally called `showPopover()`. Opening the main window now switches to `.regular` (Dock icon, Cmd-Tab-able) and `MainWindowController`'s new `NSWindowDelegate` reverts to `.accessory` on close. Activation is funnelled through one `handleReactivation()`: a status-item click (timestamped in `togglePopover`) only ever shows the popover, a Dock/Cmd-Tab activation with the main window open just brings that window forward, and only an accessory-mode reopen shows the popover — which keeps the macOS 26 `applicationShouldHandleReopen` workaround intact.
+
 ## 8. Known gaps / explicitly deferred
 
 Carried forward from the overnight build log and design specs, still true as of this doc:

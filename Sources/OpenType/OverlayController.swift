@@ -46,6 +46,11 @@ final class OverlayController {
             dismiss(after: 1.2)
         case .success, .copied:
             dismiss(after: 0.9)
+        case .dispatched:
+            // Informational, not an error, but carries a second line of copy
+            // ("已下发给 Agent") the user has to actually read, so it needs
+            // longer on screen than a bare success toast.
+            dismiss(after: 1.6)
         case .cancelled:
             dismiss(after: 1.8)
         case .failure:

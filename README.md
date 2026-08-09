@@ -1,14 +1,16 @@
 # OpenType
 
-OpenType 是一个本地优先的跨平台 AI 语音输入工具，把自然口语变成可以直接使用的文字。macOS、iOS 与 Android 共享同一套模式、Prompt 安全规则、Provider 语义和审计协议，并针对各系统采用真实可用的输入机制。
+OpenType 是一个本地优先的跨平台 AI 语音输入工具，把自然口语变成可以直接使用的文字。三端最初的设计目标是共享同一套模式、Prompt 安全规则、Provider 语义和审计协议，但 macOS 端最近经历了一次从零重写（详见下文），iOS/Android 仍是重写前的旧版设计，目前三端**并不同步** —— 具体差异见根目录 [CLAUDE.md](CLAUDE.md) 里的说明。
 
-macOS 的完整使用情景、操作方式和功能边界见 [OpenType 使用说明书](USER_GUIDE.md)。
+macOS 的完整使用情景、操作方式和功能边界见 [OpenType 使用说明书](USER_GUIDE.md)（该文档同样待更新，与本 README 的 macOS 章节一样以本 README 和 `CLAUDE.md` 为准）。
+
+**新用户想在自己电脑上安装 macOS 版？** 仓库目前是私有的、还没有打包发行版，安装方式是 clone 仓库后本地编译。与其手动照抄命令，可以把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 直接发给你自己的 coding agent（Claude Code、Codex 等），让它帮你把 clone、依赖安装、本地 Whisper 环境搭建、编译、首次授权和应用内设置引导全部走一遍。
 
 ## 三端工程
 
 | 平台 | 主要交付方式 | 当前验证 | 工程与说明 |
 | --- | --- | --- | --- |
-| macOS | 全局快捷键录音，Accessibility 写入当前输入框，剪贴板兜底 | 91 项常规测试通过；真实 DashScope 中转英集成测试通过；production app 已构建并通过签名校验 | `Sources/OpenType`、[macOS 使用说明](USER_GUIDE.md) |
+| macOS | 全局快捷键录音，Swift 应用 + 本地 TypeScript/Bun sidecar 子进程，Accessibility 写入当前输入框，剪贴板兜底 | Swift 单测与 sidecar 单测均全绿；production app（ad-hoc 签名，非 Developer ID 公证）已本地构建并真实运行验证 | `Sources/OpenType`、`sidecar/`、[macOS 使用说明](USER_GUIDE.md)、[当前系统状态](docs/superpowers/specs/2026-08-09-current-system-state.md) |
 | iOS | 宿主 App 录音处理，通过 App Group 同步；Keyboard Extension 一键插入最近结果 | 中转英专用请求源码已编译与链接；当前 Simulator 包验证受本机 runtime 限制 | `Platforms/iOS`、[iOS README](Platforms/iOS/README.md) |
 | Android | `InputMethodService` 内按住说话，`SpeechRecognizer` 转写，`InputConnection.commitText` 写入 | 中转英专用请求与回归用例已写入；本轮机器缺少 Java Runtime，未执行 JVM 测试 | `Platforms/Android`、[Android README](Platforms/Android/README.md) |
 
@@ -18,63 +20,28 @@ iOS 的自定义键盘受 Apple 系统限制，不能直接访问麦克风，因
 
 ## 当前交付状态（2026-08-08）
 
-- macOS：本机运行版本为 `dist/OpenType.app` v0.14.4 build 35；上一份便携归档为 `dist/OpenType-macOS-arm64-v0.14.3-build34.zip`。当前是 ad-hoc 本地签名版本，不是 Developer ID 公证发行包。
+- macOS：经历过一次从零重写（旧的 5/6 模式系统已删除，改为下方的 3 模式设计），本机通过 `./scripts/build-app.sh` 构建为 `dist/OpenType.app`。当前是 ad-hoc 本地签名版本，不是 Developer ID 公证发行包，也还没有对外发行的 Release —— 目前只能 clone 仓库本地编译，见上方的新用户安装入口。
 - iOS：宿主 App、Keyboard Extension 和测试 target 均已完成无签名编译，源码包为 `dist/OpenType-iOS-source-v0.1.0.zip`。安装到真机前仍需选择用户自己的 Apple Development Team，并注册两个 target 共用的 App Group；当前没有可分发 IPA。
 - Android：完整源码包为 `dist/OpenType-Android-source-v0.1.0.zip`，可安装的本地验收包为 `dist/OpenType-Android-debug-v0.1.0.apk`。22 项 JVM 单元测试、Debug 构建、Android Lint、APK v2 Debug 签名和压缩完整性均已通过；它仍不是 Play Store 正式签名包，也尚未完成目标手机上的 IME、麦克风、Keystore 与 Provider 联调。
 
 ## macOS 当前功能
 
-- 默认快捷键：左 `Option` 长按说话、松开完成；双击开始连续录音，再按任意普通键结束。右 `Option` 保持空闲
-- 原生菜单栏入口：始终显示状态图标；再次打开 OpenType 会直接展开窗口，不再出现进程已运行但入口不可见的情况
-- 模式切换：`左 Option + Shift` 循环切换五种模式，并在屏幕底部显示当前模式
-- 可定制全局快捷键：左 `Option`、双击 `Ctrl` / `Option` / `Shift`，或选择 `⌃⇧ Space`、`⌥ Space`、`⌃ Space`、`⌃⌥ Space`
-- 双击键和组合键在辅助功能授权后均可按任意普通键结束；结束键会被拦截，不会输入到文本框
-- 没有辅助功能权限时自动回退到不占用单独 Option 的 `⌃⇧ Space` 按住说话
-- 五种模式：智能编辑、中转英、Agent 模式、X Reply、文字转写
-- 中转英：用中文或中英混合口述，直接生成地道英文；在 DashScope 下固定走 Qwen-MT 专用翻译协议，原话是待翻译数据，不作为聊天指令，不读取 System Prompt
-- 中转英结果校验：默认使用 `qwen-mt-flash`；若校验发现问句语气、请求动作或英文输出不完整，仅用 `qwen-mt-plus` 专用翻译再试一次；全程不回退到聊天 Prompt，仍不符合则拒绝写入错误结果
-- 智能编辑自动判断：没有选中文字时整理口述；有选中文字时把口述当作修改指令
-- 智能编辑非对话保护：没有选中文字时，问句保持为问句、请求保持为请求，不再把你的口述当场回答或执行
-- 选中文字后必须说出明确指令才会处理；沉默、语气词或普通补充内容会显示“未执行”，不修改原文、不生成新历史
-- Agent 模式：把“帮我写一条推文 / 一封邮件 / 三个标题”等语音任务直接变成可用成品，并延续最近任务的上下文
-- SQLite 本地长期记忆：为所有正式文字任务追加保存原始转写、实际指令、选中上下文、结果、模式、应用与时间；不保存原始音频
-- “关于我”确认资料：手动填写职业与工作、默认语言、表达偏好、重要术语和正确拼写；系统永远不会自动改写这些字段
-- “已学到的偏好”：每 100 条任务在本机固化一次常用术语、工作领域、语言组合与表达偏好；与“关于我”分层保存，只作低权重参考
-- 个性化优先级：当前明确指令 > 当前模式 > 当前应用与来源 > “关于我” > “已学到的偏好” > 默认规则
-- Agent 模式仍会按上下文预算注入最多 12 条最近任务；其他文字模式只读取当前任务需要的术语和非语言风格偏好
-- 长期记忆可在设置中关闭、查看数据库位置和最近 Agent 任务；“重新学习偏好”收起在“隐私与数据”的二级入口中，并要求二次确认
-- Agent 模式只生成草稿，永远不会自动回车、发布或对外执行；结果自动写入并保留在剪贴板
-- 独立 Prompt Studio：为四种可见 AI 模式修改行为 Prompt；智能编辑内部分为“口述整理”和“选中修改”两个 Prompt
-- 完整 Prompt 预览：同时查看固定安全规则、模式 Prompt、当前应用、个人词典与动态上下文如何组合
-- 文字转写做最低限度整理：去掉无意义口癖、明显重复和确定的改口，补基础标点，同时保留原句、顺序、语气和细节
-- 文字转写支持中英文夹杂：不把整段统一翻译成一种语言，保留英文产品名、技术词、缩写、大小写和自然空格
-- 转写语言设置：默认自动识别混合语言，也可指定中文、粤语、英语、日语、韩语及二十多种主流语言；设置会转换为当前语音服务对应的语言参数
-- 文字转写拥有独立可编辑 Prompt，可自行调整轻度清理的边界
-- 自动清除口头禅、重复和中途改口
-- 自动标点、分段、列表格式
-- 中文口述、地道英文输出
-- 读取选中文字作为 X Reply 或语音编辑的上下文
-- 根据当前应用调整语气
-- 个人词典
-- 本地历史、复制与重新使用；重置入口仅在设置的二级数据管理中提供
-- “发送/按回车”语音命令（默认关闭）
-- Provider Vault：在设置中添加、更新或移除阿里云百炼、豆包/火山方舟、OpenAI、Claude 与 ElevenLabs Token
-- 语音识别与文字生成独立选择供应商和模型：阿里支持两者，OpenAI 支持两者，ElevenLabs 用于语音，Claude 与豆包用于文字
-- API Key 保存在本机 AES-GCM 加密的 Provider Vault，不写入项目、偏好设置、日志或历史，也不会在保存后回显
-- 首次使用清单：云端、麦克风、辅助功能逐项确认
-- 应用内语音试用：无需切到其他输入框即可验证完整链路
-- X Reply 录音前检查选中文字；智能编辑会在录音开始时自动锁定有无选区
-- X Reply 生成后始终复制到剪贴板，由用户在回复框中按 `⌘V` 粘贴
-- 智能编辑的选中修改分支完成后仍会把结果保留在剪贴板，自动替换与手动粘贴可以同时使用
-- 所有模式的最终结果都会保留在剪贴板；自动写入成功后仍可随时按 `⌘V` 再次粘贴
-- X Reply 支持无口述自动回复：选中推文后保持安静结束录音，自动寻找值得加入讨论的新角度
-- 每次录音锁定开始时的模式，处理中切换不会改变本次结果
-- 自动写入失败时保住结果并复制到剪贴板
-- 原创 OpenType Air 音效系统：麦克风就绪、结束录音、完成写入和出现问题分别使用短促、低响度的独立提示音，可在设置中试听或完全关闭
-- 录音浮层实时字幕：说话时持续显示临时识别文字，配合真实音量驱动的动态声波和呼吸光
-- 实时字幕仅用于预览，松开后仍由所选语音服务重新完成最终高质量识别；可在设置中关闭
-- 面向用户的错误提示，不再直接展示云端技术报错
-- 一键多意图：以“英文：…”“Agent 模式：…”或“X 回复：…”开头，本次自动切换模式；旧的“命令输入：…”口令继续兼容
+macOS 端经历过一次从零重写：旧的 5/6 模式系统已整体删除，现在是精确的 3 模式设计，且语音识别与文本生成都交给一个本地 TypeScript/Bun 子进程（`sidecar/`）处理，Swift 侧只负责录音、快捷键、Accessibility 读写和本地历史/审计。完整技术细节见 [`docs/superpowers/specs/2026-08-09-current-system-state.md`](docs/superpowers/specs/2026-08-09-current-system-state.md)。
+
+- **3 种模式**：`transcribe`（纯转写，不经过任何 LLM）、`ask`（提问，浮窗直接给出答案）、`agent`（语音下发任务，非阻塞地交给可调用工具的 Agent Runtime 执行，结果只生成草稿，永远不会自动回车/发布/执行）
+- 模式切换：菜单栏 popover 里的模式选择器、循环快捷键，或录音中途说出“agent 模式”之类的口令自动切换本次模式
+- 转写模式有 **Direct** 和 **Review** 两种：Direct 直接写入；Review 会先把识别结果暂存在一个可编辑浮窗里，可以直接打字修改，也可以选中一段文字后再次按快捷键说出纠正指令（比如选中被识别错的词，说“这个不对，应该是英文 PayPal”），由 LLM 只替换选中的这一段；确认后按 `⌘↩` 才真正写入，随时可以 `Esc` 取消
+- 语音识别（Whisper）可配置本地或远程：本地默认用 MLX-Whisper（Apple Silicon 专用，完全离线）；远程走 OpenAI 音频转写协议，可填自定义 URL 接兼容服务。设置里可以随时切换，并且有 Test Connection
+- LLM Provider 可配置，支持 Anthropic（Messages API）和 OpenAI 兼容协议（覆盖 DeepSeek、OpenAI 本身及自建兼容服务）：填入 URL 和 API Key 后可 Test Connection，成功后拉取模型列表供选择，而不是盲填模型名
+- **首次启动设置引导**：如果语音识别和 LLM 都还没配置过，打开主窗口会自动进入设置向导，走完上面两步才会进入正常界面；之后随时可以在设置里重新配置
+- **Q&A 和 Agent 各有独立 tab**：可以打开某一次问答/任务的历史会话，再次用同一模式说话即视为对该会话的追问/续接，而不是每次都从头开始——真正的多轮上下文延续，不是简单拼接
+- 可定制全局快捷键：左 `Option` 长按、双击 `Ctrl+Option+Shift`，或新增的 `fn` 长按
+- 原生菜单栏入口：点击菜单栏图标只会展开紧凑的模式切换 popover；主窗口需要单独打开，打开后会出现 Dock 图标并可以 `Cmd+Tab` 切换，关闭主窗口后 Dock 图标消失、回到纯菜单栏模式。菜单栏 popover 和主窗口都有明确的“退出 OpenType”按钮
+- 本地长期记忆：sidecar 侧维护一份实体词典（术语、别名、常见指代）+ 一份自由文本的“owner facts”，都可以直接对 Agent 说“记住……”来写入，也支持手动触发一次整理（“dreaming”/consolidation）；在设置的只读“记忆”面板里可以查看，但不能在界面里手动编辑
+- 所有模式的结果都会复制到剪贴板；是否额外自动写入当前输入框由设置里的开关决定，写入失败时结果依然保留在剪贴板
+- 录音浮层：说话时显示实时字幕预览（基于系统自带识别，仅供预览），配合音量驱动的动态声波；最终识别结果始终以本地/远程 Whisper 重新识别一次为准
+- 面向用户的错误提示，不直接暴露底层技术报错
+- 完整审计：每一次识别、每一次修正（Review 模式下的每次语音纠错）、以及最终完成或取消，都会追加写入本地一份不可修改的 JSONL 审计日志，原始音频本身不保留
 
 ## macOS 运行
 
@@ -88,16 +55,16 @@ open dist/OpenType.app
 1. 麦克风：录制你的语音
 2. 辅助功能：读取选中文字并把结果写回当前输入框
 
-在 `设置 → AI 服务 → Provider Vault` 添加需要的 Token，并分别选择语音识别和文字生成服务。旧版环境变量或 `~/.openclaw/.env` 中的 `DASHSCOPE_API_KEY` 会在首次启动时静默迁移到本机加密 Vault，之后可以直接在设置中管理。
+如果语音识别和 LLM Provider 都还没配置过，打开主窗口会自动进入设置引导向导（Test Connection + 模型列表选择），配置完才会进入正常界面；之后可以随时在“设置 → 语音识别 / AI 模型”里修改。
 
-## 隐私
+**全新环境从零安装**（包括本地 Whisper 环境搭建）建议直接把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 交给你自己的 coding agent 执行，而不是手动照抄下面的命令——那份 prompt 把这一节命令之外容易踩的坑（比如 Whisper 的 Python venv 必须用 Homebrew 的 `python3.12` 而不是 Xcode 自带的、`mlx_whisper` 依赖 `ffmpeg`）都写清楚了。
 
-- 最终音频只发送到用户选择的语音识别服务；识别文字会发送到用户选择的文字生成服务做对应模式的处理。处理结束后删除本地临时音频。
-- 实时字幕使用 Apple 语音识别，仅作为录音预览。
-- 所有 Provider Token 只保存在 `Application Support/OpenType` 下的本机 AES-GCM 加密 Vault；密钥文件与 Vault 文件权限均设为仅当前用户可读写。它避免每次启动弹出钥匙串授权，但不等同于硬件隔离的 Keychain。
-- 输入历史仅保存在本机 `Application Support/OpenType`，可以关闭，或在设置的二级数据管理中重置。
-- 长期记忆只保存在本机 `Application Support/OpenType/memory.sqlite3`；旧版 `agent-memory.json` 和现有历史会在首次启动时去重迁移。
-- 原始输入审计事件追加写入 `Application Support/OpenType/audit-events.v1.jsonl`，记录识别、完成、取消或失败状态；该审计文件不被普通历史重置或语言习惯重学覆盖。
-- 常用术语、任务领域和表达偏好均在设备上离线归纳，每 100 条固化一次。执行文字任务时，只把与当前生成有关的少量确认资料和已学偏好随 Prompt 发给用户选择的文字模型。
-- “重新学习偏好”会移除任务事件和可重建推断，但保留用户亲自填写的“关于我”。
-- X Reply 只复制到剪贴板，不会自动写入或发布。
+## 隐私（macOS）
+
+- 最终音频默认只在本机由 MLX-Whisper 处理，不发送到任何服务器；如果在设置里把语音识别改成远程模式，音频才会发送到用户自己配置的远程识别地址。处理结束后删除本地临时音频文件。
+- 识别出的文字只在 `ask`/`agent` 两种模式下会发送给用户自己配置的 LLM Provider；`transcribe` 模式完全不经过任何 LLM，识别到什么就是什么。
+- 实时字幕预览用的是 Apple 系统自带的本机语音识别，只作为录音时的临时预览，松开后仍会用上面配置的正式语音识别服务重新识别一次作为最终结果。
+- LLM Provider 的 API Key 等配置保存在本机 sidecar 子进程的数据目录下，以 `chmod 600`（仅当前系统账户可读写）的明文 JSON 文件保存 —— 不写入代码仓库、日志或历史，接口回显时也只显示掩码后的 Key；这不是硬件隔离的 Keychain，信任边界等同于本机账户本身，细节见 [当前系统状态文档](docs/superpowers/specs/2026-08-09-current-system-state.md) 第 10 节。
+- 输入历史、Q&A/Agent 对话记录、审计日志等均保存在本机 `~/Library/Application Support/OpenType/`（含 sidecar 自己的 `opentype.sqlite3`），历史可以在设置的二级数据管理中重置。
+- 每一次识别、每一次修正（Review 转写模式下的语音纠错）、以及最终完成或取消，都会追加写入本机一份不可修改的 `audit-events.v1.jsonl`，不受历史重置影响。
+- Agent 模式的结果只复制到剪贴板并生成草稿，永远不会自动回车、发布或对外执行；是否额外写入当前输入框由“自动写入”开关单独控制。

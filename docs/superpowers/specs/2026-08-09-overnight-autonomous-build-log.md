@@ -227,4 +227,46 @@ not the same claim as "the packaged app works," and the difference
 mattered here. Re-verified against a full clean reinstall + `open` launch
 after both fixes: sidecar starts, `/health` and `/oneshot/ask` both work.
 
+## Post-wake scope: 3-feature MVP, MLX-Whisper, Alfred UI, cleanup (complete)
+
+After the owner woke up, reviewed the overnight build, and gave direct
+feedback, the scope changed substantially from the overnight plan — see
+`docs/superpowers/specs/2026-08-09-current-system-state.md` for the
+as-built reference to what actually shipped. Summary of this second
+session's work, all reviewed, verified against a real packaged-app
+launch, and committed:
+
+1. Deleted the old 6-mode system entirely (not deprecated — removed).
+2. Cut further to exactly 3 modes: transcribe (pure ASR, no LLM),
+   ask (LLM Q&A popup), agent (task dispatch). Polish/Translate/X Reply
+   are gone, not deferred.
+3. Fixed two real launch-blocking bugs found only by testing the actual
+   installed `.app` (codesign --deep corrupting the sidecar binary;
+   a relative db path crashing under a read-only cwd) — every earlier
+   smoke test that only exercised the binary directly missed both.
+4. Added local MLX-Whisper ASR (mlx-community/whisper-small-mlx),
+   replacing cloud transcription outright, fully bundled into the
+   packaged app (~750MB added).
+5. Added a floating Ask/Agent result panel, then redesigned Agent
+   dispatch specifically to be non-blocking (detached tracked task,
+   native completion notification, run history) since the placeholder
+   blocked the whole app for the duration of a potentially-long agent
+   loop — flagged for the owner's explicit review, including one
+   deliberate behavior change (Agent results: clipboard-only now, no
+   auto-insert, since the original focus target may not survive an
+   async run).
+6. Split the UI Alfred-style: menubar popover is just mode-switching;
+   a real app window holds Settings/Memory/Agent history.
+7. Removed the entire now-dead cloud-provider layer (AIServiceClient/
+   AIProvider/ProviderVault/CredentialProvider) and the dead UI it backed.
+8. CLAUDE.md and a new current-system-state spec updated to describe
+   reality instead of the overnight-era description.
+
+Known gaps, explicitly deferred (not oversights): no cloud-provider
+picker (per direct instruction), Agent run history is in-memory only
+(capped at 50), MCP tool-calling has no real server tested against it
+tonight, Swift-to-sidecar transport is still curl-per-request, no Memory
+panel rollback UI, Shared/OpenTypeContract.json and iOS/Android are
+stale relative to macOS.
+
 <!-- Further entries appended chronologically below as autonomous calls are made. -->

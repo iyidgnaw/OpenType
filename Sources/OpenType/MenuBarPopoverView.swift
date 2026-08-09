@@ -27,6 +27,8 @@ struct MenuBarPopoverView: View {
             ModeGrid(model: model, configuration: configuration)
             Divider()
             statusArea
+            Divider()
+            quitButton
         }
         .padding(16)
         // Widened from the original 264pt and given room to grow vertically:
@@ -68,6 +70,26 @@ struct MenuBarPopoverView: View {
                 english: "Open OpenType (settings, history, Agent tasks)"
             ))
         }
+    }
+
+    /// The menu bar is the only surface that's always reachable — the app is
+    /// `.accessory` whenever the main window is closed, so there's no Dock
+    /// icon and no app menu to quit from. Spelled out with a label rather
+    /// than an icon so it doesn't read as "close the popover".
+    private var quitButton: some View {
+        Button {
+            model.quit()
+        } label: {
+            Label(
+                OpenTypeL10n.text("退出 OpenType", english: "Quit OpenType"),
+                systemImage: "power"
+            )
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var statusArea: some View {

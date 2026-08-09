@@ -153,17 +153,27 @@ private struct HeaderView: View {
             Button {
                 model.quit()
             } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 27, height: 27)
-                    .background(
-                        OpenTypeTheme.surface,
-                        in: Circle()
-                    )
+                // "power", not "xmark": an x in a window header reads as
+                // "close this window", which is a different action now that
+                // closing the window just drops the app back to menu-bar-only.
+                Label(
+                    OpenTypeL10n.text("退出", english: "Quit"),
+                    systemImage: "power"
+                )
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 9)
+                .frame(height: 27)
+                .background(
+                    OpenTypeTheme.surface,
+                    in: Capsule()
+                )
             }
             .buttonStyle(.plain)
-            .help("退出 OpenType")
+            .help(OpenTypeL10n.text(
+                "退出 OpenType（完全关闭，不只是关窗口）",
+                english: "Quit OpenType (fully exit, not just close the window)"
+            ))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 11)

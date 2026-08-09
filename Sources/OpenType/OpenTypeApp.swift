@@ -160,7 +160,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     private func configurePopover() {
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 320, height: 340)
+        popover.contentSize = NSSize(width: 320, height: 384)
         popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView(model: model) { [weak self] in

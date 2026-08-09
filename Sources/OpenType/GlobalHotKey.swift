@@ -228,6 +228,20 @@ final class GlobalHotKey {
             return Unmanaged.passUnretained(event)
         }
 
+        // fn doubles as the OS's own modifier (media keys, emoji picker,
+        // input-source switching), so its flagsChanged stream can skip past a
+        // temporarily disabled tap and leave a toggle-based held-set
+        // desynced. Read the flag itself instead of inferring press/release.
+        if keyCode == Int64(kVK_Function) {
+            let isDown = event.flags.contains(.maskSecondaryFn)
+            if isDown, !heldModifierKeyCodes.contains(keyCode) {
+                handleModifierPressed(keyCode)
+            } else if !isDown, heldModifierKeyCodes.contains(keyCode) {
+                handleModifierReleased(keyCode)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
         if heldModifierKeyCodes.contains(keyCode) {
             handleModifierReleased(keyCode)
         } else {
@@ -522,6 +536,8 @@ final class GlobalHotKey {
         switch preset {
         case .leftOption:
             return [Int64(kVK_Option)]
+        case .fnKey:
+            return [Int64(kVK_Function)]
         case .doubleControl:
             return [Int64(kVK_Control), Int64(kVK_RightControl)]
         case .doubleOption:

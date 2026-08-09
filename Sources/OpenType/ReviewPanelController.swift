@@ -14,7 +14,6 @@ private final class ReviewPanelPresentation: ObservableObject {
     @Published var text = ""
     @Published var isCorrecting = false
     @Published var correctionHint: String?
-    @Published var colorTheme: AppColorTheme = .ocean
     @Published var interfaceLanguage: InterfaceLanguage = .chinese
 }
 
@@ -95,10 +94,6 @@ final class ReviewPanelController {
         removeClickOutsideMonitor()
         panel?.orderOut(nil)
         textView = nil
-    }
-
-    func updateColorTheme(_ theme: AppColorTheme) {
-        presentation.colorTheme = theme
     }
 
     func updateInterfaceLanguage(_ language: InterfaceLanguage) {
@@ -285,7 +280,7 @@ private struct ReviewPanelView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
         )
-        .tint(presentation.colorTheme.accent)
+        .tint(AppAccent.primary)
         .environment(\.locale, presentation.interfaceLanguage.locale)
         .onExitCommand(perform: onCancel)
     }

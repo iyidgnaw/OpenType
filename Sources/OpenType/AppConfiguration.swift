@@ -10,10 +10,6 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(hotKeyPreset.rawValue, forKey: Keys.hotKeyPreset) }
     }
 
-    @Published var colorTheme: AppColorTheme {
-        didSet { defaults.set(colorTheme.rawValue, forKey: Keys.colorTheme) }
-    }
-
     @Published var interfaceLanguage: InterfaceLanguage {
         didSet {
             defaults.set(interfaceLanguage.rawValue, forKey: Keys.interfaceLanguage)
@@ -98,9 +94,6 @@ final class AppConfiguration: ObservableObject {
         hotKeyPreset = HotKeyPreset(
             rawValue: defaults.string(forKey: Keys.hotKeyPreset) ?? ""
         ) ?? .leftOption
-        colorTheme = AppColorTheme(
-            rawValue: defaults.string(forKey: Keys.colorTheme) ?? ""
-        ) ?? .ocean
         interfaceLanguage = InterfaceLanguage(
             rawValue: defaults.string(forKey: Keys.interfaceLanguage) ?? ""
         ) ?? .chinese
@@ -127,7 +120,6 @@ final class AppConfiguration: ObservableObject {
     private enum Keys {
         static let selectedMode = "selectedMode"
         static let hotKeyPreset = "hotKeyPreset"
-        static let colorTheme = "colorTheme"
         static let interfaceLanguage = "interfaceLanguage"
         static let transcriptionLanguage = "transcriptionLanguage"
         static let transcribeVariant = "transcribeVariant"

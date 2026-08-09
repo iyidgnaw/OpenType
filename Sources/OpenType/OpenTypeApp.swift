@@ -145,7 +145,6 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         statusItem = item
         updateStatusIcon(
             for: model.state,
-            colorTheme: model.configuration.colorTheme,
             mode: model.configuration.selectedMode
         )
     }
@@ -196,17 +195,15 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     }
 
     private func observeStatusPresentation() {
-        Publishers.CombineLatest4(
+        Publishers.CombineLatest3(
             model.$state.removeDuplicates(),
-            model.configuration.$colorTheme.removeDuplicates(),
             model.$runningAgentRunCount.removeDuplicates(),
             model.configuration.$selectedMode.removeDuplicates()
         )
             .receive(on: RunLoop.main)
-            .sink { [weak self] state, colorTheme, runningAgentCount, mode in
+            .sink { [weak self] state, runningAgentCount, mode in
                 self?.updateStatusIcon(
                     for: state,
-                    colorTheme: colorTheme,
                     runningAgentCount: runningAgentCount,
                     mode: mode
                 )
@@ -216,14 +213,12 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 
     private func updateStatusIcon(
         for state: ProcessingState,
-        colorTheme: AppColorTheme,
         runningAgentCount: Int = 0,
         mode: InputMode
     ) {
         guard let button = statusItem?.button else { return }
         button.image = MenuBarStatusIcon.image(
             for: state,
-            colorTheme: colorTheme,
             runningAgentCount: runningAgentCount,
             mode: mode
         )
@@ -310,7 +305,6 @@ enum MenuBarStatusIcon {
 
     static func image(
         for state: ProcessingState,
-        colorTheme: AppColorTheme = .ocean,
         runningAgentCount: Int = 0,
         mode: InputMode = .transcribe
     ) -> NSImage {
@@ -335,7 +329,7 @@ enum MenuBarStatusIcon {
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
         context.imageInterpolation = .high
-        drawPixels(for: state, colorTheme: colorTheme, mode: mode)
+        drawPixels(for: state, mode: mode)
         if runningAgentCount > 0 {
             drawRunningAgentBadge(count: runningAgentCount)
         }
@@ -355,11 +349,10 @@ enum MenuBarStatusIcon {
 
     private static func drawPixels(
         for state: ProcessingState,
-        colorTheme: AppColorTheme,
         mode: InputMode
     ) {
         let rect = NSRect(x: 0, y: 0, width: 36, height: 36)
-        backgroundColor(for: state, colorTheme: colorTheme).setFill()
+        backgroundColor(for: state).setFill()
         NSBezierPath(
             roundedRect: rect.insetBy(dx: 1, dy: 1),
             xRadius: 10,
@@ -432,10 +425,7 @@ enum MenuBarStatusIcon {
         )
     }
 
-    static func backgroundColor(
-        for state: ProcessingState,
-        colorTheme: AppColorTheme
-    ) -> NSColor {
+    static func backgroundColor(for state: ProcessingState) -> NSColor {
         switch state {
         case .listening:
             return .systemRed
@@ -444,7 +434,7 @@ enum MenuBarStatusIcon {
         case .failure:
             return .systemOrange
         default:
-            return colorTheme.nsAccent
+            return AppAccent.nsPrimary
         }
     }
 }

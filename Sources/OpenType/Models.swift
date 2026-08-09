@@ -398,6 +398,7 @@ enum PermissionStatus: Equatable {
 
 enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
     case leftOption
+    case fnKey
     case doubleControl
     case doubleOption
     case doubleShift
@@ -411,6 +412,7 @@ enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .leftOption: return OpenTypeL10n.text("左 Option", english: "Left Option")
+        case .fnKey: return OpenTypeL10n.text("fn（地球键）", english: "fn (Globe)")
         case .doubleControl: return OpenTypeL10n.text("双击 Ctrl", english: "Double-tap Ctrl")
         case .doubleOption: return OpenTypeL10n.text("双击 Option", english: "Double-tap Option")
         case .doubleShift: return OpenTypeL10n.text("双击 Shift", english: "Double-tap Shift")
@@ -424,6 +426,7 @@ enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
     var keys: [String] {
         switch self {
         case .leftOption: return ["左 Option"]
+        case .fnKey: return ["fn"]
         case .doubleControl: return ["Ctrl × 2"]
         case .doubleOption: return ["Option × 2"]
         case .doubleShift: return ["Shift × 2"]
@@ -442,17 +445,22 @@ enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
     }
 
     var usesModifierOnlyEventTap: Bool {
-        self == .leftOption || usesDoubleModifierTap
+        self == .leftOption || self == .fnKey || usesDoubleModifierTap
     }
 
+    /// Hold to talk, release to finish — plus double-tap to start hands-free.
+    /// Named for left Option, which was the first preset to use it; `fnKey`
+    /// runs the identical gesture off the secondary-fn flag instead.
     var usesOptionHybridGesture: Bool {
-        self == .leftOption
+        self == .leftOption || self == .fnKey
     }
 
     var note: String {
         switch self {
         case .leftOption:
             return OpenTypeL10n.text("长按说话、松开完成；双击开始，再按任意普通键结束。右 Option 保持空闲。", english: "Hold to talk and release to finish; double-tap to start and press any regular key to stop. Right Option stays free.")
+        case .fnKey:
+            return OpenTypeL10n.text("长按 fn 说话、松开完成；双击 fn 开始，再按任意普通键结束。若「系统设置 › 键盘 › 按下 🌐 键时」设为听写或输入法切换，建议改为「不执行任何操作」。", english: "Hold fn to talk and release to finish; double-tap fn to start and press any regular key to stop. If System Settings › Keyboard › \"Press 🌐 key to\" is set to Dictation or input switching, change it to \"Do Nothing\".")
         case .doubleControl:
             return OpenTypeL10n.text("推荐。两次轻点任意一侧 Ctrl。", english: "Recommended. Tap either Ctrl key twice.")
         case .doubleOption:

@@ -94,8 +94,8 @@ struct RootView: View {
                 Color(nsColor: .windowBackgroundColor)
                 LinearGradient(
                     colors: [
-                        configuration.colorTheme.accent.opacity(0.045),
-                        configuration.colorTheme.secondaryAccent.opacity(0.018),
+                        AppAccent.primary.opacity(0.045),
+                        AppAccent.secondary.opacity(0.018),
                         .clear
                     ],
                     startPoint: .topLeading,
@@ -103,7 +103,7 @@ struct RootView: View {
                 )
             }
         }
-        .tint(configuration.colorTheme.accent)
+        .tint(AppAccent.primary)
         .environment(\.locale, configuration.interfaceLanguage.locale)
     }
 }
@@ -119,8 +119,8 @@ private struct HeaderView: View {
                     .fill(
                         LinearGradient(
                             colors: [
-                                configuration.colorTheme.accent,
-                                configuration.colorTheme.secondaryAccent
+                                AppAccent.primary,
+                                AppAccent.secondary
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -996,7 +996,6 @@ private struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
     @ObservedObject var agentMemory: AgentMemoryStore
-    @State private var appearanceExpanded = false
     @State private var dataManagementExpanded = false
     @State private var showingHistoryResetConfirmation = false
     @State private var showingAgentMemoryResetConfirmation = false
@@ -1004,72 +1003,19 @@ private struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                SettingsSection("外观") {
-                    DisclosureGroup(isExpanded: $appearanceExpanded) {
-                        VStack(alignment: .leading, spacing: 11) {
-                            Picker(
-                                "界面语言",
-                                selection: Binding(
-                                    get: { configuration.interfaceLanguage },
-                                    set: { model.changeInterfaceLanguage($0) }
-                                )
-                            ) {
-                                ForEach(InterfaceLanguage.allCases) { language in
-                                    Text(language.title).tag(language)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-
-                            LazyVGrid(
-                                columns: [
-                                    GridItem(.flexible(), spacing: 8),
-                                    GridItem(.flexible(), spacing: 8)
-                                ],
-                                spacing: 8
-                            ) {
-                                ForEach(AppColorTheme.allCases) { theme in
-                                    colorThemeButton(theme)
-                                }
-                            }
-
-                            Text("切换后立即生效，并同步应用到导航、模式选中态、语音悬浮窗和菜单栏图标。")
-                                .font(.system(size: 8.8))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                SettingsSection("界面语言") {
+                    Picker(
+                        "界面语言",
+                        selection: Binding(
+                            get: { configuration.interfaceLanguage },
+                            set: { model.changeInterfaceLanguage($0) }
+                        )
+                    ) {
+                        ForEach(InterfaceLanguage.allCases) { language in
+                            Text(language.title).tag(language)
                         }
-                        .padding(.top, 10)
-                    } label: {
-                        HStack(spacing: 9) {
-                            ZStack {
-                                Circle()
-                                    .fill(configuration.colorTheme.secondaryAccent)
-                                    .frame(width: 15, height: 15)
-                                    .offset(x: 4, y: -2)
-                                Circle()
-                                    .fill(configuration.colorTheme.accent)
-                                    .frame(width: 17, height: 17)
-                            }
-                            .frame(width: 25, height: 22)
-
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(configuration.colorTheme.title)
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                Text(configuration.interfaceLanguage.title)
-                                    .font(.system(size: 8.8))
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            Text(appearanceExpanded
-                                ? OpenTypeL10n.text("收起", english: "Collapse")
-                                : OpenTypeL10n.text("更改", english: "Change"))
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(Color.accentColor)
-                        }
-                        .contentShape(Rectangle())
                     }
-                    .tint(.secondary)
+                    .pickerStyle(.segmented)
                 }
 
                 SettingsSection("快捷键") {
@@ -1540,62 +1486,6 @@ private struct SettingsView: View {
                 .controlSize(.small)
                 .disabled(disabled)
         }
-    }
-
-    @ViewBuilder
-    private func colorThemeButton(_ theme: AppColorTheme) -> some View {
-        let selected = configuration.colorTheme == theme
-        Button {
-            model.changeColorTheme(theme)
-        } label: {
-            HStack(spacing: 9) {
-                ZStack {
-                    Circle()
-                        .fill(theme.secondaryAccent)
-                        .frame(width: 18, height: 18)
-                        .offset(x: 5, y: -2)
-                    Circle()
-                        .fill(theme.accent)
-                        .frame(width: 20, height: 20)
-                        .overlay(
-                            Circle()
-                                .strokeBorder(.white.opacity(0.52), lineWidth: 0.7)
-                        )
-                }
-                .frame(width: 29, height: 25)
-
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(theme.title)
-                        .font(.system(size: 10, weight: .semibold))
-                    Text(theme.subtitle)
-                        .font(.system(size: 8.2))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 2)
-
-                if selected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(theme.accent)
-                }
-            }
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .background(
-                selected ? theme.accent.opacity(0.10) : Color.primary.opacity(0.025),
-                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(
-                        selected ? theme.accent.opacity(0.34) : OpenTypeTheme.border,
-                        lineWidth: 0.75
-                    )
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 
     private var automaticProfileUpdateDescription: String {

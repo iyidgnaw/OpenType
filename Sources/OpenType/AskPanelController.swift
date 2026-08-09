@@ -6,7 +6,6 @@ private final class AskPanelPresentation: ObservableObject {
     @Published var kind: AskPanelState.Kind = .ask
     @Published var query = ""
     @Published var answer: String?
-    @Published var colorTheme: AppColorTheme = .ocean
     @Published var interfaceLanguage: InterfaceLanguage = .chinese
 }
 
@@ -54,10 +53,6 @@ final class AskPanelController {
     func hide() {
         removeClickOutsideMonitor()
         panel?.orderOut(nil)
-    }
-
-    func updateColorTheme(_ theme: AppColorTheme) {
-        presentation.colorTheme = theme
     }
 
     func updateInterfaceLanguage(_ language: InterfaceLanguage) {
@@ -155,7 +150,7 @@ private struct AskPanelView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
         )
-        .tint(presentation.colorTheme.accent)
+        .tint(AppAccent.primary)
         .environment(\.locale, presentation.interfaceLanguage.locale)
         .onExitCommand(perform: onClose)
     }

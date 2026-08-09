@@ -227,6 +227,19 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(HotKeyPreset.leftOption.keys, ["左 Option"])
     }
 
+    func testFnPresetUsesTheSameHoldGestureAsLeftOption() {
+        XCTAssertTrue(HotKeyPreset.allCases.contains(.fnKey))
+        XCTAssertTrue(HotKeyPreset.fnKey.usesModifierOnlyEventTap)
+        XCTAssertTrue(HotKeyPreset.fnKey.usesOptionHybridGesture)
+        XCTAssertFalse(HotKeyPreset.fnKey.usesDoubleModifierTap)
+        XCTAssertEqual(HotKeyPreset.fnKey.keys, ["fn"])
+        XCTAssertFalse(HotKeyPreset.fnKey.title.isEmpty)
+        XCTAssertEqual(
+            Set(HotKeyPreset.allCases.map(\.title)).count,
+            HotKeyPreset.allCases.count
+        )
+    }
+
     @MainActor
     func testSelectedHotKeyPersists() {
         let suiteName = "OpenTypeTests.HotKey.\(UUID().uuidString)"
@@ -300,24 +313,6 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertFalse(reloaded.agentMemoryEnabled)
     }
 
-    @MainActor
-    func testColorThemeDefaultsToOceanAndPersistsSelection() {
-        let suiteName = "OpenTypeTests.ColorTheme.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let configuration = AppConfiguration(defaults: defaults)
-        XCTAssertEqual(configuration.colorTheme, .ocean)
-        configuration.colorTheme = .violet
-
-        let reloaded = AppConfiguration(defaults: defaults)
-        XCTAssertEqual(reloaded.colorTheme, .violet)
-        XCTAssertEqual(AppColorTheme.allCases.count, 6)
-        XCTAssertEqual(
-            Set(AppColorTheme.allCases.map(\.title)).count,
-            AppColorTheme.allCases.count
-        )
-    }
 
     @MainActor
     func testInterfaceLanguageDefaultsToChineseAndPersistsEnglish() {

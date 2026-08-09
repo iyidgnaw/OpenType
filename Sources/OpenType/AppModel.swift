@@ -168,14 +168,11 @@ final class AppModel: ObservableObject {
                 && self.configuration.automaticOwnerProfileUpdates,
             personalDictionary: self.configuration.personalDictionary
         )
-        self.overlay.updateColorTheme(self.configuration.colorTheme)
         self.overlay.updateInterfaceLanguage(self.configuration.interfaceLanguage)
-        self.askPanel.updateColorTheme(self.configuration.colorTheme)
         self.askPanel.updateInterfaceLanguage(self.configuration.interfaceLanguage)
         self.askPanel.onRequestDismiss = { [weak self] in
             self?.askPanelState = nil
         }
-        self.reviewPanel.updateColorTheme(self.configuration.colorTheme)
         self.reviewPanel.updateInterfaceLanguage(self.configuration.interfaceLanguage)
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
@@ -505,14 +502,6 @@ final class AppModel: ObservableObject {
             english: "\(preset.title) is used by macOS or another app. Restored \(previous.title)."
         )
         persistShortcutStatus()
-    }
-
-    func changeColorTheme(_ theme: AppColorTheme) {
-        guard configuration.colorTheme != theme else { return }
-        configuration.colorTheme = theme
-        overlay.updateColorTheme(theme)
-        askPanel.updateColorTheme(theme)
-        reviewPanel.updateColorTheme(theme)
     }
 
     func changeInterfaceLanguage(_ language: InterfaceLanguage) {

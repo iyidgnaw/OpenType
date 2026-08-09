@@ -7,7 +7,6 @@ private final class OverlayPresentation: ObservableObject {
     @Published var mode: InputMode = InputMode.visibleModes[0]
     @Published var liveTranscript = ""
     @Published var audioLevel = 0.0
-    @Published var colorTheme: AppColorTheme = .ocean
     @Published var interfaceLanguage: InterfaceLanguage = .chinese
 }
 
@@ -68,10 +67,6 @@ final class OverlayController {
     func updateAudioLevel(_ level: Double) {
         guard presentation.state == .listening else { return }
         presentation.audioLevel = level
-    }
-
-    func updateColorTheme(_ theme: AppColorTheme) {
-        presentation.colorTheme = theme
     }
 
     func updateInterfaceLanguage(_ language: InterfaceLanguage) {
@@ -140,7 +135,7 @@ private struct OverlayView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
         )
-        .tint(presentation.colorTheme.accent)
+        .tint(AppAccent.primary)
         .environment(\.locale, presentation.interfaceLanguage.locale)
     }
 

@@ -37,7 +37,7 @@ struct MenuBarPopoverView: View {
         // `OpenTypeApp.swift` sets the matching `NSPopover.contentSize`.
         .frame(width: 320)
         .background(Color(nsColor: .windowBackgroundColor))
-        .tint(configuration.colorTheme.accent)
+        .tint(AppAccent.primary)
         .environment(\.locale, configuration.interfaceLanguage.locale)
     }
 
@@ -46,8 +46,7 @@ struct MenuBarPopoverView: View {
             Circle()
                 .fill(
                     Color(nsColor: MenuBarStatusIcon.backgroundColor(
-                        for: model.state,
-                        colorTheme: configuration.colorTheme
+                        for: model.state
                     ))
                 )
                 .frame(width: 8, height: 8)

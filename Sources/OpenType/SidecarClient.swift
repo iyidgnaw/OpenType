@@ -86,11 +86,30 @@ final class SidecarClient {
         process?.terminate()
     }
 
+    /// Appends a timestamped line to a fixed debug log file so sidecar
+    /// startup can be diagnosed from a launched (non-Terminal) app instance,
+    /// where stdout isn't visible. Temporary diagnostic aid.
+    nonisolated private static func debugLog(_ message: String) {
+        let path = "/tmp/opentype-sidecar-client-debug.log"
+        let line = "\(Date()) \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: path),
+               let handle = FileHandle(forWritingAtPath: path) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                try? handle.close()
+            } else {
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
+        }
+    }
+
     // MARK: - Lifecycle
 
     /// Spawns the sidecar and blocks (asynchronously) until it responds
     /// healthily on its Unix socket, or throws after a short timeout.
     func start() async throws {
+        Self.debugLog("start() called, socketURL=\(socketURL.path)")
         // Remove any stale socket left behind by a previous run so readiness
         // polling below can't be fooled by a dead file.
         try? FileManager.default.removeItem(at: socketURL)
@@ -103,10 +122,24 @@ final class SidecarClient {
             environment[key] = value
         }
         environment["OPENTYPE_SIDECAR_SOCKET"] = socketURL.path
+        // The sidecar's default db path ("sidecar/.data/...") is relative to
+        // its own source checkout and assumes that's the working directory —
+        // true only for `bun run` dev-mode invocations. A Process spawned
+        // without an explicit currentDirectoryURL inherits the parent app's
+        // cwd (often "/", a read-only volume), so the bundled-binary launch
+        // crashed on startup with EROFS trying to mkdir a relative path
+        // there. Always pin this to an absolute, writable location next to
+        // the socket, for both launch modes.
+        environment["OPENTYPE_SIDECAR_DB_PATH"] = socketURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("opentype.sqlite3")
+            .path
 
         let bundledBinaryPath = (Bundle.main.resourcePath ?? "")
             .appending("/opentype-sidecar")
-        if FileManager.default.isExecutableFile(atPath: bundledBinaryPath) {
+        let bundledIsExecutable = FileManager.default.isExecutableFile(atPath: bundledBinaryPath)
+        Self.debugLog("bundledBinaryPath=\(bundledBinaryPath) isExecutable=\(bundledIsExecutable) loadedEnvKeys=\(Self.loadBundledEnvironment().keys.sorted())")
+        if bundledIsExecutable {
             // Packaging work later tonight will produce this compiled
             // binary; this branch isn't exercised yet but is the intended
             // production path.
@@ -130,9 +163,28 @@ final class SidecarClient {
         }
         process.environment = environment
 
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+
+        process.terminationHandler = { finished in
+            let stderrText = String(
+                data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            let stdoutText = String(
+                data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            ) ?? ""
+            Self.debugLog("terminated status=\(finished.terminationStatus) reason=\(finished.terminationReason.rawValue) stdout=\(stdoutText) stderr=\(stderrText)")
+        }
+
         do {
             try process.run()
+            Self.debugLog("process.run() succeeded, pid=\(process.processIdentifier)")
         } catch {
+            Self.debugLog("process.run() threw: \(error)")
             throw SidecarClientError.processFailedToStart(
                 error.localizedDescription
             )
@@ -141,7 +193,9 @@ final class SidecarClient {
 
         do {
             try await waitUntilReady()
+            Self.debugLog("waitUntilReady() succeeded")
         } catch {
+            Self.debugLog("waitUntilReady() threw: \(error) isRunning=\(process.isRunning)")
             process.terminate()
             self.process = nil
             throw error

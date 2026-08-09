@@ -190,4 +190,41 @@ Memory-panel rollback UI yet (read-only); the SidecarClient curl-per-
 request transport and the hardcoded dev-mode repo path are known,
 logged simplifications for a future native-transport pass.
 
+## Post-wake fix: the packaged app never actually worked
+
+The "final state" summary above was wrong — it was based on smoke-testing
+the compiled sidecar binary directly and manually injecting its env, never
+on actually launching the real installed `.app` the way a user would
+(`open`, or double-click). Once actually tested that way, the sidecar
+never started at all. Two distinct real bugs, found by adding temporary
+file-based debug logging (`SidecarClient.debugLog`, still in the code) to
+`SidecarClient.start()` since a launched GUI app's stdout/stderr aren't
+visible normally:
+
+1. `codesign --deep` on the outer `.app` corrupts `bun build --compile`'s
+   non-standard Mach-O format — `spctl` reported "invalid signature (code
+   or signature have been modified)" on the sidecar binary specifically,
+   and macOS silently killed the child the instant a running app tried to
+   spawn it (a plain `exec` from a shell doesn't hit this Gatekeeper path,
+   which is why every direct-binary smoke test all night looked fine).
+   Fixed by signing the sidecar binary standalone *before* it's folded
+   into the app bundle, then signing the outer app *without* `--deep`
+   (this bundle has no other nested executables that need it).
+2. Once past that, the sidecar crashed on actual startup with
+   `EROFS: read-only file system, mkdir 'sidecar'` — `env.ts`'s default
+   `OPENTYPE_SIDECAR_DB_PATH` is a relative path assuming cwd is the
+   source checkout, true only for `bun run` dev invocations. A `Process`
+   launched without an explicit `currentDirectoryURL` inherits the parent
+   app's cwd (root, read-only). Fixed by having `SidecarClient` always set
+   `OPENTYPE_SIDECAR_DB_PATH` to an absolute path next to the socket, for
+   both launch modes.
+
+Both were invisible to every test and smoke-test run overnight because
+none of them exercised the actual launch path (LaunchServices spawning
+the real installed app, which then spawns its child with no explicit
+cwd). Lesson: "the packaged binary runs when I execute it directly" is
+not the same claim as "the packaged app works," and the difference
+mattered here. Re-verified against a full clean reinstall + `open` launch
+after both fixes: sidecar starts, `/health` and `/oneshot/ask` both work.
+
 <!-- Further entries appended chronologically below as autonomous calls are made. -->

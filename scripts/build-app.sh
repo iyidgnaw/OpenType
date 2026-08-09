@@ -41,6 +41,17 @@ chmod +x "$binary_dir/OpenType"
 cp "$project_dir/sidecar/dist/opentype-sidecar" "$resources_dir/opentype-sidecar"
 chmod +x "$resources_dir/opentype-sidecar"
 
+# Sign the sidecar binary on its own, before it becomes part of the app
+# bundle's seal below. `bun build --compile` binaries have a non-standard
+# Mach-O shape (an appended module-graph trailer) that a later
+# `codesign --deep` pass on the outer app corrupts -- spctl then reports
+# "invalid signature (code or signature have been modified)" and macOS
+# silently kills the process the instant the running app tries to spawn
+# it, even though the app itself launches fine. Signing it here, then
+# signing the outer app WITHOUT --deep (this bundle has no other nested
+# executables that need it), leaves both signatures valid.
+codesign --force --sign - "$resources_dir/opentype-sidecar"
+
 # A `bun build --compile` binary doesn't carry the source tree's
 # sidecar/.env.local with it, and doesn't know to look for one at an
 # arbitrary launch-time cwd. Bundle it (if present) as sidecar.env next to
@@ -62,7 +73,6 @@ xattr -dr com.apple.quarantine "$app_dir" 2>/dev/null || true
 # and ask for Microphone / Accessibility access again after every rebuild.
 codesign \
   --force \
-  --deep \
   --sign - \
   --requirements '=designated => identifier "ai.rain.opentype"' \
   "$app_dir"

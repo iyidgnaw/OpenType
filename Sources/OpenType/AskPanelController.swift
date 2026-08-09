@@ -162,7 +162,7 @@ private struct AskPanelView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: presentation.kind == .agent ? "gearshape.2.fill" : "questionmark.bubble.fill")
+            Image(systemName: presentation.kind == .agent ? "wand.and.stars" : "questionmark.bubble.fill")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
             Text(titleText)

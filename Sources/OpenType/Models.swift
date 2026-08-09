@@ -27,7 +27,12 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .transcribe: return "mic.fill"
         case .ask: return "questionmark.bubble.fill"
-        case .agent: return "gearshape.2.fill"
+        // Was "gearshape.2.fill" - read as a mechanical settings icon, not
+        // "an agent doing something for you," and looked flat/generic next
+        // to the other two modes' more distinctive glyphs. wand.and.stars
+        // reads as "this happens automatically" and stays visually
+        // consistent with the other modes' single-concept SF Symbols.
+        case .agent: return "wand.and.stars"
         }
     }
 

@@ -104,7 +104,7 @@ struct MenuBarPopoverView: View {
                         "\(model.runningAgentRunCount) 个 Agent 任务运行中",
                         english: "\(model.runningAgentRunCount) Agent task(s) running"
                     ),
-                    systemImage: "gearshape.2.fill"
+                    systemImage: "wand.and.stars"
                 )
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(Color.accentColor)

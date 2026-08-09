@@ -103,4 +103,32 @@ describe("POST /oneshot/ask", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("no context matched");
   });
+
+  test("includes all owner facts as context, and logs how many were included", async () => {
+    const store = makeStore();
+    store.recordOwnerFact("The owner's name is Diyi.");
+    let capturedMessages: OneShotChatMessage[] | undefined;
+    const chat: OneShotChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "answer" };
+    };
+    const { writer, lines } = captureContextLog();
+    const router = createRouter(buildOneShotRoutes(store, chat, writer));
+
+    await router(post({ question: "what is my name?" }));
+
+    expect(capturedMessages![1].content).toContain("Diyi");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("1 owner fact(s) included");
+  });
+
+  test("logs 'no owner facts' honestly when none are recorded", async () => {
+    const chat: OneShotChatFn = async () => ({ content: "answer" });
+    const { writer, lines } = captureContextLog();
+    const router = createRouter(buildOneShotRoutes(makeStore(), chat, writer));
+
+    await router(post({ question: "what time is it?" }));
+
+    expect(lines[0]).toContain("no owner facts");
+  });
 });

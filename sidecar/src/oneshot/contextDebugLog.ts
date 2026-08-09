@@ -20,6 +20,16 @@ export interface ContextUsageLogEntry {
   inputText: string;
   /** The entity terms `findKnownTerms` matched, in match order. */
   matchedTerms: EntityTerm[];
+  /**
+   * How many `owner_facts` rows (`memory/MemoryStore.ts`'s
+   * `allOwnerFacts()`) were included in this request's context, per
+   * `oneshot/memoryContext.ts`'s `buildOwnerFactsContext` -- all of them are
+   * always included (see that function's doc comment), so this is really
+   * just `allOwnerFacts().length` at request time, logged the same way
+   * entity-term matches already are so owner-fact injection is provable
+   * from this log, not just trusted.
+   */
+  ownerFactsCount: number;
 }
 
 /** Injectable sink for a single formatted log line — the DI seam that keeps
@@ -54,7 +64,12 @@ export function formatContextUsageLogLine(
           .join(", ")}`
       : "no context matched";
 
-  return `${now.toISOString()} [${entry.endpoint}] input="${truncate(entry.inputText)}" ${termsSummary}\n`;
+  const ownerFactsSummary =
+    entry.ownerFactsCount > 0
+      ? `${entry.ownerFactsCount} owner fact(s) included`
+      : "no owner facts";
+
+  return `${now.toISOString()} [${entry.endpoint}] input="${truncate(entry.inputText)}" ${termsSummary}; ${ownerFactsSummary}\n`;
 }
 
 /** Appends the formatted line via `writer`. */

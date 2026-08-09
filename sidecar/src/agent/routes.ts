@@ -35,7 +35,11 @@ async function handleAgentRun(
   // context, the same as `/oneshot/ask` does.
   const relevantText = `${task} ${context ?? ""}`;
   const matchedTerms = findKnownTerms(store, relevantText);
-  logContextUsage({ endpoint: "agent", inputText: task, matchedTerms }, contextLogWriter);
+  const ownerFactsCount = store.allOwnerFacts().length;
+  logContextUsage(
+    { endpoint: "agent", inputText: task, matchedTerms, ownerFactsCount },
+    contextLogWriter
+  );
   const knownTerms = buildKnownTermsContext(store, relevantText);
 
   const loopResult = await runAgentLoop({ task, context, knownTerms }, { chat, tools });

@@ -757,3 +757,25 @@ struct ConsolidationRunSummary: Decodable, Identifiable {
     let summary: String
     let rolledBackAt: Int?
 }
+
+/// Mirrors the sidecar's `ConsolidationResult` (`sidecar/src/memory/consolidator.ts`),
+/// as returned by `POST /memory/consolidate-now`. `reason` is only set when
+/// `aborted` is true (the LLM call failed, or its response didn't parse).
+struct ConsolidationResultSummary: Decodable {
+    let ranRunId: Int?
+    let eventsConsidered: Int
+    let candidatesProposed: Int
+    let candidatesAccepted: Int
+    let aborted: Bool
+    let reason: String?
+}
+
+/// Transient success/failure indicator for the Settings "Memory" panel's
+/// manual "Consolidate now" button (`MemoryPanelView`) — cleared on the next
+/// trigger, not persisted; the persistent record is `memoryConsolidationRuns`.
+enum ConsolidateNowStatus: Equatable {
+    case idle
+    case running
+    case succeeded(String)
+    case failed(String)
+}

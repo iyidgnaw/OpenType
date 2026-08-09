@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../../src/memory/db";
 import { MemoryStore, type EntityTerm } from "../../src/memory/MemoryStore";
-import { rollbackRun, runConsolidation, shouldConsolidate } from "../../src/memory/consolidator";
+import {
+  rollbackRun,
+  runConsolidation,
+  shouldConsolidate,
+  upsertEntityTerm,
+} from "../../src/memory/consolidator";
 
 function makeStore() {
   const db = openDatabase(":memory:");
@@ -245,6 +250,78 @@ describe("runConsolidation", () => {
     expect(result.aborted).toBe(true);
     expect(store.allTerms()).toHaveLength(0);
     expect(store.unconsolidatedEventCount()).toBe(5);
+  });
+});
+
+describe("upsertEntityTerm", () => {
+  test("inserts a brand-new term when nothing matches", () => {
+    const store = makeStore();
+    const { term, merged } = upsertEntityTerm(store, [], {
+      canonicalTerm: "PayPal",
+      aliases: ["paypal", "pay pal"],
+      category: "term",
+      confidence: 1.0,
+      sourceEventIds: [],
+    });
+
+    expect(merged).toBe(false);
+    expect(term.canonicalTerm).toBe("PayPal");
+    expect(term.aliases.sort()).toEqual(["pay pal", "paypal"].sort());
+    expect(term.confidence).toBe(1.0);
+    expect(term.origin).toBe("owner");
+
+    const stored = store.allTerms();
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.canonicalTerm).toBe("PayPal");
+  });
+
+  test("merges into an existing term matched by alias, unioning aliases and keeping the higher confidence", () => {
+    const store = makeStore();
+    const now = Date.now();
+    store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["PayPal", JSON.stringify(["paypal"]), "term", 0.6, "owner", "[]", now, now, null]
+    );
+    const existing = store.allTerms();
+
+    const { term, merged } = upsertEntityTerm(store, existing, {
+      canonicalTerm: "PayPal",
+      aliases: ["pay pal"],
+      category: "term",
+      confidence: 1.0,
+      sourceEventIds: [],
+    });
+
+    expect(merged).toBe(true);
+    expect(term.aliases.sort()).toEqual(["pay pal", "paypal"].sort());
+    expect(term.confidence).toBe(1.0);
+
+    const stored = store.allTerms();
+    expect(stored).toHaveLength(1); // merged, not duplicated
+  });
+
+  test("does not lower confidence when the new input is less confident than the existing entry", () => {
+    const store = makeStore();
+    const now = Date.now();
+    store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["Diyi Wang", JSON.stringify(["Diyi"]), "person", 0.9, "owner", "[]", now, now, null]
+    );
+    const existing = store.allTerms();
+
+    const { term } = upsertEntityTerm(store, existing, {
+      canonicalTerm: "Diyi Wang",
+      aliases: [],
+      category: "person",
+      confidence: 0.5,
+      sourceEventIds: [],
+    });
+
+    expect(term.confidence).toBe(0.9);
   });
 });
 

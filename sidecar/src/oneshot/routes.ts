@@ -41,7 +41,11 @@ async function handleAsk(
   const body = await readJsonBody<AskRequestBody>(req);
   const question = body.question ?? "";
   const matchedTerms = findKnownTerms(store, question);
-  logContextUsage({ endpoint: "ask", inputText: question, matchedTerms }, contextLogWriter);
+  const ownerFactsCount = store.allOwnerFacts().length;
+  logContextUsage(
+    { endpoint: "ask", inputText: question, matchedTerms, ownerFactsCount },
+    contextLogWriter
+  );
   const knownTerms = buildKnownTermsContext(store, question);
   const userContent = knownTerms ? `${question}\n\n${knownTerms}` : question;
 

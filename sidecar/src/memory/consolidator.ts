@@ -184,10 +184,18 @@ function passesGate(candidate: EntityTermCandidate): boolean {
   );
 }
 
+/** Minimal shape `findMatchingTerm`/`upsertEntityTerm` need from a candidate —
+ * both `EntityTermCandidate` (consolidator's LLM-proposed shape) and the
+ * `remember_fact` built-in tool's direct-instruction input satisfy this. */
+interface NamedCandidate {
+  canonicalTerm: string;
+  aliases: string[];
+}
+
 /** Exact canonicalTerm-or-alias match (case-insensitive), never substring/phonetic. */
 function findMatchingTerm(
   existingTerms: EntityTerm[],
-  candidate: EntityTermCandidate
+  candidate: NamedCandidate
 ): EntityTerm | undefined {
   const candidateNames = new Set(
     [candidate.canonicalTerm, ...candidate.aliases].map((s) => s.toLowerCase())
@@ -207,6 +215,94 @@ function unionCaseInsensitive(a: string[], b: string[]): string[] {
     }
   }
   return Array.from(seen.values());
+}
+
+export interface UpsertEntityTermInput {
+  canonicalTerm: string;
+  aliases: string[];
+  category: EntityCategory;
+  confidence: number;
+  sourceEventIds: number[];
+  origin?: EventOrigin;
+}
+
+export interface UpsertEntityTermResult {
+  term: EntityTerm;
+  merged: boolean;
+}
+
+/**
+ * Shared write path for "a canonicalTerm+aliases candidate should exist in
+ * entity_terms, merging with whatever's already there rather than
+ * duplicating it" -- factored out so both `runConsolidation`'s dreaming pass
+ * (candidates gated by `passesGate`, confidence/support-derived) and the
+ * `remember_fact` built-in tool (a direct, ungated owner instruction) apply
+ * *exactly* the same merge-by-canonical-or-alias-match / union-aliases /
+ * keep-higher-confidence behavior, so the two paths can't silently drift
+ * apart. `existingTerms` is the caller's current view of entity_terms (kept
+ * up to date across multiple calls in the same batch, as `runConsolidation`
+ * does) -- this function does not re-fetch it itself.
+ */
+export function upsertEntityTerm(
+  store: MemoryStore,
+  existingTerms: EntityTerm[],
+  input: UpsertEntityTermInput,
+  now: number = Date.now()
+): UpsertEntityTermResult {
+  const match = findMatchingTerm(existingTerms, input);
+
+  if (match) {
+    const mergedAliases = unionCaseInsensitive(match.aliases, input.aliases);
+    const mergedConfidence = Math.max(match.confidence, input.confidence);
+    const mergedSourceEventIds = Array.from(
+      new Set([...match.sourceEventIds, ...input.sourceEventIds])
+    );
+
+    store.db.run(
+      "UPDATE entity_terms SET aliases = ?, confidence = ?, sourceEventIds = ?, updatedAt = ? WHERE id = ?",
+      [JSON.stringify(mergedAliases), mergedConfidence, JSON.stringify(mergedSourceEventIds), now, match.id]
+    );
+
+    const term: EntityTerm = {
+      ...match,
+      aliases: mergedAliases,
+      confidence: mergedConfidence,
+      sourceEventIds: mergedSourceEventIds,
+      updatedAt: now,
+    };
+    return { term, merged: true };
+  }
+
+  const insertResult = store.db.run(
+    `INSERT INTO entity_terms
+      (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.canonicalTerm,
+      JSON.stringify(input.aliases),
+      input.category,
+      input.confidence,
+      input.origin ?? "owner",
+      JSON.stringify(input.sourceEventIds),
+      now,
+      now,
+      null,
+    ]
+  );
+
+  const term: EntityTerm = {
+    id: Number(insertResult.lastInsertRowid),
+    canonicalTerm: input.canonicalTerm,
+    aliases: input.aliases,
+    category: input.category,
+    confidence: input.confidence,
+    origin: input.origin ?? "owner",
+    sourceEventIds: input.sourceEventIds,
+    createdAt: now,
+    updatedAt: now,
+    supersedes: null,
+  };
+  return { term, merged: false };
 }
 
 /**
@@ -280,56 +376,29 @@ export async function runConsolidation(
   const currentTerms = existingTermsBefore.slice();
 
   for (const candidate of accepted) {
-    const match = findMatchingTerm(currentTerms, candidate);
-    if (match) {
-      const mergedAliases = unionCaseInsensitive(match.aliases, candidate.aliases);
-      const mergedConfidence = Math.max(match.confidence, candidate.confidence);
-      const mergedSourceEventIds = Array.from(
-        new Set([...match.sourceEventIds, ...candidate.supportingEventIds])
-      );
-
-      store.db.run(
-        "UPDATE entity_terms SET aliases = ?, confidence = ?, sourceEventIds = ?, updatedAt = ? WHERE id = ?",
-        [JSON.stringify(mergedAliases), mergedConfidence, JSON.stringify(mergedSourceEventIds), now, match.id]
-      );
-
-      match.aliases = mergedAliases;
-      match.confidence = mergedConfidence;
-      match.sourceEventIds = mergedSourceEventIds;
-      match.updatedAt = now;
-
-      summaryParts.push(`merged "${candidate.canonicalTerm}" into "${match.canonicalTerm}"`);
-    } else {
-      const insertResult = store.db.run(
-        `INSERT INTO entity_terms
-          (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          candidate.canonicalTerm,
-          JSON.stringify(candidate.aliases),
-          candidate.category,
-          candidate.confidence,
-          "owner" as EventOrigin,
-          JSON.stringify(candidate.supportingEventIds),
-          now,
-          now,
-          null,
-        ]
-      );
-
-      currentTerms.push({
-        id: Number(insertResult.lastInsertRowid),
+    const { term, merged } = upsertEntityTerm(
+      store,
+      currentTerms,
+      {
         canonicalTerm: candidate.canonicalTerm,
         aliases: candidate.aliases,
         category: candidate.category,
         confidence: candidate.confidence,
-        origin: "owner",
         sourceEventIds: candidate.supportingEventIds,
-        createdAt: now,
-        updatedAt: now,
-        supersedes: null,
-      });
+      },
+      now
+    );
 
+    const existingIndex = currentTerms.findIndex((t) => t.id === term.id);
+    if (existingIndex >= 0) {
+      currentTerms[existingIndex] = term;
+    } else {
+      currentTerms.push(term);
+    }
+
+    if (merged) {
+      summaryParts.push(`merged "${candidate.canonicalTerm}" into "${term.canonicalTerm}"`);
+    } else {
       const aliasSummary = candidate.aliases.length > 0 ? candidate.aliases.join(", ") : "none";
       summaryParts.push(`added "${candidate.canonicalTerm}" (aliases: ${aliasSummary})`);
     }

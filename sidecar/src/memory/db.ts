@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS memory_consolidation_runs (
   snapshotBeforeJSON TEXT NOT NULL,
   rolledBackAt INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS owner_facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content TEXT NOT NULL,
+  createdAt INTEGER NOT NULL,
+  origin TEXT NOT NULL
+);
 `;
 
 /**

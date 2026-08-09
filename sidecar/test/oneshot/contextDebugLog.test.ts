@@ -33,6 +33,7 @@ describe("formatContextUsageLogLine", () => {
         endpoint: "ask",
         inputText: "what is the status of Zephyrus?",
         matchedTerms: [makeTerm("Zephyrus")],
+        ownerFactsCount: 0,
       },
       new Date("2026-08-09T00:00:00.000Z")
     );
@@ -49,6 +50,7 @@ describe("formatContextUsageLogLine", () => {
       endpoint: "agent",
       inputText: "summarize my notes",
       matchedTerms: [],
+      ownerFactsCount: 0,
     });
 
     expect(line).toContain("[agent]");
@@ -60,6 +62,7 @@ describe("formatContextUsageLogLine", () => {
       endpoint: "ask",
       inputText: "compare Zephyrus and Orion",
       matchedTerms: [makeTerm("Zephyrus"), makeTerm("Orion")],
+      ownerFactsCount: 0,
     });
 
     expect(line).toContain("2 known term(s): Zephyrus, Orion");
@@ -71,10 +74,33 @@ describe("formatContextUsageLogLine", () => {
       endpoint: "ask",
       inputText: longInput,
       matchedTerms: [],
+      ownerFactsCount: 0,
     });
 
     expect(line.length).toBeLessThan(longInput.length);
     expect(line).toContain("…");
+  });
+
+  test("reports the owner facts count when facts were included", () => {
+    const line = formatContextUsageLogLine({
+      endpoint: "ask",
+      inputText: "what is my name?",
+      matchedTerms: [],
+      ownerFactsCount: 2,
+    });
+
+    expect(line).toContain("2 owner fact(s) included");
+  });
+
+  test("honestly reports 'no owner facts' rather than fabricating a count", () => {
+    const line = formatContextUsageLogLine({
+      endpoint: "ask",
+      inputText: "what time is it?",
+      matchedTerms: [],
+      ownerFactsCount: 0,
+    });
+
+    expect(line).toContain("no owner facts");
   });
 });
 
@@ -82,7 +108,7 @@ describe("logContextUsage", () => {
   test("passes the formatted line to the injected writer", () => {
     const written: string[] = [];
     logContextUsage(
-      { endpoint: "ask", inputText: "hello", matchedTerms: [] },
+      { endpoint: "ask", inputText: "hello", matchedTerms: [], ownerFactsCount: 0 },
       (line) => written.push(line)
     );
 

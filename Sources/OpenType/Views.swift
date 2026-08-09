@@ -1534,11 +1534,41 @@ private struct MemoryPanelView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 6) {
-                Label(
-                    OpenTypeL10n.text("整理记录", english: "Consolidation Runs"),
-                    systemImage: "clock.arrow.2.circlepath"
-                )
-                .font(.system(size: 10.5, weight: .semibold))
+                HStack {
+                    Label(
+                        OpenTypeL10n.text("整理记录", english: "Consolidation Runs"),
+                        systemImage: "clock.arrow.2.circlepath"
+                    )
+                    .font(.system(size: 10.5, weight: .semibold))
+
+                    Spacer()
+
+                    Button {
+                        model.consolidateMemoryNow()
+                    } label: {
+                        if model.consolidateNowStatus == .running {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text(OpenTypeL10n.text("立即整理", english: "Consolidate now"))
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(model.consolidateNowStatus == .running)
+                }
+
+                switch model.consolidateNowStatus {
+                case .succeeded(let message):
+                    Label(message, systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.green)
+                case .failed(let message):
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                case .idle, .running:
+                    EmptyView()
+                }
 
                 if model.memoryConsolidationRuns.isEmpty {
                     Text(OpenTypeL10n.text("暂无整理记录", english: "No consolidation runs yet"))

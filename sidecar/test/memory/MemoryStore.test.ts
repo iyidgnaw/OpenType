@@ -160,6 +160,57 @@ describe("MemoryStore consolidation trigger helpers", () => {
   });
 });
 
+describe("MemoryStore.recordOwnerFact / allOwnerFacts", () => {
+  test("recordOwnerFact inserts a row and returns its id", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("The owner's name is Diyi.");
+    expect(typeof id).toBe("number");
+    expect(id).toBeGreaterThan(0);
+  });
+
+  test("defaults origin to 'owner' when not passed", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("The owner prefers formal English.");
+    const row = store.db
+      .query("SELECT * FROM owner_facts WHERE id = ?")
+      .get(id) as Record<string, unknown>;
+    expect(row.origin).toBe("owner");
+    expect(row.content).toBe("The owner prefers formal English.");
+    expect(typeof row.createdAt).toBe("number");
+  });
+
+  test("respects an explicit origin", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("Learned via consolidation.", "agent");
+    const row = store.db
+      .query("SELECT * FROM owner_facts WHERE id = ?")
+      .get(id) as Record<string, unknown>;
+    expect(row.origin).toBe("agent");
+  });
+
+  test("allOwnerFacts returns an empty array when none recorded", () => {
+    const store = makeStore();
+    expect(store.allOwnerFacts()).toEqual([]);
+  });
+
+  test("allOwnerFacts returns every recorded fact, parsed", () => {
+    const store = makeStore();
+    store.recordOwnerFact("The owner's name is Diyi.");
+    store.recordOwnerFact("The owner prefers formal English.", "owner");
+    const facts = store.allOwnerFacts();
+    expect(facts).toHaveLength(2);
+    expect(facts.map((f) => f.content).sort()).toEqual(
+      ["The owner's name is Diyi.", "The owner prefers formal English."].sort()
+    );
+    expect(facts[0]).toMatchObject({
+      id: expect.any(Number),
+      content: expect.any(String),
+      createdAt: expect.any(Number),
+      origin: expect.any(String),
+    });
+  });
+});
+
 describe("MemoryStore.listConsolidationRuns", () => {
   test("returns an empty array when no runs have happened", () => {
     const store = makeStore();

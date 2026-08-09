@@ -1,0 +1,50 @@
+/**
+ * Generic "a set of callable tools" shape shared by `McpToolSet`
+ * (`agent/mcpClient.ts`) and `BuiltInToolSet` (`agent/builtInTools.ts`).
+ * Deliberately structural rather than importing either concrete type: this
+ * module knows nothing about MCP or built-in tools specifically, only how to
+ * combine anything shaped like this into one.
+ */
+export interface ToolSet {
+  openAiTools: unknown[];
+  callTool: (name: string, args: unknown) => Promise<{ content: string }>;
+}
+
+function toolNamesIn(set: ToolSet): Set<string> {
+  const names = new Set<string>();
+  for (const tool of set.openAiTools) {
+    const name = (tool as { function?: { name?: unknown } } | undefined)?.function?.name;
+    if (typeof name === "string") {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Combines any number of tool sets (built-in + however many MCP servers are
+ * connected) into one: `openAiTools` is the concatenation of all of them
+ * (each set is already responsible for namespace-prefixing its own tool
+ * names -- `opentype__...` for built-ins, `serverName__...` for MCP -- so
+ * collisions are not expected here), and `callTool` routes a call to
+ * whichever set actually owns that tool name.
+ */
+export function mergeToolSets(...sets: ToolSet[]): ToolSet {
+  const openAiTools = sets.flatMap((set) => set.openAiTools);
+  const setsByToolName = new Map<string, ToolSet>();
+  for (const set of sets) {
+    for (const name of toolNamesIn(set)) {
+      setsByToolName.set(name, set);
+    }
+  }
+
+  async function callTool(name: string, args: unknown): Promise<{ content: string }> {
+    const owningSet = setsByToolName.get(name);
+    if (!owningSet) {
+      throw new Error(`Unknown tool: ${name}`);
+    }
+    return owningSet.callTool(name, args);
+  }
+
+  return { openAiTools, callTool };
+}

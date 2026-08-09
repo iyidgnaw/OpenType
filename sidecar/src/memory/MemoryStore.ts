@@ -27,6 +27,20 @@ export interface EntityTerm {
   supersedes: number | null;
 }
 
+/**
+ * A free-text fact remembered about the owner (e.g. "The owner's name is
+ * Diyi.", "The owner prefers formal English."), distinct from `entity_terms`
+ * which is specifically shaped for term/alias correction. Written either
+ * directly via the `remember_fact` built-in tool (category "profile") or,
+ * in principle, by future consolidation passes.
+ */
+export interface OwnerFact {
+  id: number;
+  content: string;
+  createdAt: number;
+  origin: EventOrigin;
+}
+
 export interface ConsolidationRunSummary {
   id: number;
   ranAt: number;
@@ -110,6 +124,25 @@ export class MemoryStore {
       }
       return term.aliases.some((alias) => alias.toLowerCase().includes(needle));
     });
+  }
+
+  /**
+   * Writes a free-text owner fact directly (no gating) into `owner_facts`.
+   * The direct-write counterpart to `entity_terms` merges done via
+   * `upsertEntityTerm` -- owner facts are never merged/deduplicated, they're
+   * simply appended, since they're arbitrary free text rather than a
+   * canonical-name-plus-aliases shape.
+   */
+  recordOwnerFact(content: string, origin: EventOrigin = "owner"): number {
+    const result = this.db.run(
+      `INSERT INTO owner_facts (content, createdAt, origin) VALUES (?, ?, ?)`,
+      [content, Date.now(), origin]
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  allOwnerFacts(): OwnerFact[] {
+    return this.db.query("SELECT * FROM owner_facts").all() as OwnerFact[];
   }
 
   unconsolidatedEventCount(): number {

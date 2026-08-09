@@ -131,4 +131,32 @@ describe("POST /agent/run", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("no context matched");
   });
+
+  test("includes all owner facts as context, and logs how many were included", async () => {
+    const store = makeStore();
+    store.recordOwnerFact("The owner's name is Diyi.");
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const { writer, lines } = captureContextLog();
+    const router = createRouter(buildAgentRoutes(store, chat, noTools(), writer));
+
+    await router(post({ task: "what is my name?" }));
+
+    expect(capturedMessages![1].content).toContain("Diyi");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("1 owner fact(s) included");
+  });
+
+  test("logs 'no owner facts' honestly when none are recorded", async () => {
+    const chat: AgentChatFn = async () => ({ content: "done" });
+    const { writer, lines } = captureContextLog();
+    const router = createRouter(buildAgentRoutes(makeStore(), chat, noTools(), writer));
+
+    await router(post({ task: "just a task" }));
+
+    expect(lines[0]).toContain("no owner facts");
+  });
 });

@@ -1,13 +1,16 @@
 import { unlinkSync, existsSync } from "node:fs";
 import { buildAgentRoutes } from "./agent/routes";
 import type { AgentChatFn } from "./agent/loop";
-import { connectConfiguredMcpServers, type McpToolSet } from "./agent/mcpClient";
+import { connectConfiguredMcpServers } from "./agent/mcpClient";
+import { createBuiltInTools } from "./agent/builtInTools";
+import { mergeToolSets, type ToolSet } from "./agent/toolSets";
 import { buildAsrRoutes } from "./asr/routes";
 import { defaultWhisperClientFactories, WhisperClient } from "./asr/whisperClient";
 import { loadEnv } from "./env";
 import { openDatabase } from "./memory/db";
 import { MemoryStore } from "./memory/MemoryStore";
 import { buildMemoryRoutes } from "./memory/routes";
+import type { CallLLM } from "./memory/consolidator";
 import { buildOneShotRoutes } from "./oneshot/routes";
 import { createFileContextUsageLogWriter, type ContextUsageLogWriter } from "./oneshot/contextDebugLog";
 import { createDeepSeekClient } from "./provider/deepseek";
@@ -18,12 +21,19 @@ import { createRouter } from "./router";
  * because it's shared with `/agent/run`, which needs the tool-calling
  * message shape; `AgentChatFn` is structurally compatible with
  * `OneShotChatFn`, so it still satisfies `buildOneShotRoutes` unchanged.
+ *
+ * `tools` is expected to already be the merge of built-in tools
+ * (`agent/builtInTools.ts`, always available) and whatever MCP servers are
+ * configured (`agent/mcpClient.ts`) -- see `mergeToolSets` in
+ * `agent/toolSets.ts` and its use in `main()` below. `buildApp` itself
+ * doesn't care which is which, it just needs one combined `ToolSet`.
  */
 export function buildApp(
   store: MemoryStore,
   chat: AgentChatFn,
-  tools: McpToolSet,
+  tools: ToolSet,
   contextLogWriter: ContextUsageLogWriter,
+  callLLM: CallLLM,
   transcribe: (audio: Uint8Array) => Promise<string>
 ) {
   return createRouter([
@@ -33,7 +43,7 @@ export function buildApp(
       handler: () => Response.json({ status: "ok" }),
     },
     ...buildOneShotRoutes(store, chat, contextLogWriter),
-    ...buildMemoryRoutes(store),
+    ...buildMemoryRoutes(store, callLLM),
     ...buildAgentRoutes(store, chat, tools, contextLogWriter),
     ...buildAsrRoutes(transcribe),
   ]);
@@ -43,7 +53,13 @@ async function main() {
   const env = loadEnv();
   const store = new MemoryStore(openDatabase(env.dbPath));
   const deepSeekClient = createDeepSeekClient(env);
-  const tools = await connectConfiguredMcpServers(process.env.OPENTYPE_MCP_SERVERS);
+  const callLLM: CallLLM = async (prompt) => {
+    const result = await deepSeekClient.chat([{ role: "user", content: prompt }]);
+    return result.content ?? "";
+  };
+  const mcpTools = await connectConfiguredMcpServers(process.env.OPENTYPE_MCP_SERVERS);
+  const builtInTools = createBuiltInTools({ store, callLLM });
+  const tools = mergeToolSets(builtInTools, mcpTools);
   const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
 
   // Local MLX-Whisper ASR: spawns the python server once here (alongside the
@@ -78,7 +94,7 @@ async function main() {
   // each of which `await whisperReady` on its own.
   whisperReady.catch(() => {});
 
-  const fetch = buildApp(store, deepSeekClient.chat, tools, contextLogWriter, async (audio) => {
+  const fetch = buildApp(store, deepSeekClient.chat, tools, contextLogWriter, callLLM, async (audio) => {
     await whisperReady;
     return whisperClient.transcribe(audio);
   });

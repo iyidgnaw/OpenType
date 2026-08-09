@@ -20,6 +20,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastApplication = ""
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
+    /// Backs the Settings "Memory" panel's manual "Consolidate now" button
+    /// (`MemoryPanelView`) — a brief, in-place success/failure indicator, not
+    /// a persistent log (that's what `memoryConsolidationRuns` is for).
+    @Published private(set) var consolidateNowStatus: ConsolidateNowStatus = .idle
     /// Bounded history of recent Agent (`/agent/run`) dispatches, most recent
     /// first — see `AgentRunTracking.swift`. Replaces the old
     /// `lastAgentRunSteps` (singular, overwritten every run) now that Agent
@@ -643,6 +647,44 @@ final class AppModel: ObservableObject {
         } catch {
             memoryConsolidationRuns = []
             print("OpenType: failed to refresh memory consolidation runs from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    private struct ConsolidateNowResponseBody: Decodable { let result: ConsolidationResultSummary }
+
+    /// Manual trigger for the Settings "Memory" panel's "Consolidate now"
+    /// button: hits `POST /memory/consolidate-now`, which runs the sidecar's
+    /// `runConsolidation` immediately, bypassing the normal automatic
+    /// time/event-count gate (`shouldConsolidate`) — the same bypass path
+    /// the voice-triggered `consolidate_memory_now` agent tool uses. Updates
+    /// `consolidateNowStatus` for the button's brief indicator and refreshes
+    /// the panel afterward so a newly-accepted term shows up immediately.
+    func consolidateMemoryNow() {
+        guard consolidateNowStatus != .running else { return }
+        consolidateNowStatus = .running
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let response: ConsolidateNowResponseBody = try await self.sidecarClient.request(
+                    method: "POST",
+                    path: "/memory/consolidate-now"
+                )
+                if response.result.aborted {
+                    self.consolidateNowStatus = .failed(
+                        OpenTypeL10n.text("整理未完成，请稍后重试", english: "Consolidation did not complete")
+                    )
+                } else {
+                    self.consolidateNowStatus = .succeeded(
+                        OpenTypeL10n.text(
+                            "已整理 \(response.result.eventsConsidered) 条记录，采纳 \(response.result.candidatesAccepted) 条",
+                            english: "Reviewed \(response.result.eventsConsidered), accepted \(response.result.candidatesAccepted)"
+                        )
+                    )
+                }
+                await self.refreshMemoryPanel()
+            } catch {
+                self.consolidateNowStatus = .failed(error.localizedDescription)
+            }
         }
     }
 

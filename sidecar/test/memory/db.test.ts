@@ -67,6 +67,15 @@ describe("openDatabase", () => {
     );
   });
 
+  test("creates the owner_facts table with the spec columns", () => {
+    const db = openDatabase(":memory:");
+    const columns = db
+      .query("PRAGMA table_info(owner_facts)")
+      .all() as Array<{ name: string }>;
+    const names = columns.map((c) => c.name).sort();
+    expect(names).toEqual(["content", "createdAt", "id", "origin"].sort());
+  });
+
   test("is idempotent — opening twice against the same file does not error", () => {
     const db1 = openDatabase(":memory:");
     db1.close();
@@ -107,5 +116,13 @@ describe("openDatabase", () => {
     );
     const run = db.query("SELECT * FROM memory_consolidation_runs").get() as Record<string, unknown>;
     expect(run.summary).toBe("test summary");
+
+    db.run(
+      `INSERT INTO owner_facts (content, createdAt, origin) VALUES (?, ?, ?)`,
+      ["The owner's name is Diyi.", Date.now(), "owner"]
+    );
+    const fact = db.query("SELECT * FROM owner_facts").get() as Record<string, unknown>;
+    expect(fact.content).toBe("The owner's name is Diyi.");
+    expect(fact.origin).toBe("owner");
   });
 });

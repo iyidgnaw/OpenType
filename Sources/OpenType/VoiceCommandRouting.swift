@@ -44,22 +44,13 @@ struct RoutedTranscript: Equatable {
 }
 
 enum VoiceModeRouter {
+    /// The 3-mode cut removed the routes for the retired
+    /// polish/translate/xReply modes; only the spoken trigger for switching
+    /// into Agent mode mid-recording remains.
     private static let routes: [(mode: InputMode, prefixes: [String])] = [
         (
-            .sidecarTranslate,
-            ["中转英", "英文模式", "用英文回复", "用英文写", "英文", "english", "translate to english"]
-        ),
-        (
-            .sidecarXReply,
-            ["回复这条推文", "回复推文", "推特回复", "x reply", "x回复"]
-        ),
-        (
-            .sidecarAgent,
+            .agent,
             ["agent模式", "agent 模式", "agent mode", "命令输入", "创作模式", "command input"]
-        ),
-        (
-            .sidecarPolish,
-            ["选中修改", "编辑选中文字", "编辑这段", "修改这段"]
         )
     ]
 

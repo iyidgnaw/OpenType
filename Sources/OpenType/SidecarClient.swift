@@ -134,6 +134,15 @@ final class SidecarClient {
             .deletingLastPathComponent()
             .appendingPathComponent("opentype.sqlite3")
             .path
+        // Proof-of-context-usage log (`contextDebugLog.ts`): same
+        // Application-Support-adjacent convention as the db path above, so
+        // it survives being read from a launched (non-Terminal) app
+        // instance the same way `debugLog(_:)` below does for sidecar
+        // startup diagnostics.
+        environment["OPENTYPE_CONTEXT_LOG_PATH"] = socketURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("context-debug.log")
+            .path
 
         let bundledBinaryPath = (Bundle.main.resourcePath ?? "")
             .appending("/opentype-sidecar")

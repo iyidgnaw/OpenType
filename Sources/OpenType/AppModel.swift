@@ -23,6 +23,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
     @Published private(set) var lastAgentRunSteps: [AgentStepSummary] = []
     @Published var selectedTab: AppTab = .home
+    /// Drives the floating Ask/Agent popup (`AskPanelController`). `nil`
+    /// hides it; non-nil shows it; `answer == nil` is the "thinking" state.
+    /// The `didSet` keeps `askPanel` (an imperative `NSPanel` owner, not an
+    /// `ObservableObject` itself — same split as `overlay`/`OverlayController`)
+    /// in sync with this single source of truth.
+    @Published private(set) var askPanelState: AskPanelState? {
+        didSet { syncAskPanel() }
+    }
 
     let configuration: AppConfiguration
     let history: HistoryStore
@@ -36,6 +44,7 @@ final class AppModel: ObservableObject {
     private let contextBridge = ContextBridge()
     private let hotKey = GlobalHotKey()
     private let overlay = OverlayController()
+    private let askPanel = AskPanelController()
     private var customSounds: [String: NSSound] = [:]
     private var activeFeedbackSound: NSSound?
     private var client: AIServiceClient?
@@ -90,6 +99,11 @@ final class AppModel: ObservableObject {
         )
         self.overlay.updateColorTheme(self.configuration.colorTheme)
         self.overlay.updateInterfaceLanguage(self.configuration.interfaceLanguage)
+        self.askPanel.updateColorTheme(self.configuration.colorTheme)
+        self.askPanel.updateInterfaceLanguage(self.configuration.interfaceLanguage)
+        self.askPanel.onRequestDismiss = { [weak self] in
+            self?.askPanelState = nil
+        }
         microphonePermission = audioRecorder.permissionStatus
         speechRecognitionPermission = liveSpeechTranscriber.permissionStatus
         liveSpeechTranscriber.onTranscript = { [weak self] text in
@@ -189,7 +203,7 @@ final class AppModel: ObservableObject {
                 applicationName: "OpenType 试用",
                 bundleIdentifier: "ai.rain.opentype"
             ),
-            mode: .askAnything,
+            mode: .ask,
             practice: true
         )
     }
@@ -360,12 +374,14 @@ final class AppModel: ObservableObject {
         guard configuration.colorTheme != theme else { return }
         configuration.colorTheme = theme
         overlay.updateColorTheme(theme)
+        askPanel.updateColorTheme(theme)
     }
 
     func changeInterfaceLanguage(_ language: InterfaceLanguage) {
         guard configuration.interfaceLanguage != language else { return }
         configuration.interfaceLanguage = language
         overlay.updateInterfaceLanguage(language)
+        askPanel.updateInterfaceLanguage(language)
         refreshAIService()
         updateShortcutPresentation(
             preference: configuration.hotKeyPreset,
@@ -484,6 +500,20 @@ final class AppModel: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
+    /// Explicit dismissal entry point for the Ask/Agent popup, in addition to
+    /// the panel's own close button / Escape / click-outside handling.
+    func dismissAskPanel() {
+        askPanelState = nil
+    }
+
+    private func syncAskPanel() {
+        if let askPanelState {
+            askPanel.show(askPanelState)
+        } else {
+            askPanel.hide()
+        }
+    }
+
     private var isBusy: Bool {
         switch state {
         case .transcribing, .transforming, .inserting:
@@ -575,34 +605,16 @@ final class AppModel: ObservableObject {
     private static let sidecarTextModel = "deepseek-v4-flash"
 
     /// Request/response bodies for the sidecar's `/oneshot/ask` endpoint,
-    /// used by the `askAnything` mode branch below.
+    /// used by the `ask` mode branch below.
     private struct AskRequestBody: Encodable { let question: String }
     private struct AskResponseBody: Decodable { let result: String }
 
-    /// Request/response bodies for the sidecar's `/oneshot/polish` endpoint,
-    /// used by the `sidecarPolish` mode branch below. `result`/`error` are
-    /// both optional because the sidecar returns one or the other depending
-    /// on HTTP status (200 vs 422), and `SidecarClient.request` decodes
-    /// whatever JSON body comes back without inspecting the status code.
-    private struct PolishRequestBody: Encodable { let selectedText: String; let instruction: String }
-    private struct PolishResponseBody: Decodable { let result: String?; let error: String? }
-
-    /// Request/response bodies for the sidecar's `/oneshot/translate`
-    /// endpoint, used by the `sidecarTranslate` mode branch below.
-    private struct TranslateRequestBody: Encodable { let transcript: String }
-    private struct TranslateResponseBody: Decodable { let result: String?; let error: String? }
-
-    /// Request/response bodies for the sidecar's `/oneshot/xreply` endpoint,
-    /// used by the `sidecarXReply` mode branch below.
-    private struct SidecarXReplyRequestBody: Encodable { let originalPost: String; let viewpoint: String? }
-    private struct SidecarXReplyResponseBody: Decodable { let result: String?; let error: String? }
-
     /// Request/response bodies for the sidecar's `/agent/run` endpoint, used
-    /// by the `sidecarAgent` mode branch below. This runs a full agent loop
+    /// by the `agent` mode branch below. This runs a full agent loop
     /// (potentially calling MCP tools) as a single blocking HTTP call and can
-    /// take noticeably longer than the other one-shot sidecar modes; `steps`
-    /// carries the full step-by-step log after the fact for display in the
-    /// Task List panel (`AgentTaskLogView`).
+    /// take noticeably longer than `/oneshot/ask`; `steps` carries the full
+    /// step-by-step log after the fact for display in the Task List panel
+    /// (`AgentTaskLogView`).
     private struct AgentRunRequestBody: Encodable { let task: String; let context: String? }
     private struct AgentRunResponseBody: Decodable { let result: String; let steps: [AgentStepSummary] }
 
@@ -686,19 +698,10 @@ final class AppModel: ObservableObject {
 
         do {
             setState(.transcribing)
-            let rawTranscript: String
-            do {
-                rawTranscript = try await client.transcribe(
-                    audioURL: audioURL,
-                    personalVocabulary: configuration.personalDictionary
-                )
-            } catch OpenTypeError.emptyRecording where startingMode == .sidecarXReply {
-                // Silence is a valid X Reply instruction: generate a useful
-                // conversational response from the selected post alone.
-                rawTranscript = ""
-            } catch OpenTypeError.emptyRecording where startingMode == .sidecarPolish {
-                throw OpenTypeError.missingEditInstruction
-            }
+            let rawTranscript = try await client.transcribe(
+                audioURL: audioURL,
+                personalVocabulary: configuration.personalDictionary
+            )
             try Task.checkCancellation()
             auditRawTranscript = rawTranscript
 
@@ -706,12 +709,10 @@ final class AppModel: ObservableObject {
                 rawTranscript,
                 enabled: configuration.pressEnterCommand
             )
-            let routed = startingMode == .sidecarPolish
-                ? RoutedTranscript(mode: .sidecarPolish, text: sendCommand.text)
-                : VoiceModeRouter.route(
-                    sendCommand.text,
-                    currentMode: startingMode
-                )
+            let routed = VoiceModeRouter.route(
+                sendCommand.text,
+                currentMode: startingMode
+            )
             let mode = routed.mode
             let transcript = routed.text
             activeMode = mode
@@ -738,8 +739,13 @@ final class AppModel: ObservableObject {
             setState(.transforming)
             let result: String
             switch mode {
-            case .askAnything:
+            case .transcribe:
+                // Pure ASR passthrough: no sidecar/LLM call at all, and no
+                // Ask/Agent popup — the transcript itself is the result.
+                result = transcript
+            case .ask:
                 effectiveTextModel = Self.sidecarTextModel
+                askPanelState = AskPanelState(kind: .ask, query: transcript, answer: nil)
                 do {
                     let response: AskResponseBody = try await sidecarClient.request(
                         method: "POST",
@@ -747,85 +753,17 @@ final class AppModel: ObservableObject {
                         body: AskRequestBody(question: transcript)
                     )
                     result = response.result
+                    askPanelState?.answer = result
                 } catch {
+                    askPanelState = nil
                     throw OpenTypeError.service(
-                        "Ask Anything 请求失败：\(error.localizedDescription)"
+                        "Ask 请求失败：\(error.localizedDescription)"
                     )
                 }
-            case .sidecarPolish:
-                effectiveTextModel = Self.sidecarTextModel
-                let response: PolishResponseBody
-                do {
-                    response = try await sidecarClient.request(
-                        method: "POST",
-                        path: "/oneshot/polish",
-                        body: PolishRequestBody(
-                            selectedText: capturedContext.selectedText ?? "",
-                            instruction: transcript
-                        )
-                    )
-                } catch {
-                    throw OpenTypeError.service(
-                        "润色请求失败：\(error.localizedDescription)"
-                    )
-                }
-                if response.error == "missing_instruction" {
-                    throw OpenTypeError.missingEditInstruction
-                }
-                guard let polished = response.result else {
-                    throw OpenTypeError.invalidResponse
-                }
-                result = polished
-            case .sidecarTranslate:
-                effectiveTextModel = Self.sidecarTextModel
-                let response: TranslateResponseBody
-                do {
-                    response = try await sidecarClient.request(
-                        method: "POST",
-                        path: "/oneshot/translate",
-                        body: TranslateRequestBody(transcript: transcript)
-                    )
-                } catch {
-                    throw OpenTypeError.service(
-                        "中转英 (Sidecar) 请求失败：\(error.localizedDescription)"
-                    )
-                }
-                if response.error == "translation_fidelity_failed" {
-                    throw OpenTypeError.service(
-                        OpenTypeL10n.text(
-                            "中转英未能忠实转换原话，请再试一次",
-                            english: "English Mode did not faithfully transform the source. Please try again."
-                        )
-                    )
-                }
-                guard let translated = response.result else {
-                    throw OpenTypeError.invalidResponse
-                }
-                result = translated
-            case .sidecarXReply:
-                effectiveTextModel = Self.sidecarTextModel
-                let response: SidecarXReplyResponseBody
-                do {
-                    response = try await sidecarClient.request(
-                        method: "POST",
-                        path: "/oneshot/xreply",
-                        body: SidecarXReplyRequestBody(
-                            originalPost: capturedContext.selectedText ?? "",
-                            viewpoint: transcript.isEmpty ? nil : transcript
-                        )
-                    )
-                } catch {
-                    throw OpenTypeError.service(
-                        "X Reply (Sidecar) 请求失败：\(error.localizedDescription)"
-                    )
-                }
-                guard let reply = response.result else {
-                    throw OpenTypeError.invalidResponse
-                }
-                result = reply
-            case .sidecarAgent:
+            case .agent:
                 effectiveTextModel = Self.sidecarTextModel
                 lastAgentRunSteps = []
+                askPanelState = AskPanelState(kind: .agent, query: transcript, answer: nil)
                 do {
                     let response: AgentRunResponseBody = try await sidecarClient.request(
                         method: "POST",
@@ -837,9 +775,11 @@ final class AppModel: ObservableObject {
                     )
                     lastAgentRunSteps = response.steps
                     result = response.result
+                    askPanelState?.answer = result
                 } catch {
+                    askPanelState = nil
                     throw OpenTypeError.service(
-                        "Agent (Sidecar) 请求失败：\(error.localizedDescription)"
+                        "Agent 请求失败：\(error.localizedDescription)"
                     )
                 }
             }

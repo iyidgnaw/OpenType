@@ -292,15 +292,11 @@ private struct ModeGrid: View {
     var body: some View {
         Grid(horizontalSpacing: 8, verticalSpacing: 8) {
             GridRow {
-                modeCard(.sidecarPolish)
-                modeCard(.sidecarTranslate)
+                modeCard(.transcribe)
+                modeCard(.ask)
             }
             GridRow {
-                modeCard(.sidecarAgent)
-                modeCard(.sidecarXReply)
-            }
-            GridRow {
-                modeCard(.askAnything)
+                modeCard(.agent)
                     .gridCellColumns(2)
             }
         }
@@ -1720,7 +1716,7 @@ private struct MemoryPanelView: View {
     }()
 }
 
-/// Minimal display of the most recent `sidecarAgent` mode run's
+/// Minimal display of the most recent `agent` mode run's
 /// step-by-step log (`AppModel.lastAgentRunSteps`), returned all at once by
 /// the sidecar's `POST /agent/run` after it finishes — there is no
 /// real-time streaming yet, and only one run's worth of history is kept

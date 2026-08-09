@@ -77,7 +77,7 @@ final class AgentMemoryStore: ObservableObject {
             MemoryEvent(
                 id: entry.id,
                 createdAt: entry.createdAt,
-                mode: .sidecarAgent,
+                mode: .agent,
                 applicationName: entry.applicationName,
                 bundleIdentifier: nil,
                 rawTranscript: entry.request,
@@ -382,7 +382,7 @@ final class AgentMemoryStore: ObservableObject {
             let event = MemoryEvent(
                 id: entry.id,
                 createdAt: entry.createdAt,
-                mode: .sidecarAgent,
+                mode: .agent,
                 applicationName: entry.applicationName,
                 bundleIdentifier: nil,
                 rawTranscript: entry.request,
@@ -606,7 +606,7 @@ final class AgentMemoryStore: ObservableObject {
         """
         guard let statement = prepare(sql) else { return [] }
         defer { sqlite3_finalize(statement) }
-        bind(InputMode.sidecarAgent.rawValue, at: 1, to: statement)
+        bind(InputMode.agent.rawValue, at: 1, to: statement)
         sqlite3_bind_int(statement, 2, Int32(maximumEntries))
         var result: [AgentTaskMemory] = []
         while sqlite3_step(statement) == SQLITE_ROW {

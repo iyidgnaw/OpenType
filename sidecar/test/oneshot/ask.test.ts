@@ -4,6 +4,7 @@ import { MemoryStore } from "../../src/memory/MemoryStore";
 import type { OneShotChatFn, OneShotChatMessage } from "../../src/oneshot/client";
 import { buildOneShotRoutes } from "../../src/oneshot/routes";
 import { createRouter } from "../../src/router";
+import type { ContextUsageLogWriter } from "../../src/oneshot/contextDebugLog";
 
 function makeStore(): MemoryStore {
   return new MemoryStore(openDatabase(":memory:"));
@@ -16,6 +17,11 @@ function post(body: unknown): Request {
   });
 }
 
+function captureContextLog(): { writer: ContextUsageLogWriter; lines: string[] } {
+  const lines: string[] = [];
+  return { writer: (line) => lines.push(line), lines };
+}
+
 describe("POST /oneshot/ask", () => {
   test("happy path: the model's answer is returned as-is", async () => {
     let capturedMessages: OneShotChatMessage[] | undefined;
@@ -23,7 +29,7 @@ describe("POST /oneshot/ask", () => {
       capturedMessages = messages;
       return { content: "Four." };
     };
-    const router = createRouter(buildOneShotRoutes(makeStore(), chat));
+    const router = createRouter(buildOneShotRoutes(makeStore(), chat, captureContextLog().writer));
 
     const response = await router(post({ question: "what is 2+2, answer in one word" }));
 
@@ -36,7 +42,7 @@ describe("POST /oneshot/ask", () => {
     const chat: OneShotChatFn = async () => ({
       content: "这是一个很长的回答，包含中文字符，远远超过原始问题的长度，用于验证 Ask 模式不做保真度校验。",
     });
-    const router = createRouter(buildOneShotRoutes(makeStore(), chat));
+    const router = createRouter(buildOneShotRoutes(makeStore(), chat, captureContextLog().writer));
 
     const response = await router(post({ question: "what language do you speak?" }));
 
@@ -59,10 +65,42 @@ describe("POST /oneshot/ask", () => {
       capturedMessages = messages;
       return { content: "answer" };
     };
-    const router = createRouter(buildOneShotRoutes(store, chat));
+    const router = createRouter(buildOneShotRoutes(store, chat, captureContextLog().writer));
 
     await router(post({ question: "what is the status of Zephyrus?" }));
 
     expect(capturedMessages![1].content).toContain("Zephyrus");
+  });
+
+  test("logs context usage (endpoint, input, and the matched term) via the injected writer", async () => {
+    const store = makeStore();
+    const now = Date.now();
+    store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES ('Zephyrus', '[]', 'project', 0.9, 'owner', '[]', ?, ?, NULL)`,
+      [now, now]
+    );
+    const chat: OneShotChatFn = async () => ({ content: "answer" });
+    const { writer, lines } = captureContextLog();
+    const router = createRouter(buildOneShotRoutes(store, chat, writer));
+
+    await router(post({ question: "what is the status of Zephyrus?" }));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("[ask]");
+    expect(lines[0]).toContain("Zephyrus");
+    expect(lines[0]).toContain("what is the status of Zephyrus?");
+  });
+
+  test("logs 'no context matched' honestly when the entity dictionary has no match", async () => {
+    const chat: OneShotChatFn = async () => ({ content: "answer" });
+    const { writer, lines } = captureContextLog();
+    const router = createRouter(buildOneShotRoutes(makeStore(), chat, writer));
+
+    await router(post({ question: "what time is it?" }));
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("no context matched");
   });
 });

@@ -82,10 +82,13 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(options["language"] as? String, "ja")
     }
 
-    func testSelectionRequiredErrorIsSpecificToXReply() {
+    func testSelectionRequiredErrorUsesGenericMessage() {
+        // No remaining mode (transcribe/ask/agent) requires a selection, so
+        // this error path is unreachable in practice; it still needs a
+        // sensible generic message for forward compatibility.
         XCTAssertEqual(
-            OpenTypeError.selectionRequired(.sidecarXReply).errorDescription,
-            "请先选中要回复的推文，再开始说话"
+            OpenTypeError.selectionRequired(.ask).errorDescription,
+            "这个模式需要先选中文字"
         )
     }
 
@@ -131,84 +134,42 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertFalse(result.pressEnter)
     }
 
-    func testVoiceModeRouterSwitchesOneDictationToTranslate() {
-        let result = VoiceModeRouter.route(
-            "英文：我觉得这个方向是对的",
-            currentMode: .askAnything
-        )
-
-        XCTAssertEqual(result.mode, .sidecarTranslate)
-        XCTAssertEqual(result.text, "我觉得这个方向是对的")
-    }
-
-    func testVoiceModeRouterRecognizesChineseToEnglishName() {
-        let result = VoiceModeRouter.route(
-            "中转英：我觉得这个方向是对的",
-            currentMode: .askAnything
-        )
-
-        XCTAssertEqual(InputMode.sidecarTranslate.title, "中转英")
-        XCTAssertEqual(result.mode, .sidecarTranslate)
-        XCTAssertEqual(result.text, "我觉得这个方向是对的")
-    }
-
-    func testVoiceModeRouterSwitchesOneDictationToXReply() {
-        let result = VoiceModeRouter.route(
-            "X Reply, 我同意，但执行成本被低估了",
-            currentMode: .askAnything
-        )
-
-        XCTAssertEqual(result.mode, .sidecarXReply)
-        XCTAssertEqual(result.text, "我同意，但执行成本被低估了")
-    }
-
-    func testVoiceModeRouterRecognizesSelectedEditName() {
-        let result = VoiceModeRouter.route(
-            "选中修改：缩短一半，保留数字",
-            currentMode: .askAnything
-        )
-
-        XCTAssertEqual(result.mode, .sidecarPolish)
-        XCTAssertEqual(result.text, "缩短一半，保留数字")
-    }
-
     func testVoiceModeRouterDoesNotMisreadOrdinarySentence() {
         let result = VoiceModeRouter.route(
             "英文产品的增长很快",
-            currentMode: .askAnything
+            currentMode: .ask
         )
 
-        XCTAssertEqual(result.mode, .askAnything)
+        XCTAssertEqual(result.mode, .ask)
         XCTAssertEqual(result.text, "英文产品的增长很快")
     }
 
     func testModeCycleFollowsVisibleModeOrderAndWraps() {
-        XCTAssertEqual(InputMode.sidecarPolish.next, .sidecarTranslate)
-        XCTAssertEqual(InputMode.sidecarTranslate.next, .sidecarAgent)
-        XCTAssertEqual(InputMode.sidecarAgent.next, .sidecarXReply)
-        XCTAssertEqual(InputMode.sidecarXReply.next, .askAnything)
-        XCTAssertEqual(InputMode.askAnything.next, .sidecarPolish)
+        XCTAssertEqual(InputMode.transcribe.next, .ask)
+        XCTAssertEqual(InputMode.ask.next, .agent)
+        XCTAssertEqual(InputMode.agent.next, .transcribe)
         XCTAssertNil(InputMode(rawValue: "clean"))
         XCTAssertNil(InputMode(rawValue: "command"))
+        XCTAssertNil(InputMode(rawValue: "sidecarPolish"))
     }
 
     func testVoiceModeRouterRecognizesCommandInputName() {
         let result = VoiceModeRouter.route(
             "命令输入：帮我写一封简短的感谢邮件",
-            currentMode: .askAnything
+            currentMode: .ask
         )
 
-        XCTAssertEqual(result.mode, .sidecarAgent)
+        XCTAssertEqual(result.mode, .agent)
         XCTAssertEqual(result.text, "帮我写一封简短的感谢邮件")
     }
 
     func testVoiceModeRouterRecognizesAgentModeName() {
         let result = VoiceModeRouter.route(
             "Agent 模式：继续刚才的任务",
-            currentMode: .askAnything
+            currentMode: .ask
         )
 
-        XCTAssertEqual(result.mode, .sidecarAgent)
+        XCTAssertEqual(result.mode, .agent)
         XCTAssertEqual(result.text, "继续刚才的任务")
     }
 
@@ -219,8 +180,8 @@ final class OpenTypeTests: XCTestCase {
             "arrow.triangle.2.circlepath"
         )
         XCTAssertEqual(
-            ProcessingState.modeChanged.overlayDetail(for: .sidecarPolish),
-            "润色"
+            ProcessingState.modeChanged.overlayDetail(for: .ask),
+            "问答"
         )
     }
 
@@ -229,7 +190,7 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(state.title, "未执行")
         XCTAssertEqual(state.symbol, "circle.slash")
         XCTAssertEqual(
-            state.overlayDetail(for: .sidecarPolish),
+            state.overlayDetail(for: .ask),
             "没有明确修改指令，原文保持不变"
         )
     }
@@ -239,26 +200,7 @@ final class OpenTypeTests: XCTestCase {
         let state = ProcessingState.failure(message)
 
         XCTAssertEqual(state.title, "出现问题")
-        XCTAssertEqual(state.overlayDetail(for: .sidecarPolish), message)
-    }
-
-    func testCopiedXReplyExplainsManualPaste() {
-        XCTAssertEqual(
-            ProcessingState.copied.overlayDetail(for: .sidecarXReply),
-            "在 X 回复框按 ⌘V 粘贴"
-        )
-    }
-
-    func testSelectedEditAlwaysKeepsAClipboardCopy() {
-        XCTAssertTrue(OutputDeliveryPolicy.retainsClipboardCopy(for: .sidecarPolish))
-        XCTAssertEqual(
-            ProcessingState.success.overlayDetail(for: .sidecarPolish),
-            "已替换 · 结果也已复制"
-        )
-        XCTAssertEqual(
-            ProcessingState.copied.overlayDetail(for: .sidecarPolish),
-            "结果已复制，可直接粘贴"
-        )
+        XCTAssertEqual(state.overlayDetail(for: .ask), message)
     }
 
     func testEveryModeKeepsItsResultOnTheClipboard() {
@@ -270,55 +212,41 @@ final class OpenTypeTests: XCTestCase {
         }
     }
 
-    func testXReplyAlwaysUsesClipboardDelivery() {
-        XCTAssertEqual(
-            OutputDeliveryPolicy.strategy(
-                for: .sidecarXReply,
-                automaticallyInsert: true
-            ),
-            .clipboard
-        )
-        XCTAssertEqual(
-            OutputDeliveryPolicy.strategy(
-                for: .sidecarXReply,
-                automaticallyInsert: false
-            ),
-            .clipboard
-        )
-    }
-
     func testRegularModesRespectAutomaticInsertSetting() {
         XCTAssertEqual(
             OutputDeliveryPolicy.strategy(
-                for: .sidecarPolish,
+                for: .transcribe,
                 automaticallyInsert: true
             ),
             .automaticInsert
         )
         XCTAssertEqual(
             OutputDeliveryPolicy.strategy(
-                for: .sidecarTranslate,
+                for: .ask,
                 automaticallyInsert: false
             ),
             .clipboard
         )
     }
 
-    func testXReplyNeverRequiresSelectionAtModelLayer() {
-        XCTAssertTrue(InputMode.sidecarXReply.requiresSelection)
-        XCTAssertFalse(InputMode.sidecarAgent.requiresSelection)
-        XCTAssertFalse(InputMode.sidecarTranslate.requiresSelection)
+    func testNoModeRequiresSelectionInTheThreeModeDesign() {
+        for mode in InputMode.allCases {
+            XCTAssertFalse(
+                mode.requiresSelection,
+                "Expected \(mode.title) not to require a selection"
+            )
+        }
     }
 
-    func testCommandInputNeverTriggersAutomaticEnter() {
+    func testAgentNeverTriggersAutomaticEnter() {
         XCTAssertFalse(
-            OutputDeliveryPolicy.permitsAutomaticEnter(for: .sidecarAgent)
-        )
-        XCTAssertFalse(
-            OutputDeliveryPolicy.permitsAutomaticEnter(for: .sidecarXReply)
+            OutputDeliveryPolicy.permitsAutomaticEnter(for: .agent)
         )
         XCTAssertTrue(
-            OutputDeliveryPolicy.permitsAutomaticEnter(for: .sidecarPolish)
+            OutputDeliveryPolicy.permitsAutomaticEnter(for: .transcribe)
+        )
+        XCTAssertTrue(
+            OutputDeliveryPolicy.permitsAutomaticEnter(for: .ask)
         )
     }
 
@@ -457,7 +385,7 @@ final class OpenTypeTests: XCTestCase {
 
         let reloaded = AppConfiguration(defaults: defaults)
         XCTAssertEqual(reloaded.interfaceLanguage, .english)
-        XCTAssertEqual(InputMode.sidecarPolish.title, "Polish")
+        XCTAssertEqual(InputMode.transcribe.title, "Transcribe")
     }
 
     @MainActor
@@ -546,7 +474,7 @@ final class OpenTypeTests: XCTestCase {
         let history = (0..<100).map { index in
             HistoryEntry(
                 createdAt: Date(timeIntervalSince1970: TimeInterval(index)),
-                mode: .sidecarPolish,
+                mode: .transcribe,
                 applicationName: "OpenType",
                 transcript: "请帮我优化 OpenType 产品文案，要简洁直接",
                 result: "完成 \(index)",
@@ -605,7 +533,7 @@ final class OpenTypeTests: XCTestCase {
         let store = AgentMemoryStore(fileURL: fileURL)
         let relevant = MemoryEvent(
             createdAt: Date(timeIntervalSince1970: 100),
-            mode: .sidecarAgent,
+            mode: .agent,
             applicationName: "X",
             bundleIdentifier: nil,
             rawTranscript: "帮我写一条 OpenType 产品发布推文",
@@ -615,7 +543,7 @@ final class OpenTypeTests: XCTestCase {
         )
         let unrelatedOld = MemoryEvent(
             createdAt: Date(timeIntervalSince1970: 200),
-            mode: .sidecarAgent,
+            mode: .agent,
             applicationName: "Calendar",
             bundleIdentifier: nil,
             rawTranscript: "安排下周团队会议",
@@ -625,7 +553,7 @@ final class OpenTypeTests: XCTestCase {
         )
         let recentOne = MemoryEvent(
             createdAt: Date(timeIntervalSince1970: 300),
-            mode: .askAnything,
+            mode: .ask,
             applicationName: "Notes",
             bundleIdentifier: nil,
             rawTranscript: "整理今天的待办事项",
@@ -635,7 +563,7 @@ final class OpenTypeTests: XCTestCase {
         )
         let recentTwo = MemoryEvent(
             createdAt: Date(timeIntervalSince1970: 400),
-            mode: .askAnything,
+            mode: .ask,
             applicationName: "Mail",
             bundleIdentifier: nil,
             rawTranscript: "回复这封感谢邮件",
@@ -777,7 +705,7 @@ final class OpenTypeTests: XCTestCase {
     func testMemoryInsightsLearnOnlyRepeatedSignals() {
         let events = [
             MemoryEvent(
-                mode: .sidecarAgent,
+                mode: .agent,
                 applicationName: "OpenType",
                 bundleIdentifier: nil,
                 rawTranscript: "帮我写一个 OpenType 产品方案，要简洁直接",
@@ -786,7 +714,7 @@ final class OpenTypeTests: XCTestCase {
                 result: "result 1"
             ),
             MemoryEvent(
-                mode: .sidecarAgent,
+                mode: .agent,
                 applicationName: "OpenType",
                 bundleIdentifier: nil,
                 rawTranscript: "再写一个 OpenType Agent 的产品说明，语气简洁直接",
@@ -795,7 +723,7 @@ final class OpenTypeTests: XCTestCase {
                 result: "result 2"
             ),
             MemoryEvent(
-                mode: .askAnything,
+                mode: .ask,
                 applicationName: "Notes",
                 bundleIdentifier: nil,
                 rawTranscript: "我觉得 OpenType 这个 AI 输入工具还可以继续优化",
@@ -947,7 +875,7 @@ final class OpenTypeTests: XCTestCase {
             requestId: requestID,
             createdAt: timestamp,
             status: .recognized,
-            mode: .askAnything,
+            mode: .ask,
             rawTranscript: "为啥微信不行",
             effectiveInput: "为啥微信不行",
             selectedContext: nil,
@@ -960,7 +888,7 @@ final class OpenTypeTests: XCTestCase {
             requestId: requestID,
             createdAt: timestamp,
             status: .completed,
-            mode: .askAnything,
+            mode: .ask,
             rawTranscript: "为啥微信不行",
             effectiveInput: "为啥微信不行",
             selectedContext: nil,

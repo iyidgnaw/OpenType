@@ -4,6 +4,7 @@ export interface SidecarEnv {
   deepSeekModel: string;
   deepSeekBaseUrl: string;
   dbPath: string;
+  contextLogPath: string;
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
@@ -14,6 +15,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
   const deepSeekBaseUrl = source.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
   const dbPath =
     source.OPENTYPE_SIDECAR_DB_PATH ?? "sidecar/.data/opentype.sqlite3";
+  // Proof-of-context-usage log (see `oneshot/contextDebugLog.ts`): follows
+  // the same env-var-override-with-dev-default convention as `dbPath`
+  // above. `SidecarClient.swift` sets `OPENTYPE_CONTEXT_LOG_PATH` alongside
+  // `OPENTYPE_SIDECAR_SOCKET`/`OPENTYPE_SIDECAR_DB_PATH` for real app runs.
+  const contextLogPath =
+    source.OPENTYPE_CONTEXT_LOG_PATH ?? "sidecar/.data/context-debug.log";
 
-  return { socketPath, deepSeekApiKey, deepSeekModel, deepSeekBaseUrl, dbPath };
+  return { socketPath, deepSeekApiKey, deepSeekModel, deepSeekBaseUrl, dbPath, contextLogPath };
 }

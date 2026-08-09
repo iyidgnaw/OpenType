@@ -7,6 +7,7 @@ import { openDatabase } from "./memory/db";
 import { MemoryStore } from "./memory/MemoryStore";
 import { buildMemoryRoutes } from "./memory/routes";
 import { buildOneShotRoutes } from "./oneshot/routes";
+import { createFileContextUsageLogWriter, type ContextUsageLogWriter } from "./oneshot/contextDebugLog";
 import { createDeepSeekClient } from "./provider/deepseek";
 import { createRouter } from "./router";
 
@@ -16,16 +17,21 @@ import { createRouter } from "./router";
  * message shape; `AgentChatFn` is structurally compatible with
  * `OneShotChatFn`, so it still satisfies `buildOneShotRoutes` unchanged.
  */
-export function buildApp(store: MemoryStore, chat: AgentChatFn, tools: McpToolSet) {
+export function buildApp(
+  store: MemoryStore,
+  chat: AgentChatFn,
+  tools: McpToolSet,
+  contextLogWriter: ContextUsageLogWriter
+) {
   return createRouter([
     {
       method: "GET",
       path: "/health",
       handler: () => Response.json({ status: "ok" }),
     },
-    ...buildOneShotRoutes(store, chat),
+    ...buildOneShotRoutes(store, chat, contextLogWriter),
     ...buildMemoryRoutes(store),
-    ...buildAgentRoutes(store, chat, tools),
+    ...buildAgentRoutes(store, chat, tools, contextLogWriter),
   ]);
 }
 
@@ -34,7 +40,8 @@ async function main() {
   const store = new MemoryStore(openDatabase(env.dbPath));
   const deepSeekClient = createDeepSeekClient(env);
   const tools = await connectConfiguredMcpServers(process.env.OPENTYPE_MCP_SERVERS);
-  const fetch = buildApp(store, deepSeekClient.chat, tools);
+  const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
+  const fetch = buildApp(store, deepSeekClient.chat, tools, contextLogWriter);
 
   if (existsSync(env.socketPath)) {
     unlinkSync(env.socketPath);

@@ -44,8 +44,6 @@ final class OverlayController {
         switch state {
         case .modeChanged:
             dismiss(after: 1.2)
-        case .copied where mode == .sidecarXReply:
-            dismiss(after: 2.4)
         case .success, .copied:
             dismiss(after: 0.9)
         case .cancelled:
@@ -208,27 +206,17 @@ private struct OverlayView: View {
             return presentation.liveTranscript
         }
         switch presentation.mode {
-        case .askAnything:
+        case .transcribe:
             return OpenTypeL10n.text(
-                "说出你的问题，直接获得答案…",
-                english: "Ask your question — get a direct answer…"
+                "直接说话，松开后原样转成文字…",
+                english: "Just speak — released speech becomes text as-is…"
             )
-        case .sidecarPolish:
+        case .ask:
             return OpenTypeL10n.text(
-                "已选中文字，请说润色要求…",
-                english: "Text selected. Say how you want it polished…"
+                "说出你的问题，弹窗里直接获得答案…",
+                english: "Ask your question — get a direct answer in a popup…"
             )
-        case .sidecarTranslate:
-            return OpenTypeL10n.text(
-                "只转换为英文，不回答、不执行…",
-                english: "English transformation only — no answers or actions…"
-            )
-        case .sidecarXReply:
-            return OpenTypeL10n.text(
-                "说出观点，或直接让 OpenType 帮你回复…",
-                english: "Share your take, or let OpenType draft the reply…"
-            )
-        case .sidecarAgent:
+        case .agent:
             return OpenTypeL10n.text(
                 "说出希望 Agent Runtime 完成的任务…",
                 english: "Describe the task for the Agent Runtime…"

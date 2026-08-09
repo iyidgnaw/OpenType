@@ -1,47 +1,42 @@
 import Foundation
 
 enum InputMode: String, CaseIterable, Codable, Identifiable {
-    case askAnything = "askAnything"
-    case sidecarPolish = "sidecarPolish"
-    case sidecarTranslate = "sidecarTranslate"
-    case sidecarXReply = "sidecarXReply"
-    case sidecarAgent = "sidecarAgent"
+    case transcribe = "transcribe"
+    case ask = "ask"
+    case agent = "agent"
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .askAnything: return OpenTypeL10n.text("问答", english: "Ask Anything")
-        case .sidecarPolish: return OpenTypeL10n.text("润色", english: "Polish")
-        case .sidecarTranslate: return OpenTypeL10n.text("中转英", english: "Translate")
-        case .sidecarXReply: return "X Reply"
-        case .sidecarAgent: return OpenTypeL10n.text("Agent 模式", english: "Agent")
+        case .transcribe: return OpenTypeL10n.text("听写", english: "Transcribe")
+        case .ask: return OpenTypeL10n.text("问答", english: "Ask")
+        case .agent: return OpenTypeL10n.text("Agent", english: "Agent")
         }
     }
 
     var shortTitle: String {
         switch self {
-        case .askAnything: return OpenTypeL10n.text("提出问题 · 直接获得答案", english: "Speak a question · Get a direct answer")
-        case .sidecarPolish: return OpenTypeL10n.text("选中文字 · 按指令润色", english: "Select text · Polish by instruction")
-        case .sidecarTranslate: return OpenTypeL10n.text("中文 → English", english: "Chinese → English")
-        case .sidecarXReply: return OpenTypeL10n.text("有观点就说 · 没有也能回", english: "Join the conversation")
-        case .sidecarAgent: return OpenTypeL10n.text("说出任务 · 交给 Agent Runtime", english: "Describe a task · Agent Runtime")
+        case .transcribe: return OpenTypeL10n.text("按住说话 · 直接转文字", english: "Hold to talk · Direct transcription")
+        case .ask: return OpenTypeL10n.text("提出问题 · 弹窗直接回答", english: "Ask a question · Answered in a popup")
+        case .agent: return OpenTypeL10n.text("说出任务 · 交给 Agent 完成", english: "Describe a task · Handed to the Agent")
         }
     }
 
     var symbol: String {
         switch self {
-        case .askAnything: return "questionmark.bubble.fill"
-        case .sidecarPolish: return "sparkles.rectangle.stack.fill"
-        case .sidecarTranslate: return "globe.americas.fill"
-        case .sidecarXReply: return "bubble.left.and.bubble.right.fill"
-        case .sidecarAgent: return "gearshape.2.fill"
+        case .transcribe: return "mic.fill"
+        case .ask: return "questionmark.bubble.fill"
+        case .agent: return "gearshape.2.fill"
         }
     }
 
-    var requiresSelection: Bool {
-        self == .sidecarXReply || self == .sidecarPolish
-    }
+    /// No remaining mode requires a pre-existing text selection: the 3-mode
+    /// cut (transcribe/ask/agent) dropped the two modes (`sidecarPolish`,
+    /// `sidecarXReply`) that used to require one. Kept as a property (always
+    /// `false`) rather than removed outright so the selection-guard call
+    /// sites in `AppModel` don't need to change shape.
+    var requiresSelection: Bool { false }
 
     var next: InputMode {
         let modes = Self.visibleModes
@@ -50,24 +45,18 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
     }
 
     static let visibleModes: [InputMode] = [
-        .sidecarPolish,
-        .sidecarTranslate,
-        .sidecarAgent,
-        .sidecarXReply,
-        .askAnything
+        .transcribe,
+        .ask,
+        .agent
     ]
 
     var explanation: String {
         switch self {
-        case .askAnything:
-            return OpenTypeL10n.text("说出一个问题，直接获得答案，而不是整理后的原话", english: "Speak a question and get a direct answer, not a cleaned-up version of what you said")
-        case .sidecarPolish:
-            return OpenTypeL10n.text("选中文字后说出修改指令，按需要润色", english: "Select text, speak an instruction, and get a polished rewrite")
-        case .sidecarTranslate:
-            return OpenTypeL10n.text("中文口述，直接写成地道英文", english: "Speak Chinese and get natural English")
-        case .sidecarXReply:
-            return OpenTypeL10n.text("加入对话；有观点就说，没有也能自动回复", english: "Join the conversation with your take, or let OpenType draft one")
-        case .sidecarAgent:
+        case .transcribe:
+            return OpenTypeL10n.text("按住快捷键说话，松开后直接转成文字，不经过任何 AI 处理", english: "Hold the shortcut and speak; release to get the raw transcription with no AI processing at all")
+        case .ask:
+            return OpenTypeL10n.text("说出一个问题，弹窗里直接显示答案，而不是整理后的原话", english: "Speak a question and see the answer in a popup, not a cleaned-up version of what you said")
+        case .agent:
             return OpenTypeL10n.text(
                 "说出任务，交给 Agent Runtime 完成；可能比其他模式慢，且可能调用工具",
                 english: "Describe a task and hand it to the Agent Runtime; may take longer than other modes and can use tools"
@@ -75,6 +64,23 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+}
+
+/// Drives the floating "Ask"/"Agent" popup (`AskPanelController`) introduced
+/// alongside the 3-mode cut: `nil` means the popup is hidden, non-nil means
+/// it's showing, and `answer == nil` means it's still in the "thinking"
+/// state. `AppModel.process(audioURL:)` sets this right before issuing the
+/// `/oneshot/ask` or `/agent/run` sidecar call, and fills in `answer` once
+/// the response arrives.
+struct AskPanelState: Equatable {
+    enum Kind: Equatable {
+        case ask
+        case agent
+    }
+
+    var kind: Kind
+    var query: String
+    var answer: String?
 }
 
 enum XReplyStyle: String, CaseIterable, Codable, Identifiable {
@@ -201,12 +207,6 @@ enum ProcessingState: Equatable {
             return message
         case .failure(let message):
             return message
-        case .copied where mode == .sidecarXReply:
-            return OpenTypeL10n.text("在 X 回复框按 ⌘V 粘贴", english: "Press ⌘V in the X reply box")
-        case .success where mode == .sidecarPolish:
-            return OpenTypeL10n.text("已替换 · 结果也已复制", english: "Replaced · Also copied")
-        case .copied where mode == .sidecarPolish:
-            return OpenTypeL10n.text("结果已复制，可直接粘贴", english: "Copied and ready to paste")
         default:
             return mode.title
         }
@@ -223,8 +223,7 @@ enum OutputDeliveryPolicy {
         for mode: InputMode,
         automaticallyInsert: Bool
     ) -> OutputDeliveryStrategy {
-        if mode == .sidecarXReply { return .clipboard }
-        return automaticallyInsert ? .automaticInsert : .clipboard
+        automaticallyInsert ? .automaticInsert : .clipboard
     }
 
     static func retainsClipboardCopy(for mode: InputMode) -> Bool {
@@ -235,7 +234,10 @@ enum OutputDeliveryPolicy {
     }
 
     static func permitsAutomaticEnter(for mode: InputMode) -> Bool {
-        mode != .sidecarXReply && mode != .sidecarAgent
+        // Agent results are drafts for the user to review, never actions
+        // taken automatically on their behalf, so a spoken "press enter" /
+        // "send it" command must never auto-submit an Agent result.
+        mode != .agent
     }
 
 }
@@ -576,15 +578,11 @@ enum OpenTypeError: LocalizedError {
             return detail
         case .accessibilityRequired:
             return "请先开启辅助功能权限，再使用选中文字或自动写入"
-        case .selectionRequired(let mode):
-            switch mode {
-            case .sidecarXReply:
-                return "请先选中要回复的推文，再开始说话"
-            case .sidecarPolish:
-                return "请先选中要编辑的文字，再开始说话"
-            default:
-                return "这个模式需要先选中文字"
-            }
+        case .selectionRequired:
+            // Unreachable with the current 3-mode set (none of
+            // transcribe/ask/agent require a selection) but kept for
+            // forward compatibility / defensive completeness.
+            return "这个模式需要先选中文字"
         case .missingEditInstruction:
             return "没有听到明确的修改指令，选中文字保持不变"
         }

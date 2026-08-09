@@ -60,26 +60,39 @@ struct RootView: View {
             HeaderView(model: model, configuration: model.configuration)
 
             Group {
-                switch model.selectedTab {
-                case .home:
-                    HomeView(model: model, configuration: model.configuration)
-                case .history:
-                    HistoryView(model: model)
-                case .qa:
-                    QAConversationsView(model: model)
-                case .agent:
-                    AgentConversationsView(model: model)
-                case .settings:
-                    SettingsView(
-                        model: model,
-                        configuration: model.configuration,
-                        agentMemory: model.agentMemory
-                    )
+                if model.needsProviderOnboarding {
+                    // First-run setup wizard (spec: "if the user hasn't
+                    // configured Whisper or LLM yet, opening the app should
+                    // enter a setup wizard") -- takes over the whole tab
+                    // content area, in place of the normal Home tab, until
+                    // both are configured. See `OnboardingWizardView`'s doc
+                    // comment (`ProviderSetupViews.swift`) for why no
+                    // explicit tab switch is needed once that happens.
+                    OnboardingWizardView(model: model)
+                } else {
+                    switch model.selectedTab {
+                    case .home:
+                        HomeView(model: model, configuration: model.configuration)
+                    case .history:
+                        HistoryView(model: model)
+                    case .qa:
+                        QAConversationsView(model: model)
+                    case .agent:
+                        AgentConversationsView(model: model)
+                    case .settings:
+                        SettingsView(
+                            model: model,
+                            configuration: model.configuration,
+                            agentMemory: model.agentMemory
+                        )
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            TabBar(model: model)
+            if !model.needsProviderOnboarding {
+                TabBar(model: model)
+            }
         }
         .frame(
             minWidth: 420,
@@ -1269,10 +1282,18 @@ private struct SettingsView: View {
                     }
                     .pickerStyle(.menu)
 
-                    Text("中英夹杂或一段音频包含多种语言时，请使用“自动识别”；单一语言可明确选择，以提高实时字幕预览的准确率。最终识别始终使用本机 MLX-Whisper。")
+                    Text("中英夹杂或一段音频包含多种语言时，请使用“自动识别”；单一语言可明确选择，以提高实时字幕预览的准确率。最终识别默认使用本机 MLX-Whisper，可在下方“语音识别”中切换为远程。")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                SettingsSection(OpenTypeL10n.text("语音识别", english: "Speech Recognition")) {
+                    WhisperSetupContent(model: model)
+                }
+
+                SettingsSection(OpenTypeL10n.text("AI 模型", english: "AI Model Provider")) {
+                    LLMProviderSetupContent(model: model)
                 }
 
                 SettingsSection("连接与权限") {

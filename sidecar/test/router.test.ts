@@ -31,4 +31,55 @@ describe("createRouter", () => {
     );
     expect(response.status).toBe(404);
   });
+
+  test("matches a route with a :param segment against a concrete path", async () => {
+    const router = createRouter([
+      {
+        method: "GET",
+        path: "/conversations/:id",
+        handler: (req) => Response.json({ pathname: new URL(req.url).pathname }),
+      },
+    ]);
+
+    const response = await router(new Request("http://sidecar/conversations/42"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ pathname: "/conversations/42" });
+  });
+
+  test("does not let a :param route swallow a different, more specific path", async () => {
+    const router = createRouter([
+      {
+        method: "GET",
+        path: "/conversations/:id",
+        handler: () => Response.json({ matched: "param" }),
+      },
+      {
+        method: "GET",
+        path: "/conversations",
+        handler: () => Response.json({ matched: "list" }),
+      },
+    ]);
+
+    const response = await router(new Request("http://sidecar/conversations"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ matched: "list" });
+  });
+
+  test("a :param route does not match a path with extra segments", async () => {
+    const router = createRouter([
+      {
+        method: "GET",
+        path: "/conversations/:id",
+        handler: () => Response.json({ matched: "param" }),
+      },
+    ]);
+
+    const response = await router(
+      new Request("http://sidecar/conversations/42/extra")
+    );
+
+    expect(response.status).toBe(404);
+  });
 });

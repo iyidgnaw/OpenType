@@ -47,6 +47,28 @@ CREATE TABLE IF NOT EXISTS owner_facts (
   createdAt INTEGER NOT NULL,
   origin TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  title TEXT NOT NULL,
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS conversations_kind_updated_at
+ON conversations(kind, updatedAt DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversationId INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  createdAt INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS conversation_messages_conversation_id
+ON conversation_messages(conversationId, id);
 `;
 
 /**

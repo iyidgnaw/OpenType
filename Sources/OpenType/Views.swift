@@ -40,10 +40,11 @@ private extension View {
 
 /// Content of the real, resizable app window (Part A of the menubar split):
 /// mode switching lives in the compact `MenuBarPopoverView` popover instead,
-/// so everything here — Home's setup/last-result cards, History, and all of
-/// Settings (provider vault, Memory panel, Agent Task List) — is what the
-/// product owner asked to keep out of the menubar. Opened via the popover's
-/// gear button or `AppModel.openMainWindow()`/`focusAgentRun(_:)`, hosted by
+/// so everything here — Home's setup/last-result cards, History, the Q&A and
+/// Agent tabs (past conversations + continuation), and Settings (Memory
+/// panel, no free-text profile editing) — is what the product owner asked to
+/// keep out of the menubar. Opened via the popover's gear button or
+/// `AppModel.openMainWindow()`/`focusAgentRun(_:)`, hosted by
 /// `MainWindowController` (`OpenTypeApp.swift`).
 struct RootView: View {
     @ObservedObject var model: AppModel
@@ -64,6 +65,10 @@ struct RootView: View {
                     HomeView(model: model, configuration: model.configuration)
                 case .history:
                     HistoryView(model: model)
+                case .qa:
+                    QAConversationsView(model: model)
+                case .agent:
+                    AgentConversationsView(model: model)
                 case .settings:
                     SettingsView(
                         model: model,
@@ -694,18 +699,299 @@ private struct HistoryRow: View {
     }
 }
 
+/// Q&A tab: past Ask conversations (`AppModel.askConversations`, sourced
+/// from `GET /conversations?kind=ask` -- the sidecar-persisted, durable
+/// list, survives relaunch). Tapping one opens its full thread and marks it
+/// as the conversation a new Ask-mode voice dispatch should continue
+/// (`AppModel.openAskConversation(_:)`); the thread view's back button /
+/// "new conversation" affordance clear that focus again
+/// (`AppModel.startNewAskConversation()`).
+private struct QAConversationsView: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        Group {
+            if model.focusedAskConversationId != nil {
+                ConversationThreadView(
+                    detail: model.askConversationDetail,
+                    onBack: { model.startNewAskConversation() },
+                    onNewConversation: { model.startNewAskConversation() }
+                )
+            } else if model.askConversations.isEmpty {
+                ConversationEmptyState(
+                    symbol: "questionmark.bubble.fill",
+                    title: OpenTypeL10n.text("还没有问答记录", english: "No Q&A conversations yet"),
+                    subtitle: OpenTypeL10n.text(
+                        "用 Ask 模式提问后会出现在这里",
+                        english: "Ask a question in Ask mode and it will show up here"
+                    )
+                )
+            } else {
+                ConversationListView(conversations: model.askConversations) { conversation in
+                    model.openAskConversation(conversation.id)
+                }
+            }
+        }
+        .task { await model.refreshAskConversations() }
+    }
+}
+
+/// Agent tab counterpart to `QAConversationsView`: past Agent conversations
+/// (`AppModel.agentConversations`, `GET /conversations?kind=agent`) below an
+/// "in progress" strip for runs still dispatched-but-not-yet-returned this
+/// session (`AppModel.agentRuns`, `AgentRunTracking.swift`) -- `/agent/run`
+/// is a single blocking call, so a run in flight has no persisted
+/// conversation entry to show yet. Replaces the old Settings "Task List"
+/// section as the one place Agent history lives.
+private struct AgentConversationsView: View {
+    @ObservedObject var model: AppModel
+
+    private var runningRuns: [AgentRunRecord] {
+        model.agentRuns.filter { $0.status.isRunning }
+    }
+
+    var body: some View {
+        Group {
+            if model.focusedAgentConversationId != nil {
+                ConversationThreadView(
+                    detail: model.agentConversationDetail,
+                    onBack: { model.startNewAgentConversation() },
+                    onNewConversation: { model.startNewAgentConversation() }
+                )
+            } else if runningRuns.isEmpty, model.agentConversations.isEmpty {
+                ConversationEmptyState(
+                    symbol: "wand.and.stars",
+                    title: OpenTypeL10n.text("还没有 Agent 任务", english: "No Agent tasks yet"),
+                    subtitle: OpenTypeL10n.text(
+                        "用 Agent 模式说出任务后会出现在这里",
+                        english: "Speak a task in Agent mode and it will show up here"
+                    )
+                )
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !runningRuns.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(OpenTypeL10n.text("进行中", english: "In Progress"))
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                ForEach(runningRuns) { run in
+                                    AgentRunRow(
+                                        run: run,
+                                        isFocused: model.focusedAgentRunID == run.id
+                                    )
+                                    .id(run.id)
+                                }
+                            }
+                        }
+                        ForEach(model.agentConversations) { conversation in
+                            ConversationListRow(conversation: conversation) {
+                                model.openAgentConversation(conversation.id)
+                            }
+                        }
+                    }
+                    .padding(16)
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+        .task { await model.refreshAgentConversations() }
+        .onChange(of: model.focusedAgentRunID) { newValue in
+            // Same transient-highlight behavior the old Settings Task List
+            // panel had: clear it after a moment so it reads as a pointer,
+            // not a sticky selection.
+            guard let newValue else { return }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if model.focusedAgentRunID == newValue {
+                    model.focusedAgentRunID = nil
+                }
+            }
+        }
+    }
+}
+
+private struct ConversationEmptyState: View {
+    let symbol: String
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ZStack {
+                Circle().fill(OpenTypeTheme.surface)
+                Image(systemName: symbol)
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 48, height: 48)
+            Text(title)
+                .font(.system(size: 13.5, weight: .semibold))
+            Text(subtitle)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct ConversationListView: View {
+    let conversations: [ConversationSummary]
+    let onSelect: (ConversationSummary) -> Void
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                ForEach(conversations) { conversation in
+                    ConversationListRow(conversation: conversation) {
+                        onSelect(conversation)
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .scrollIndicators(.hidden)
+    }
+}
+
+private struct ConversationListRow: View {
+    let conversation: ConversationSummary
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(conversation.title)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(Self.dateFormatter.string(
+                        from: Date(timeIntervalSince1970: Double(conversation.updatedAt) / 1000)
+                    ))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(13)
+            .contentShape(Rectangle())
+            .openTypeSurface(cornerRadius: 14)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+/// Shared thread view for both the Q&A and Agent tabs: a back/"new
+/// conversation" header plus a scrollable list of user/assistant bubbles
+/// (`ConversationBubble`), matching this app's existing floating-panel chat
+/// look (`AskPanelController.swift`'s `AskPanelView`) rather than inventing a
+/// new visual language. `detail == nil` means the fetch
+/// (`AppModel.openAskConversation(_:)`/`openAgentConversation(_:)`) is still
+/// in flight.
+private struct ConversationThreadView: View {
+    let detail: ConversationDetail?
+    let onBack: () -> Void
+    let onNewConversation: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .help(OpenTypeL10n.text("返回列表", english: "Back to list"))
+
+                Text(detail?.title ?? OpenTypeL10n.text("对话", english: "Conversation"))
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+
+                Spacer()
+
+                Button(OpenTypeL10n.text("新对话", english: "New")) {
+                    onNewConversation()
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 13)
+            .padding(.bottom, 8)
+
+            Divider()
+
+            if let detail {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(detail.messages) { message in
+                            ConversationBubble(message: message)
+                        }
+                    }
+                    .padding(16)
+                }
+                .scrollIndicators(.hidden)
+            } else {
+                VStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(OpenTypeL10n.text("正在加载对话…", english: "Loading conversation…"))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
+private struct ConversationBubble: View {
+    let message: ConversationMessageSummary
+
+    private var isUser: Bool { message.role == "user" }
+
+    var body: some View {
+        HStack {
+            if isUser { Spacer(minLength: 36) }
+
+            Text(message.content)
+                .font(.system(size: 12))
+                .foregroundStyle(isUser ? Color.white : Color.primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(
+                    isUser ? Color.accentColor : OpenTypeTheme.surface,
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                )
+
+            if !isUser { Spacer(minLength: 36) }
+        }
+    }
+}
+
 private struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
     @ObservedObject var agentMemory: AgentMemoryStore
     @State private var appearanceExpanded = false
-    @State private var ownerProfileExpanded = true
     @State private var dataManagementExpanded = false
     @State private var showingHistoryResetConfirmation = false
     @State private var showingAgentMemoryResetConfirmation = false
 
     var body: some View {
-        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 SettingsSection("外观") {
@@ -895,7 +1181,7 @@ private struct SettingsView: View {
                         isOn: $configuration.agentMemoryEnabled
                     )
 
-                    Text("正式文字任务会追加保存原始转写、实际指令、上下文和结果。“关于我”只保存你确认的信息；系统推断的偏好会单独存放。不保存原始录音。")
+                    Text("正式文字任务会追加保存原始转写、实际指令、上下文和结果；系统推断的偏好会单独存放。不保存原始录音。")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -924,68 +1210,23 @@ private struct SettingsView: View {
                         .disabled(!agentMemory.databaseReady)
                     }
 
-                    DisclosureGroup(
-                        isExpanded: $ownerProfileExpanded
-                    ) {
-                        VStack(alignment: .leading, spacing: 11) {
-                            Toggle(
-                                "每 100 条更新“已学到的偏好”",
-                                isOn: Binding(
-                                    get: {
-                                        configuration.automaticOwnerProfileUpdates
-                                    },
-                                    set: {
-                                        model.changeAutomaticOwnerProfileUpdates($0)
-                                    }
-                                )
-                            )
-                            .disabled(!configuration.agentMemoryEnabled)
-
-                            Text(automaticProfileUpdateDescription)
-                                .font(.system(size: 8.8))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            profileEditor(
-                                title: "我的职业与工作",
-                                hint: "例如：我在做 AI Agent 产品，平时需要写产品方案和社交媒体内容。只填写确认的事实。",
-                                text: ownerProfileBinding(for: .identityAndWork)
-                            )
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("默认输出语言")
-                                    .font(.system(size: 9.5, weight: .semibold))
-                                Picker(
-                                    "默认输出语言",
-                                    selection: preferredLanguageBinding
-                                ) {
-                                    ForEach(ProfileLanguagePreference.allCases) { language in
-                                        Text(language.title).tag(language)
-                                    }
-                                }
-                                .labelsHidden()
-                                .pickerStyle(.menu)
-                                Text("只在当前指令和模式都没有指定语言时使用。“中转英”等模式规则始终优先。")
-                                    .font(.system(size: 8.5))
-                                    .foregroundStyle(.tertiary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                    Toggle(
+                        "每 100 条更新“已学到的偏好”",
+                        isOn: Binding(
+                            get: {
+                                configuration.automaticOwnerProfileUpdates
+                            },
+                            set: {
+                                model.changeAutomaticOwnerProfileUpdates($0)
                             }
-                            profileEditor(
-                                title: "我喜欢的表达方式",
-                                hint: "例如：简洁、直接、口语化，避免公关腔和明显的 AI 味。语言选择请使用上方单独设置。",
-                                text: ownerProfileBinding(for: .communicationStyle)
-                            )
-                            profileEditor(
-                                title: "重要术语与正确拼写",
-                                hint: "例如：OpenType、OpenClaw、Mingle、Clawborn。",
-                                text: ownerProfileBinding(for: .importantTerms),
-                                height: 54
-                            )
-                        }
-                        .padding(.top, 9)
-                    } label: {
-                        Label("关于我", systemImage: "person.text.rectangle")
-                            .font(.system(size: 10.5, weight: .semibold))
-                    }
+                        )
+                    )
+                    .disabled(!configuration.agentMemoryEnabled)
+
+                    Text(automaticProfileUpdateDescription)
+                        .font(.system(size: 8.8))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     Divider()
 
@@ -1000,7 +1241,7 @@ private struct SettingsView: View {
                         }
 
                         if agentMemory.learnedPreferences.isEmpty {
-                            Text("每完成 100 条正式输入，OpenType 会在本机归纳一次术语、任务和表达偏好。这些推断不会改写“关于我”。")
+                            Text("每完成 100 条正式输入，OpenType 会在本机归纳一次术语、任务和表达偏好，仅供参考。")
                                 .font(.system(size: 9.5))
                                 .foregroundStyle(.secondary)
                         } else {
@@ -1023,7 +1264,7 @@ private struct SettingsView: View {
                         }
                     }
 
-                    Text("当前明确指令 > 当前模式 > 关于我 > 已学到的偏好。系统只会把与当前任务相关的最少信息发送给你选择的文字模型。")
+                    Text("当前明确指令 > 当前模式 > 已学到的偏好。系统只会把与当前任务相关的最少信息发送给你选择的文字模型。")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1055,10 +1296,6 @@ private struct SettingsView: View {
 
                 SettingsSection(OpenTypeL10n.text("记忆面板（只读）", english: "Memory Panel (Read-only)")) {
                     MemoryPanelView(model: model)
-                }
-
-                SettingsSection(OpenTypeL10n.text("任务日志（Agent Runtime）", english: "Task List (Agent Runtime)")) {
-                    AgentTaskLogView(model: model)
                 }
 
                 SettingsSection("转写") {
@@ -1244,24 +1481,7 @@ private struct SettingsView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("本地任务记录和系统推断会被移除；你在“关于我”中手动填写的内容会保留。此操作不可撤销，建议先保存重要信息。")
-        }
-        .onChange(of: model.focusedAgentRunID) { newValue in
-            // Scroll the Task List panel to a run focused by a tapped
-            // "Agent finished" notification (`AppModel.focusAgentRun(_:)`),
-            // then clear the highlight after a moment so it reads as a
-            // transient pointer rather than a sticky selection.
-            guard let newValue else { return }
-            withAnimation {
-                proxy.scrollTo(newValue, anchor: .top)
-            }
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-                if model.focusedAgentRunID == newValue {
-                    model.focusedAgentRunID = nil
-                }
-            }
-        }
+            Text("本地任务记录和系统推断会被移除。此操作不可撤销，建议先保存重要信息。")
         }
     }
 
@@ -1290,12 +1510,6 @@ private struct SettingsView: View {
                 .controlSize(.small)
                 .disabled(disabled)
         }
-    }
-
-    private enum OwnerProfileField {
-        case identityAndWork
-        case communicationStyle
-        case importantTerms
     }
 
     @ViewBuilder
@@ -1354,76 +1568,6 @@ private struct SettingsView: View {
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
-    private func profileEditor(
-        title: String,
-        hint: String,
-        text: Binding<String>,
-        height: CGFloat = 68
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(LocalizedStringKey(title))
-                .font(.system(size: 9.5, weight: .semibold))
-            TextEditor(text: text)
-                .font(.system(size: 10.5))
-                .frame(height: height)
-                .padding(6)
-                .scrollContentBackground(.hidden)
-                .background(
-                    Color(nsColor: .textBackgroundColor).opacity(0.72),
-                    in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .strokeBorder(OpenTypeTheme.border, lineWidth: 0.75)
-                )
-            Text(LocalizedStringKey(hint))
-                .font(.system(size: 8.5))
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private func ownerProfileBinding(
-        for field: OwnerProfileField
-    ) -> Binding<String> {
-        Binding(
-            get: {
-                switch field {
-                case .identityAndWork:
-                    return agentMemory.ownerProfile.identityAndWork
-                case .communicationStyle:
-                    return agentMemory.ownerProfile.communicationStyle
-                case .importantTerms:
-                    return agentMemory.ownerProfile.importantTerms
-                }
-            },
-            set: { value in
-                var profile = agentMemory.ownerProfile
-                switch field {
-                case .identityAndWork:
-                    profile.identityAndWork = value
-                case .communicationStyle:
-                    profile.communicationStyle = value
-                case .importantTerms:
-                    profile.importantTerms = value
-                }
-                agentMemory.updateOwnerProfile(profile)
-            }
-        )
-    }
-
-    private var preferredLanguageBinding: Binding<ProfileLanguagePreference> {
-        Binding(
-            get: { agentMemory.ownerProfile.preferredLanguage },
-            set: { language in
-                var profile = agentMemory.ownerProfile
-                profile.preferredLanguage = language
-                agentMemory.updateOwnerProfile(profile)
-            }
-        )
-    }
-
     private var automaticProfileUpdateDescription: String {
         guard configuration.automaticOwnerProfileUpdates else {
             return OpenTypeL10n.text("已暂停自动更新；已有内容会保留。", english: "Automatic updates are paused; existing content is kept.")
@@ -1432,8 +1576,8 @@ private struct SettingsView: View {
             return OpenTypeL10n.text("已达到更新条件，下次启动或完成输入时将更新。整个过程在本机完成。", english: "Ready to update on the next launch or completed input. Everything runs locally.")
         }
         return OpenTypeL10n.text(
-            "已记录 \(agentMemory.eventCount) 条；到 \(agentMemory.nextAutomaticProfileEventCount) 条时更新已学到的偏好。“关于我”永远不会被自动改写。",
-            english: "\(agentMemory.eventCount) recorded; learned preferences update at \(agentMemory.nextAutomaticProfileEventCount). About Me is never rewritten automatically."
+            "已记录 \(agentMemory.eventCount) 条；到 \(agentMemory.nextAutomaticProfileEventCount) 条时更新已学到的偏好。",
+            english: "\(agentMemory.eventCount) recorded; learned preferences update at \(agentMemory.nextAutomaticProfileEventCount)."
         )
     }
 
@@ -1621,48 +1765,13 @@ private struct MemoryPanelView: View {
     }()
 }
 
-/// History of recent Agent (`/agent/run`) dispatches (`AppModel.agentRuns`,
-/// most recent first, capped — see `AgentRunTracking.swift`). Each run
-/// dispatches non-blockingly (`AppModel.dispatchAgentRun`) and updates in
-/// place here as it progresses from `.running` to `.completed`/`.failed`, so
-/// unlike the old single-run log this reflects live state for tasks still in
-/// flight, not just a snapshot taken once a run finishes.
-private struct AgentTaskLogView: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(OpenTypeL10n.text(
-                "最近下发给 Agent (Sidecar) 的任务，包含仍在运行、已完成和失败的任务，仅供查看。",
-                english: "Recent tasks dispatched to the Agent (Sidecar), including still-running, completed, and failed runs. Read-only."
-            ))
-            .font(.system(size: 9.5))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-
-            if model.agentRuns.isEmpty {
-                Text(OpenTypeL10n.text("暂无 Agent 任务", english: "No agent runs yet"))
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(model.agentRuns) { run in
-                        AgentRunRow(
-                            run: run,
-                            isFocused: model.focusedAgentRunID == run.id
-                        )
-                        .id(run.id)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// A single row in `AgentTaskLogView`: the task text, a status badge
-/// (running / done / failed), the result or error once available, and an
-/// optional expandable step-by-step log (same step rendering the old
-/// single-run view had, just per-row now).
+/// A single row in the Agent tab's "in progress" strip
+/// (`AgentConversationsView`): the task text, a status badge (running / done
+/// / failed), the result or error once available, and an optional
+/// expandable step-by-step log. Runs still in flight have no persisted
+/// conversation entry yet (`/agent/run` is a single blocking call), so this
+/// reads live off `AppModel.agentRuns` (`AgentRunTracking.swift`) rather than
+/// the sidecar-persisted conversation list.
 private struct AgentRunRow: View {
     let run: AgentRunRecord
     let isFocused: Bool

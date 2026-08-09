@@ -779,3 +779,37 @@ enum ConsolidateNowStatus: Equatable {
     case succeeded(String)
     case failed(String)
 }
+
+/// Mirrors the sidecar's `Conversation` (`sidecar/src/memory/conversations.ts`)
+/// -- one row of `GET /conversations?kind=ask|agent`, the list backing the
+/// Q&A and Agent tabs (`Views.swift`). `createdAt`/`updatedAt` are
+/// milliseconds-since-epoch, matching `ConsolidationRunSummary.ranAt`'s
+/// existing convention for sidecar timestamps.
+struct ConversationSummary: Decodable, Identifiable, Equatable {
+    let id: Int
+    let kind: String
+    let title: String
+    let createdAt: Int
+    let updatedAt: Int
+}
+
+/// Mirrors the sidecar's `ConversationMessage`.
+struct ConversationMessageSummary: Decodable, Identifiable, Equatable {
+    let id: Int
+    let conversationId: Int
+    let role: String
+    let content: String
+    let createdAt: Int
+}
+
+/// Mirrors the sidecar's `ConversationWithMessages` -- the full thread
+/// returned by `GET /conversations/:id`, rendered by the Q&A/Agent tabs'
+/// thread view.
+struct ConversationDetail: Decodable, Identifiable, Equatable {
+    let id: Int
+    let kind: String
+    let title: String
+    let createdAt: Int
+    let updatedAt: Int
+    let messages: [ConversationMessageSummary]
+}

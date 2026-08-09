@@ -41,6 +41,26 @@ final class AppModel: ObservableObject {
     /// can scroll to and briefly highlight that specific run.
     @Published var focusedAgentRunID: UUID?
     @Published var selectedTab: AppTab = .home
+    /// Past Ask/Agent conversations (`GET /conversations?kind=...`), backing
+    /// the Q&A and Agent tabs (`Views.swift`) -- refreshed on tab appear and
+    /// after each dispatch completes. The sidecar-persisted list, not
+    /// `agentRuns`/`AgentRunHistory`, is the durable source of truth for
+    /// past runs; it survives relaunch, the in-memory list does not.
+    @Published private(set) var askConversations: [ConversationSummary] = []
+    @Published private(set) var agentConversations: [ConversationSummary] = []
+    /// The currently-open thread in the Q&A/Agent tab, if any -- fetched by
+    /// `openAskConversation(_:)`/`openAgentConversation(_:)`.
+    @Published private(set) var askConversationDetail: ConversationDetail?
+    @Published private(set) var agentConversationDetail: ConversationDetail?
+    /// The conversation a new Ask/Agent-mode voice dispatch should continue,
+    /// if any. Set by opening a past conversation in the Q&A/Agent tab (or by
+    /// a tapped Agent-completion notification, via `focusAgentRun(_:)`);
+    /// cleared by leaving the thread view or the tab's explicit "new
+    /// conversation" affordance (`startNewAskConversation()`/
+    /// `startNewAgentConversation()`). `nil` means the next dispatch starts a
+    /// fresh conversation, same as today's one-shot behavior.
+    @Published var focusedAskConversationId: Int?
+    @Published var focusedAgentConversationId: Int?
     /// Drives the floating Ask/Agent popup (`AskPanelController`). `nil`
     /// hides it; non-nil shows it; `answer == nil` is the "thinking" state.
     /// The `didSet` keeps `askPanel` (an imperative `NSPanel` owner, not an
@@ -497,14 +517,101 @@ final class AppModel: ObservableObject {
         onOpenMainWindowRequested?()
     }
 
-    /// Opens the main app window, switches to the Settings tab (where the
-    /// Task List panel lives), and marks `runID` to be scrolled to and
-    /// briefly highlighted — the target of a tapped "Agent finished"
-    /// notification (`AgentNotificationDelegate.onAgentRunTapped`).
+    /// Opens the main app window, switches to the Agent tab, and opens the
+    /// specific run's conversation thread there — the target of a tapped
+    /// "Agent finished" notification
+    /// (`AgentNotificationDelegate.onAgentRunTapped`). Also marks `runID` so
+    /// the Agent tab's "running now" strip can scroll to and briefly
+    /// highlight it, same as before, for runs that are still in flight when
+    /// tapped (e.g. the "N running" affordance rather than a completion
+    /// notification, which only fires once a run finishes).
     func focusAgentRun(_ runID: UUID) {
         focusedAgentRunID = runID
-        selectedTab = .settings
+        if let record = agentRuns.first(where: { $0.id == runID }),
+           let conversationId = record.conversationId {
+            openAgentConversation(conversationId)
+        }
+        selectedTab = .agent
         openMainWindow()
+    }
+
+    /// Refreshes the Q&A tab's conversation list (`GET /conversations?kind=ask`).
+    func refreshAskConversations() async {
+        await refreshConversations(kind: "ask") { [weak self] in self?.askConversations = $0 }
+    }
+
+    /// Refreshes the Agent tab's conversation list (`GET /conversations?kind=agent`).
+    func refreshAgentConversations() async {
+        await refreshConversations(kind: "agent") { [weak self] in self?.agentConversations = $0 }
+    }
+
+    private struct ConversationsListResponseBody: Decodable { let conversations: [ConversationSummary] }
+
+    private func refreshConversations(
+        kind: String,
+        assign: @escaping ([ConversationSummary]) -> Void
+    ) async {
+        do {
+            let response: ConversationsListResponseBody = try await sidecarClient.request(
+                method: "GET",
+                path: "/conversations?kind=\(kind)"
+            )
+            assign(response.conversations)
+        } catch {
+            assign([])
+            print("OpenType: failed to refresh \(kind) conversations from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    private struct ConversationDetailResponseBody: Decodable { let conversation: ConversationDetail }
+
+    /// Opens a past Ask conversation as the Q&A tab's focused thread: fetches
+    /// its full message history and marks it as the conversation a new
+    /// Ask-mode dispatch should continue (`focusedAskConversationId`).
+    func openAskConversation(_ id: Int) {
+        focusedAskConversationId = id
+        Task { [weak self] in
+            await self?.loadConversationDetail(id: id) { [weak self] in self?.askConversationDetail = $0 }
+        }
+    }
+
+    /// Opens a past Agent conversation as the Agent tab's focused thread,
+    /// same as `openAskConversation(_:)` but for `focusedAgentConversationId`.
+    func openAgentConversation(_ id: Int) {
+        focusedAgentConversationId = id
+        Task { [weak self] in
+            await self?.loadConversationDetail(id: id) { [weak self] in self?.agentConversationDetail = $0 }
+        }
+    }
+
+    private func loadConversationDetail(
+        id: Int,
+        assign: @escaping (ConversationDetail?) -> Void
+    ) async {
+        do {
+            let response: ConversationDetailResponseBody = try await sidecarClient.request(
+                method: "GET",
+                path: "/conversations/\(id)"
+            )
+            assign(response.conversation)
+        } catch {
+            assign(nil)
+            print("OpenType: failed to load conversation \(id) from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// Clears the Q&A tab's focused conversation, either because the user
+    /// left the thread view or tapped the tab's explicit "new conversation"
+    /// affordance — the next Ask-mode dispatch starts a fresh conversation.
+    func startNewAskConversation() {
+        focusedAskConversationId = nil
+        askConversationDetail = nil
+    }
+
+    /// Agent-tab counterpart to `startNewAskConversation()`.
+    func startNewAgentConversation() {
+        focusedAgentConversationId = nil
+        agentConversationDetail = nil
     }
 
     /// Explicit dismissal entry point for the Ask/Agent popup, in addition to
@@ -603,18 +710,25 @@ final class AppModel: ObservableObject {
     private struct TranscribeResponseBody: Decodable { let text: String }
 
     /// Request/response bodies for the sidecar's `/oneshot/ask` endpoint,
-    /// used by the `ask` mode branch below.
-    private struct AskRequestBody: Encodable { let question: String }
-    private struct AskResponseBody: Decodable { let result: String }
+    /// used by the `ask` mode branch below. `conversationId` continues an
+    /// existing conversation when set (the Q&A tab's focused thread);
+    /// `nil` starts a fresh one, same as the original one-shot behavior.
+    private struct AskRequestBody: Encodable { let question: String; let conversationId: Int? }
+    private struct AskResponseBody: Decodable { let result: String; let conversationId: Int }
 
     /// Request/response bodies for the sidecar's `/agent/run` endpoint, used
     /// by the `agent` mode branch below. This runs a full agent loop
     /// (potentially calling MCP tools) as a single blocking HTTP call and can
     /// take noticeably longer than `/oneshot/ask`; `steps` carries the full
-    /// step-by-step log after the fact for display in the Task List panel
-    /// (`AgentTaskLogView`).
-    private struct AgentRunRequestBody: Encodable { let task: String; let context: String? }
-    private struct AgentRunResponseBody: Decodable { let result: String; let steps: [AgentStepSummary] }
+    /// step-by-step log after the fact for display in the Agent tab's
+    /// "running now" strip. `conversationId` works the same as
+    /// `AskRequestBody`'s, keyed off the Agent tab's focused thread instead.
+    private struct AgentRunRequestBody: Encodable { let task: String; let context: String?; let conversationId: Int? }
+    private struct AgentRunResponseBody: Decodable {
+        let result: String
+        let steps: [AgentStepSummary]
+        let conversationId: Int
+    }
 
     private struct MemoryTermsResponseBody: Decodable { let terms: [EntityTermSummary] }
     private struct MemoryConsolidationRunsResponseBody: Decodable { let runs: [ConsolidationRunSummary] }
@@ -794,13 +908,24 @@ final class AppModel: ObservableObject {
                 effectiveTextModel = Self.sidecarTextModel
                 askPanelState = AskPanelState(kind: .ask, query: transcript, answer: nil)
                 do {
+                    // Continues the Q&A tab's focused thread when one is
+                    // open (`focusedAskConversationId`), otherwise starts a
+                    // fresh conversation -- see `openAskConversation(_:)`/
+                    // `startNewAskConversation()`.
                     let response: AskResponseBody = try await sidecarClient.request(
                         method: "POST",
                         path: "/oneshot/ask",
-                        body: AskRequestBody(question: transcript)
+                        body: AskRequestBody(
+                            question: transcript,
+                            conversationId: focusedAskConversationId
+                        )
                     )
                     result = response.result
                     askPanelState?.answer = result
+                    await refreshAskConversations()
+                    if focusedAskConversationId == response.conversationId {
+                        openAskConversation(response.conversationId)
+                    }
                 } catch {
                     askPanelState = nil
                     throw OpenTypeError.service(
@@ -821,7 +946,8 @@ final class AppModel: ObservableObject {
                     transcript: transcript,
                     context: capturedContext,
                     practice: practice,
-                    requestID: auditRequestID
+                    requestID: auditRequestID,
+                    conversationId: focusedAgentConversationId
                 )
                 result = nil
             }
@@ -968,7 +1094,8 @@ final class AppModel: ObservableObject {
         transcript: String,
         context: CapturedContext,
         practice: Bool,
-        requestID: UUID
+        requestID: UUID,
+        conversationId: Int?
     ) {
         let record = AgentRunRecord(
             task: transcript,
@@ -985,7 +1112,8 @@ final class AppModel: ObservableObject {
                 transcript: transcript,
                 context: context,
                 practice: practice,
-                requestID: requestID
+                requestID: requestID,
+                conversationId: conversationId
             )
         }
     }
@@ -1007,17 +1135,22 @@ final class AppModel: ObservableObject {
         transcript: String,
         context: CapturedContext,
         practice: Bool,
-        requestID: UUID
+        requestID: UUID,
+        conversationId: Int?
     ) async {
         defer { runningAgentTasks[runID] = nil }
 
         do {
+            // Continues the Agent tab's focused thread when one was open at
+            // dispatch time, otherwise starts a fresh conversation -- see
+            // `openAgentConversation(_:)`/`startNewAgentConversation()`.
             let response: AgentRunResponseBody = try await sidecarClient.request(
                 method: "POST",
                 path: "/agent/run",
                 body: AgentRunRequestBody(
                     task: transcript,
-                    context: context.selectedText
+                    context: context.selectedText,
+                    conversationId: conversationId
                 )
             )
 
@@ -1025,8 +1158,13 @@ final class AppModel: ObservableObject {
                 record.steps = response.steps
                 record.status = .completed(response.result)
                 record.completedAt = Date()
+                record.conversationId = response.conversationId
             }
             runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
+            await refreshAgentConversations()
+            if focusedAgentConversationId == response.conversationId {
+                openAgentConversation(response.conversationId)
+            }
 
             try? auditStore.append(
                 ImmutableAuditEvent(
@@ -1200,6 +1338,8 @@ final class AppModel: ObservableObject {
 enum AppTab: String, CaseIterable, Identifiable {
     case home
     case history
+    case qa
+    case agent
     case settings
 
     var id: String { rawValue }
@@ -1208,6 +1348,8 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .home: return OpenTypeL10n.text("输入", english: "Input")
         case .history: return OpenTypeL10n.text("历史", english: "History")
+        case .qa: return OpenTypeL10n.text("问答", english: "Q&A")
+        case .agent: return OpenTypeL10n.text("Agent", english: "Agent")
         case .settings: return OpenTypeL10n.text("设置", english: "Settings")
         }
     }
@@ -1216,6 +1358,8 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "waveform"
         case .history: return "clock.arrow.circlepath"
+        case .qa: return "questionmark.bubble.fill"
+        case .agent: return "wand.and.stars"
         case .settings: return "slider.horizontal.3"
         }
     }

@@ -104,7 +104,7 @@ struct RootView: View {
             }
         }
         .tint(AppAccent.primary)
-        .environment(\.locale, configuration.interfaceLanguage.locale)
+        .environment(\.locale, OpenTypeL10n.locale)
     }
 }
 
@@ -1003,21 +1003,6 @@ private struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                SettingsSection("界面语言") {
-                    Picker(
-                        "界面语言",
-                        selection: Binding(
-                            get: { configuration.interfaceLanguage },
-                            set: { model.changeInterfaceLanguage($0) }
-                        )
-                    ) {
-                        ForEach(InterfaceLanguage.allCases) { language in
-                            Text(language.title).tag(language)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                }
-
                 SettingsSection("快捷键") {
                     Picker(
                         "启动快捷键",
@@ -1122,11 +1107,7 @@ private struct SettingsView: View {
                             .controlSize(.small)
                         }
                     }
-                    Toggle(
-                        "识别“发送 / press enter”命令",
-                        isOn: $configuration.pressEnterCommand
-                    )
-                    Text("Agent 模式的结果始终复制到剪贴板，由你手动粘贴，不会自动发送或执行。")
+                    Text("所有模式的结果都会复制到剪贴板，由你手动粘贴，不会自动发送或执行。")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 }
@@ -1292,26 +1273,6 @@ private struct SettingsView: View {
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-
-                SettingsSection("个人词典") {
-                    Text("用逗号或换行分隔。OpenType 会保留这些词的拼写。")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-
-                    TextEditor(text: $configuration.personalDictionaryText)
-                        .font(.system(size: 11))
-                        .frame(height: 76)
-                        .padding(7)
-                        .scrollContentBackground(.hidden)
-                        .background(
-                            Color(nsColor: .textBackgroundColor),
-                            in: RoundedRectangle(cornerRadius: 9)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9)
-                                .strokeBorder(.primary.opacity(0.1))
-                        )
                 }
 
                 SettingsSection("连接与权限") {

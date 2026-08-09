@@ -365,13 +365,6 @@ enum OutputDeliveryPolicy {
         true
     }
 
-    static func permitsAutomaticEnter(for mode: InputMode) -> Bool {
-        // Agent results are drafts for the user to review, never actions
-        // taken automatically on their behalf, so a spoken "press enter" /
-        // "send it" command must never auto-submit an Agent result.
-        mode != .agent
-    }
-
 }
 
 enum PermissionStatus: Equatable {

@@ -7,7 +7,6 @@ private final class OverlayPresentation: ObservableObject {
     @Published var mode: InputMode = InputMode.visibleModes[0]
     @Published var liveTranscript = ""
     @Published var audioLevel = 0.0
-    @Published var interfaceLanguage: InterfaceLanguage = .chinese
 }
 
 @MainActor
@@ -67,10 +66,6 @@ final class OverlayController {
     func updateAudioLevel(_ level: Double) {
         guard presentation.state == .listening else { return }
         presentation.audioLevel = level
-    }
-
-    func updateInterfaceLanguage(_ language: InterfaceLanguage) {
-        presentation.interfaceLanguage = language
     }
 
     func hide() {
@@ -136,7 +131,7 @@ private struct OverlayView: View {
                 .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
         )
         .tint(AppAccent.primary)
-        .environment(\.locale, presentation.interfaceLanguage.locale)
+        .environment(\.locale, OpenTypeL10n.locale)
     }
 
     private var listeningContent: some View {

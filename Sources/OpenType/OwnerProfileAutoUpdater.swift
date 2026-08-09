@@ -7,17 +7,6 @@ enum OwnerProfileAutoUpdater {
     private static let stylePrefix = "OpenType 自动归纳的表达偏好："
     private static let termsPrefix = "OpenType 自动归纳的术语："
 
-    /// Kept for source compatibility with earlier callers. Learned signals no
-    /// longer mutate the user-confirmed profile; they are persisted separately
-    /// by `AgentMemoryStore`.
-    static func merging(
-        profile: OwnerProfile,
-        insights: MemoryInsights,
-        personalDictionary: [String]
-    ) -> OwnerProfile {
-        removingLegacyManagedLines(from: profile)
-    }
-
     static func removingLegacyManagedLines(from profile: OwnerProfile) -> OwnerProfile {
         var cleaned = profile
         cleaned.identityAndWork = removingManagedLines(from: profile.identityAndWork)

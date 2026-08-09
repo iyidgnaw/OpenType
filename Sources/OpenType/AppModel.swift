@@ -165,15 +165,11 @@ final class AppModel: ObservableObject {
         self.agentMemory.importHistoryIfNeeded(self.history.entries)
         self.agentMemory.refreshOwnerProfileIfNeeded(
             enabled: self.configuration.agentMemoryEnabled
-                && self.configuration.automaticOwnerProfileUpdates,
-            personalDictionary: self.configuration.personalDictionary
+                && self.configuration.automaticOwnerProfileUpdates
         )
-        self.overlay.updateInterfaceLanguage(self.configuration.interfaceLanguage)
-        self.askPanel.updateInterfaceLanguage(self.configuration.interfaceLanguage)
         self.askPanel.onRequestDismiss = { [weak self] in
             self?.askPanelState = nil
         }
-        self.reviewPanel.updateInterfaceLanguage(self.configuration.interfaceLanguage)
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
         microphonePermission = audioRecorder.permissionStatus
@@ -504,18 +500,6 @@ final class AppModel: ObservableObject {
         persistShortcutStatus()
     }
 
-    func changeInterfaceLanguage(_ language: InterfaceLanguage) {
-        guard configuration.interfaceLanguage != language else { return }
-        configuration.interfaceLanguage = language
-        overlay.updateInterfaceLanguage(language)
-        askPanel.updateInterfaceLanguage(language)
-        reviewPanel.updateInterfaceLanguage(language)
-        updateShortcutPresentation(
-            preference: configuration.hotKeyPreset,
-            installed: shortcutReady
-        )
-    }
-
     func changeTranscriptionLanguage(_ language: TranscriptionLanguage) {
         configuration.transcriptionLanguage = language
     }
@@ -527,10 +511,7 @@ final class AppModel: ObservableObject {
     func changeAutomaticOwnerProfileUpdates(_ enabled: Bool) {
         configuration.automaticOwnerProfileUpdates = enabled
         guard enabled, configuration.agentMemoryEnabled else { return }
-        agentMemory.refreshOwnerProfileIfNeeded(
-            enabled: true,
-            personalDictionary: configuration.personalDictionary
-        )
+        agentMemory.refreshOwnerProfileIfNeeded(enabled: true)
     }
 
     func copyLastResult() {
@@ -863,7 +844,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             var completionState: ProcessingState = .success
             do {
-                try await self.contextBridge.insert(finalText, pressEnter: false)
+                try await self.contextBridge.insert(finalText)
             } catch {
                 completionState = .copied
             }
@@ -1194,12 +1175,8 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
             auditRawTranscript = rawTranscript
 
-            let sendCommand = SendCommandParser.parse(
-                rawTranscript,
-                enabled: configuration.pressEnterCommand
-            )
             let routed = VoiceModeRouter.route(
-                sendCommand.text,
+                rawTranscript,
                 currentMode: startingMode
             )
             let mode = routed.mode
@@ -1339,8 +1316,7 @@ final class AppModel: ObservableObject {
                     )
                 )
                 agentMemory.refreshOwnerProfileIfNeeded(
-                    enabled: configuration.automaticOwnerProfileUpdates,
-                    personalDictionary: configuration.personalDictionary
+                    enabled: configuration.automaticOwnerProfileUpdates
                 )
             }
 
@@ -1370,13 +1346,7 @@ final class AppModel: ObservableObject {
             } else if deliveryStrategy == .automaticInsert {
                 setState(.inserting)
                 do {
-                    try await contextBridge.insert(
-                        result,
-                        pressEnter: sendCommand.pressEnter
-                            && OutputDeliveryPolicy.permitsAutomaticEnter(
-                                for: mode
-                            )
-                    )
+                    try await contextBridge.insert(result)
                 } catch {
                     completionState = .copied
                 }
@@ -1549,8 +1519,7 @@ final class AppModel: ObservableObject {
                     )
                 )
                 agentMemory.refreshOwnerProfileIfNeeded(
-                    enabled: configuration.automaticOwnerProfileUpdates,
-                    personalDictionary: configuration.personalDictionary
+                    enabled: configuration.automaticOwnerProfileUpdates
                 )
             }
             if configuration.keepHistory, !practice {

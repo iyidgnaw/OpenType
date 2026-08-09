@@ -6,7 +6,6 @@ private final class AskPanelPresentation: ObservableObject {
     @Published var kind: AskPanelState.Kind = .ask
     @Published var query = ""
     @Published var answer: String?
-    @Published var interfaceLanguage: InterfaceLanguage = .chinese
 }
 
 /// A borderless floating panel for Ask and Agent mode: distinct from
@@ -53,10 +52,6 @@ final class AskPanelController {
     func hide() {
         removeClickOutsideMonitor()
         panel?.orderOut(nil)
-    }
-
-    func updateInterfaceLanguage(_ language: InterfaceLanguage) {
-        presentation.interfaceLanguage = language
     }
 
     private func makePanel() -> NSPanel {
@@ -151,7 +146,7 @@ private struct AskPanelView: View {
                 .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
         )
         .tint(AppAccent.primary)
-        .environment(\.locale, presentation.interfaceLanguage.locale)
+        .environment(\.locale, OpenTypeL10n.locale)
         .onExitCommand(perform: onClose)
     }
 

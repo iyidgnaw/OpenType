@@ -13,8 +13,6 @@
 "复制完整 Prompt" = "Copy full prompt";
 "系统自动附加" = "Added automatically";
 "外观" = "Appearance";
-"界面语言" = "Interface language";
-"切换后立即生效，并同步应用到导航、模式选中态、语音悬浮窗和菜单栏图标。" = "Changes apply immediately to navigation, selected modes, the voice overlay, and the menu bar icon.";
 "快捷键" = "Shortcut";
 "启动快捷键" = "Activation shortcut";
 "开启辅助功能后，可使用双击键，并由任意键结束。" = "Enable Accessibility to use double-tap shortcuts and stop with any regular key.";
@@ -27,8 +25,6 @@
 "实时字幕" = "Live captions";
 "录音时显示实时字幕" = "Show live captions while recording";
 "实时字幕需要 macOS 语音识别权限" = "Live captions require macOS Speech Recognition permission.";
-"按下回车" = "Press Return";
-"识别“发送 / press enter”命令" = "Recognize “send / press enter” commands";
 "X Reply 始终复制到剪贴板，由你手动粘贴和发布。" = "X Reply always copies the result so you can paste and publish it yourself.";
 "长期记忆" = "Long-term memory";
 "启用本地长期记忆与个性化" = "Enable local long-term memory and personalization";
@@ -51,8 +47,6 @@
 "本地加密" = "Encrypted locally";
 "X Reply" = "X Reply";
 "X Reply 风格" = "X Reply style";
-"个人词典" = "Personal dictionary";
-"用逗号或换行分隔。OpenType 会保留这些词的拼写。" = "Separate terms with commas or line breaks. OpenType will preserve their spelling.";
 "连接与权限" = "Connections & permissions";
 "授权" = "Allow";
 "隐私与数据" = "Privacy & data";

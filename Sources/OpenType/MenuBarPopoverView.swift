@@ -38,7 +38,7 @@ struct MenuBarPopoverView: View {
         .frame(width: 320)
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(AppAccent.primary)
-        .environment(\.locale, configuration.interfaceLanguage.locale)
+        .environment(\.locale, OpenTypeL10n.locale)
     }
 
     private var header: some View {

@@ -1,43 +1,5 @@
 import Foundation
 
-enum SendCommandParser {
-    private static let commands = [
-        "press enter",
-        "send it",
-        "按回车",
-        "按下回车",
-        "直接发送",
-        "发送"
-    ]
-
-    static func parse(_ transcript: String, enabled: Bool) -> (text: String, pressEnter: Bool) {
-        guard enabled else { return (transcript, false) }
-
-        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        let commandCandidate = trimmed.trimmingCharacters(
-            in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
-        )
-        let lowered = commandCandidate.lowercased()
-
-        for command in commands {
-            guard lowered.hasSuffix(command) else { continue }
-            let endIndex = commandCandidate.index(
-                commandCandidate.endIndex,
-                offsetBy: -command.count
-            )
-            let cleaned = commandCandidate[..<endIndex]
-                .trimmingCharacters(
-                    in: CharacterSet.whitespacesAndNewlines.union(
-                        CharacterSet(charactersIn: ",，:：;；")
-                    )
-                )
-            return (cleaned, true)
-        }
-
-        return (trimmed, false)
-    }
-}
-
 struct RoutedTranscript: Equatable {
     let mode: InputMode
     let text: String

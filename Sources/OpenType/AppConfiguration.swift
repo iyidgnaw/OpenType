@@ -10,13 +10,6 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(hotKeyPreset.rawValue, forKey: Keys.hotKeyPreset) }
     }
 
-    @Published var interfaceLanguage: InterfaceLanguage {
-        didSet {
-            defaults.set(interfaceLanguage.rawValue, forKey: Keys.interfaceLanguage)
-            OpenTypeL10n.language = interfaceLanguage
-        }
-    }
-
     @Published var transcriptionLanguage: TranscriptionLanguage {
         didSet {
             defaults.set(
@@ -56,10 +49,6 @@ final class AppConfiguration: ObservableObject {
         }
     }
 
-    @Published var pressEnterCommand: Bool {
-        didSet { defaults.set(pressEnterCommand, forKey: Keys.pressEnterCommand) }
-    }
-
     @Published var playFeedbackSounds: Bool {
         didSet { defaults.set(playFeedbackSounds, forKey: Keys.playFeedbackSounds) }
     }
@@ -68,18 +57,7 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(liveCaptionsEnabled, forKey: Keys.liveCaptionsEnabled) }
     }
 
-    @Published var personalDictionaryText: String {
-        didSet { defaults.set(personalDictionaryText, forKey: Keys.personalDictionaryText) }
-    }
-
     private let defaults: UserDefaults
-
-    var personalDictionary: [String] {
-        personalDictionaryText
-            .components(separatedBy: CharacterSet(charactersIn: ",，\n"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
 
     var isMuted: Bool {
         get { !playFeedbackSounds }
@@ -94,9 +72,6 @@ final class AppConfiguration: ObservableObject {
         hotKeyPreset = HotKeyPreset(
             rawValue: defaults.string(forKey: Keys.hotKeyPreset) ?? ""
         ) ?? .leftOption
-        interfaceLanguage = InterfaceLanguage(
-            rawValue: defaults.string(forKey: Keys.interfaceLanguage) ?? ""
-        ) ?? .chinese
         transcriptionLanguage = TranscriptionLanguage(
             rawValue: defaults.string(forKey: Keys.transcriptionLanguage) ?? ""
         ) ?? .automatic
@@ -109,27 +84,20 @@ final class AppConfiguration: ObservableObject {
         automaticOwnerProfileUpdates = defaults.object(
             forKey: Keys.automaticOwnerProfileUpdates
         ) as? Bool ?? true
-        pressEnterCommand = defaults.object(forKey: Keys.pressEnterCommand) as? Bool ?? false
         playFeedbackSounds = defaults.object(forKey: Keys.playFeedbackSounds) as? Bool ?? true
         liveCaptionsEnabled = defaults.object(forKey: Keys.liveCaptionsEnabled) as? Bool ?? true
-        personalDictionaryText = defaults.string(forKey: Keys.personalDictionaryText)
-            ?? "Rain, OpenType, OpenClaw, Mingle, Clawborn"
-        OpenTypeL10n.language = interfaceLanguage
     }
 
     private enum Keys {
         static let selectedMode = "selectedMode"
         static let hotKeyPreset = "hotKeyPreset"
-        static let interfaceLanguage = "interfaceLanguage"
         static let transcriptionLanguage = "transcriptionLanguage"
         static let transcribeVariant = "transcribeVariant"
         static let automaticallyInsert = "automaticallyInsert"
         static let keepHistory = "keepHistory"
         static let agentMemoryEnabled = "agentMemoryEnabled"
         static let automaticOwnerProfileUpdates = "automaticOwnerProfileUpdates"
-        static let pressEnterCommand = "pressEnterCommand"
         static let playFeedbackSounds = "playFeedbackSounds"
         static let liveCaptionsEnabled = "liveCaptionsEnabled"
-        static let personalDictionaryText = "personalDictionaryText"
     }
 }

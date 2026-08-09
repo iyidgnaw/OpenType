@@ -44,33 +44,6 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(ProcessingState.copied.symbol, "doc.on.clipboard.fill")
     }
 
-    func testSendCommandIsRemovedFromTail() {
-        let result = SendCommandParser.parse(
-            "这就是我今天的判断。按回车",
-            enabled: true
-        )
-        XCTAssertEqual(result.text, "这就是我今天的判断。")
-        XCTAssertTrue(result.pressEnter)
-    }
-
-    func testSendCommandAllowsASRTrailingPunctuationAndKeepsQuestionMark() {
-        let result = SendCommandParser.parse(
-            "你睡了吗？发送。",
-            enabled: true
-        )
-        XCTAssertEqual(result.text, "你睡了吗？")
-        XCTAssertTrue(result.pressEnter)
-    }
-
-    func testSendCommandDoesNotTriggerWhenSendIsPartOfTheSentence() {
-        let result = SendCommandParser.parse(
-            "我想聊聊发送机制。",
-            enabled: true
-        )
-        XCTAssertEqual(result.text, "我想聊聊发送机制。")
-        XCTAssertFalse(result.pressEnter)
-    }
-
     func testVoiceModeRouterDoesNotMisreadOrdinarySentence() {
         let result = VoiceModeRouter.route(
             "英文产品的增长很快",
@@ -185,18 +158,6 @@ final class OpenTypeTests: XCTestCase {
                 "Expected \(mode.title) not to require a selection"
             )
         }
-    }
-
-    func testAgentNeverTriggersAutomaticEnter() {
-        XCTAssertFalse(
-            OutputDeliveryPolicy.permitsAutomaticEnter(for: .agent)
-        )
-        XCTAssertTrue(
-            OutputDeliveryPolicy.permitsAutomaticEnter(for: .transcribe)
-        )
-        XCTAssertTrue(
-            OutputDeliveryPolicy.permitsAutomaticEnter(for: .ask)
-        )
     }
 
     func testDoubleTapDetectorTriggersWithinThreshold() {
@@ -315,24 +276,6 @@ final class OpenTypeTests: XCTestCase {
 
 
     @MainActor
-    func testInterfaceLanguageDefaultsToChineseAndPersistsEnglish() {
-        let suiteName = "OpenTypeTests.InterfaceLanguage.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer {
-            defaults.removePersistentDomain(forName: suiteName)
-            OpenTypeL10n.language = .chinese
-        }
-
-        let configuration = AppConfiguration(defaults: defaults)
-        XCTAssertEqual(configuration.interfaceLanguage, .chinese)
-        configuration.interfaceLanguage = .english
-
-        let reloaded = AppConfiguration(defaults: defaults)
-        XCTAssertEqual(reloaded.interfaceLanguage, .english)
-        XCTAssertEqual(InputMode.transcribe.title, "Transcribe")
-    }
-
-    @MainActor
     func testAutomaticOwnerProfileUpdateSettingPersists() {
         let suiteName = "OpenTypeTests.AutoProfileSetting.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -354,19 +297,8 @@ final class OpenTypeTests: XCTestCase {
             preferredLanguage: .chinese,
             updatedAt: nil
         )
-        let insights = MemoryInsights(
-            observedTaskCount: 100,
-            commonTerms: ["Agent", "的话", "Open"],
-            taskDomains: ["产品与 AI 工具", "内容写作与编辑"],
-            languagePattern: "主要使用中文，经常混合英文专业词",
-            stylePreferences: ["自然、口语化、低 AI 味"],
-            updatedAt: Date()
-        )
-
-        let updated = OwnerProfileAutoUpdater.merging(
-            profile: profile,
-            insights: insights,
-            personalDictionary: ["Rain", "OpenType", "OpenClaw"]
+        let updated = OwnerProfileAutoUpdater.removingLegacyManagedLines(
+            from: profile
         )
 
         XCTAssertEqual(updated.identityAndWork, "我是 Rain，正在做 AI Agent 产品。")
@@ -429,10 +361,7 @@ final class OpenTypeTests: XCTestCase {
 
         XCTAssertEqual(store.eventCount, 100)
         XCTAssertTrue(
-            store.refreshOwnerProfileIfNeeded(
-                enabled: true,
-                personalDictionary: ["OpenType"]
-            )
+            store.refreshOwnerProfileIfNeeded(enabled: true)
         )
         XCTAssertEqual(store.lastAutomaticProfileEventCount, 100)
         XCTAssertEqual(store.ownerProfile.identityAndWork, confirmedProfile.identityAndWork)
@@ -445,10 +374,7 @@ final class OpenTypeTests: XCTestCase {
             store.learnedPreferences
         )
         XCTAssertFalse(
-            store.refreshOwnerProfileIfNeeded(
-                enabled: true,
-                personalDictionary: ["OpenType"]
-            )
+            store.refreshOwnerProfileIfNeeded(enabled: true)
         )
 
         let reloaded = AgentMemoryStore(fileURL: fileURL)

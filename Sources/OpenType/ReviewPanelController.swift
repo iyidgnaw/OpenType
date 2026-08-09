@@ -14,7 +14,6 @@ private final class ReviewPanelPresentation: ObservableObject {
     @Published var text = ""
     @Published var isCorrecting = false
     @Published var correctionHint: String?
-    @Published var interfaceLanguage: InterfaceLanguage = .chinese
 }
 
 /// A floating panel for Review mode (`TranscribeVariant.review`): stashes a
@@ -94,10 +93,6 @@ final class ReviewPanelController {
         removeClickOutsideMonitor()
         panel?.orderOut(nil)
         textView = nil
-    }
-
-    func updateInterfaceLanguage(_ language: InterfaceLanguage) {
-        presentation.interfaceLanguage = language
     }
 
     /// The authoritative current text, including any manual edits or applied
@@ -281,7 +276,7 @@ private struct ReviewPanelView: View {
                 .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
         )
         .tint(AppAccent.primary)
-        .environment(\.locale, presentation.interfaceLanguage.locale)
+        .environment(\.locale, OpenTypeL10n.locale)
         .onExitCommand(perform: onCancel)
     }
 

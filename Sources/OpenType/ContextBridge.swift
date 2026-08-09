@@ -46,7 +46,7 @@ final class ContextBridge {
         pasteboard.setString(text, forType: .string)
     }
 
-    func insert(_ text: String, pressEnter: Bool) async throws {
+    func insert(_ text: String) async throws {
         guard accessibilityGranted else {
             requestAccessibilityPermission()
             throw OpenTypeError.accessibilityRequired
@@ -59,10 +59,6 @@ final class ContextBridge {
 
         postKey(keyCode: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
         try? await Task.sleep(nanoseconds: 350_000_000)
-
-        if pressEnter {
-            postKey(keyCode: CGKeyCode(kVK_Return), flags: [])
-        }
 
         snapshot.restore(to: pasteboard)
     }

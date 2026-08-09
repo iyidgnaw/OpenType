@@ -153,10 +153,7 @@ final class AgentMemoryStore: ObservableObject {
     }
 
     @discardableResult
-    func refreshOwnerProfileIfNeeded(
-        enabled: Bool,
-        personalDictionary: [String]
-    ) -> Bool {
+    func refreshOwnerProfileIfNeeded(enabled: Bool) -> Bool {
         guard enabled, databaseReady else { return false }
         let currentBucket = eventCount / OwnerProfileAutoUpdater.updateInterval
         let savedBucket = Int(

@@ -2,7 +2,7 @@
 
 OpenType 是一个本地优先的跨平台 AI 语音输入工具，把自然口语变成可以直接使用的文字。三端最初的设计目标是共享同一套模式、Prompt 安全规则、Provider 语义和审计协议，但 macOS 端最近经历了一次从零重写（详见下文），iOS/Android 仍是重写前的旧版设计，目前三端**并不同步** —— 具体差异见根目录 [CLAUDE.md](CLAUDE.md) 里的说明。
 
-macOS 的完整使用情景、操作方式和功能边界见 [OpenType 使用说明书](USER_GUIDE.md)（该文档同样待更新，与本 README 的 macOS 章节一样以本 README 和 `CLAUDE.md` 为准）。
+macOS 的完整使用情景、操作方式和功能边界见 [OpenType 使用说明书](USER_GUIDE.md)，该文档已按重写后的 3 模式系统全面更新。
 
 **新用户想在自己电脑上安装 macOS 版？** 仓库目前是私有的、还没有打包发行版，安装方式是 clone 仓库后本地编译。与其手动照抄命令，可以把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 直接发给你自己的 coding agent（Claude Code、Codex 等），让它帮你把 clone、依赖安装、本地 Whisper 环境搭建、编译、首次授权和应用内设置引导全部走一遍。
 
@@ -65,6 +65,6 @@ open dist/OpenType.app
 - 识别出的文字只在 `ask`/`agent` 两种模式下会发送给用户自己配置的 LLM Provider；`transcribe` 模式完全不经过任何 LLM，识别到什么就是什么。
 - 实时字幕预览用的是 Apple 系统自带的本机语音识别，只作为录音时的临时预览，松开后仍会用上面配置的正式语音识别服务重新识别一次作为最终结果。
 - LLM Provider 的 API Key 等配置保存在本机 sidecar 子进程的数据目录下，以 `chmod 600`（仅当前系统账户可读写）的明文 JSON 文件保存 —— 不写入代码仓库、日志或历史，接口回显时也只显示掩码后的 Key；这不是硬件隔离的 Keychain，信任边界等同于本机账户本身，细节见 [当前系统状态文档](docs/superpowers/specs/2026-08-09-current-system-state.md) 第 10 节。
-- 输入历史、Q&A/Agent 对话记录、审计日志等均保存在本机 `~/Library/Application Support/OpenType/`（含 sidecar 自己的 `opentype.sqlite3`），历史可以在设置的二级数据管理中重置。
+- 输入历史、Q&A/Agent 对话记录、审计日志等均保存在本机 `~/Library/Application Support/OpenType/`：`memory.sqlite3`（Swift 侧的任务历史与“已学到的偏好”）和 `opentype.sqlite3`（sidecar 侧的实体词典、owner facts 与 Q&A/Agent 会话记录）是两套独立的数据库；历史可以在设置的二级数据管理中重置。
 - 每一次识别、每一次修正（Review 转写模式下的语音纠错）、以及最终完成或取消，都会追加写入本机一份不可修改的 `audit-events.v1.jsonl`，不受历史重置影响。
 - Agent 模式的结果只复制到剪贴板并生成草稿，永远不会自动回车、发布或对外执行；是否额外写入当前输入框由“自动写入”开关单独控制。

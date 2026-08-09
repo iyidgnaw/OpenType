@@ -65,8 +65,19 @@ you're debugging packaging specifically.
 - `src/asr/` — `/asr/transcribe`; proxies to the persistent local
   MLX-Whisper python process (`whisper/serve.py`) over its own Unix socket.
 - `src/memory/` — the entity-dictionary `MemoryStore` (SQLite-backed),
-  periodic consolidation (`consolidator.ts`), and the read-only
-  `/memory/terms` / `/memory/consolidation-runs` endpoints.
+  periodic consolidation (`consolidator.ts`), the read-only
+  `/memory/terms` / `/memory/consolidation-runs` endpoints, and
+  `conversations.ts`/`conversationRoutes.ts` — a separate `conversations`/
+  `conversation_messages` table pair (same SQLite file, different concern:
+  turn-by-turn chat history, not a fact/term store) backing the macOS Q&A/
+  Agent tabs' multi-turn continuation via `GET /conversations?kind=ask|agent`
+  and `GET /conversations/:id`, and an optional `conversationId` accepted by
+  `/oneshot/ask` and `/agent/run` to continue a specific thread.
+- `src/transcribe/` — `POST /transcribe/correct`, a pure/dependency-light
+  endpoint (no `MemoryStore`) backing macOS's Review transcribe-mode: takes
+  the full current text, a UTF-16 offset selection range, and a spoken
+  correction instruction, returns only the replacement for that span (the
+  caller splices it back in by offset).
 - `src/provider/` — the LLM provider abstraction: `deepseek.ts` (the
   original, still-used env-based zero-config default client),
   `openaiCompatible.ts`/`anthropic.ts` (the two provider types a user can

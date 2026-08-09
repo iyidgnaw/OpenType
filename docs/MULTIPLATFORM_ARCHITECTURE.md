@@ -2,6 +2,8 @@
 
 本文档定义 macOS、iOS 与 Android 三端必须保持一致的产品行为，以及必须尊重的平台边界。机器可读的规范位于 `Shared/OpenTypeContract.json`，请求、响应与追加式审计事件定义在 `Shared/Schemas`。
 
+> **本文档相对 macOS 已经过时。** macOS 端最近经历了一次从零重写（5 模式 → 3 模式：`transcribe`/`ask`/`agent`，语音识别与文本生成都改为本地 sidecar 子进程处理），下面“共同产品内核”里的五模式列表和“macOS”一节描述的都是重写前的旧设计，`Shared/OpenTypeContract.json` 和 iOS/Android 也都还没有跟着重写更新——三端目前并不同步。把这份多端协调工作视为明确推迟、尚未开始的独立任务，不要以本文档作为 macOS 当前行为的依据；macOS 当前实际状态见根目录 [CLAUDE.md](../CLAUDE.md) 和 [`docs/superpowers/specs/2026-08-09-current-system-state.md`](superpowers/specs/2026-08-09-current-system-state.md)。iOS 和 Android 部分仍然准确描述这两端的现状。
+
 ## 共同产品内核
 
 三端共享同一条处理链：获取上下文 → 语音识别 → 模式路由 → 文字处理 → 输出校验 → 本地留痕 → 交付结果。
@@ -51,7 +53,7 @@ Android 由宿主设置 App 与 `InputMethodService` 组成。IME 可以通过 `
 
 ## 安全存储
 
-- macOS：本地 AES-GCM Provider Vault，密钥与密文均不进入项目或日志。
+- macOS：~~本地 AES-GCM Provider Vault~~ 已不是当前实现——现在由本地 sidecar 子进程以 `chmod 600` 明文 JSON 保存 Provider 配置（详见 `docs/superpowers/specs/2026-08-09-current-system-state.md` 第 10 节），不进入项目仓库或日志。
 - iOS：Keychain；宿主 App 与键盘共享的只应是生成结果和非敏感偏好，Token 不写入 App Group 明文。
 - Android：Android Keystore 支持的加密存储；不得把 Token 写进普通 SharedPreferences、构建配置或日志。
 

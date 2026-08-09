@@ -1073,6 +1073,26 @@ private struct SettingsView: View {
 
                 SettingsSection("转写") {
                     Picker(
+                        OpenTypeL10n.text("听写方式", english: "Transcribe mode"),
+                        selection: Binding(
+                            get: { configuration.transcribeVariant },
+                            set: { model.changeTranscribeVariant($0) }
+                        )
+                    ) {
+                        ForEach(TranscribeVariant.allCases) { variant in
+                            Text(variant.title).tag(variant)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text(configuration.transcribeVariant.explanation)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
+                    Picker(
                         "转写语言",
                         selection: Binding(
                             get: { configuration.transcriptionLanguage },

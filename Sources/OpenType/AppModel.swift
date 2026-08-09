@@ -49,6 +49,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var askPanelState: AskPanelState? {
         didSet { syncAskPanel() }
     }
+    /// Drives the floating Review panel (`ReviewPanelController`) — see
+    /// `ReviewPanelState`'s doc comment. `nil` hides it; non-nil shows it.
+    /// Same imperative-controller-sync split as `askPanelState`/`askPanel`.
+    @Published private(set) var reviewPanelState: ReviewPanelState? {
+        didSet { syncReviewPanel() }
+    }
 
     let configuration: AppConfiguration
     let history: HistoryStore
@@ -62,6 +68,7 @@ final class AppModel: ObservableObject {
     private let hotKey = GlobalHotKey()
     private let overlay = OverlayController()
     private let askPanel = AskPanelController()
+    private let reviewPanel = ReviewPanelController()
     private var customSounds: [String: NSSound] = [:]
     private var activeFeedbackSound: NSSound?
     private var capturedContext = CapturedContext(
@@ -75,6 +82,22 @@ final class AppModel: ObservableObject {
     private var didStart = false
     private var isHotKeyHeld = false
     private var isStartingRecording = false
+    /// Set for the duration of a hotkey press/release that's a Review-mode
+    /// voice *correction* (spoken while the Review panel is open, targeting
+    /// its current text selection) rather than a brand-new Direct/Review
+    /// dictation. `hotKeyPressed()` decides which this is based on whether
+    /// `reviewPanelState` is non-nil at press time; `finishRecording()`
+    /// branches on this flag to route the resulting audio to
+    /// `processCorrection(audioURL:)` instead of `process(audioURL:)`.
+    private var isCorrectionRecording = false
+    /// Non-nil for the duration of an open Review panel — the audit-chain
+    /// bookkeeping (`requestId` grouping every event in one session,
+    /// `lastEventId` for `supersedesEventId` chaining) and the originally
+    /// captured target-app context the eventual commit inserts into. Kept
+    /// separate from `reviewPanelState` (which only tracks *visibility* for
+    /// SwiftUI) since this is `AppModel`-internal bookkeeping the panel
+    /// itself has no need to see.
+    private var reviewSession: ReviewSession?
     /// Detached, un-awaited units of work for in-flight `/agent/run` calls,
     /// keyed by `AgentRunRecord.id`. Deliberately not awaited by
     /// `process(audioURL:)` — see `dispatchAgentRun(...)` — so a slow Agent
@@ -132,6 +155,10 @@ final class AppModel: ObservableObject {
         self.askPanel.onRequestDismiss = { [weak self] in
             self?.askPanelState = nil
         }
+        self.reviewPanel.updateColorTheme(self.configuration.colorTheme)
+        self.reviewPanel.updateInterfaceLanguage(self.configuration.interfaceLanguage)
+        self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
+        self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
         microphonePermission = audioRecorder.permissionStatus
         speechRecognitionPermission = liveSpeechTranscriber.permissionStatus
         liveSpeechTranscriber.onTranscript = { [weak self] text in
@@ -210,6 +237,28 @@ final class AppModel: ObservableObject {
         guard state != .listening else { return }
         guard !isBusy, !isStartingRecording else { return }
 
+        // While the Review panel is open, the hotkey means "speak a
+        // correction for the panel's current text selection," not "start a
+        // brand-new Direct/Review dictation" — the panel's open+selection
+        // state is what disambiguates the two, per the feature design (no
+        // separate chord). Validated *before* recording starts so an
+        // empty-selection mistake gets immediate feedback rather than
+        // wasting a recording round-trip.
+        if reviewPanelState != nil {
+            guard reviewPanel.currentSelection() != nil else {
+                let message = OpenTypeL10n.text(
+                    "请先在复核面板中选中要修改的文字",
+                    english: "Select text in the Review panel first"
+                )
+                let cancelled = ProcessingState.cancelled(message)
+                setState(cancelled)
+                scheduleIdle(after: cancelled)
+                return
+            }
+            beginCorrectionRecording()
+            return
+        }
+
         let context = contextBridge.capture()
         let mode = configuration.selectedMode
         if mode.requiresSelection, !contextBridge.accessibilityGranted {
@@ -285,6 +334,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The Review-panel-open counterpart of `beginRecording(...)` above: no
+    /// context re-capture (the panel's own text selection is what this
+    /// recording targets, not the currently-focused app), and no mode
+    /// selection — `finishRecording()` routes the result to
+    /// `processCorrection(audioURL:)` based on `isCorrectionRecording` alone.
+    private func beginCorrectionRecording() {
+        isHotKeyHeld = true
+        isCorrectionRecording = true
+        isStartingRecording = true
+        processingTask?.cancel()
+        processingTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.audioRecorder.start()
+                self.microphonePermission = self.audioRecorder.permissionStatus
+                self.isStartingRecording = false
+                self.setState(.listening)
+                self.playFeedbackSound(.ready)
+            } catch {
+                self.microphonePermission = self.audioRecorder.permissionStatus
+                self.isStartingRecording = false
+                self.isCorrectionRecording = false
+                self.fail(error)
+            }
+        }
+    }
+
     func hotKeyReleased() {
         isHotKeyHeld = false
         shortcutBehavior = hotKey.behavior
@@ -308,6 +384,7 @@ final class AppModel: ObservableObject {
         isHotKeyHeld = false
         isStartingRecording = false
         isPracticeSession = false
+        isCorrectionRecording = false
         activeMode = nil
         shortcutBehavior = hotKey.behavior
         audioRecorder.cancel()
@@ -415,6 +492,7 @@ final class AppModel: ObservableObject {
         configuration.colorTheme = theme
         overlay.updateColorTheme(theme)
         askPanel.updateColorTheme(theme)
+        reviewPanel.updateColorTheme(theme)
     }
 
     func changeInterfaceLanguage(_ language: InterfaceLanguage) {
@@ -422,6 +500,7 @@ final class AppModel: ObservableObject {
         configuration.interfaceLanguage = language
         overlay.updateInterfaceLanguage(language)
         askPanel.updateInterfaceLanguage(language)
+        reviewPanel.updateInterfaceLanguage(language)
         updateShortcutPresentation(
             preference: configuration.hotKeyPreset,
             installed: shortcutReady
@@ -430,6 +509,10 @@ final class AppModel: ObservableObject {
 
     func changeTranscriptionLanguage(_ language: TranscriptionLanguage) {
         configuration.transcriptionLanguage = language
+    }
+
+    func changeTranscribeVariant(_ variant: TranscribeVariant) {
+        configuration.transcribeVariant = variant
     }
 
     func changeAutomaticOwnerProfileUpdates(_ enabled: Bool) {
@@ -521,6 +604,250 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func syncReviewPanel() {
+        if let reviewPanelState {
+            reviewPanel.show(originalTranscript: reviewPanelState.originalTranscript)
+        } else {
+            reviewPanel.hide()
+        }
+    }
+
+    /// Starts a Review session: records the bookkeeping needed to keep
+    /// appending linked audit events for this session
+    /// (`reviewSession`/`ReviewSession`) and shows the panel
+    /// (`reviewPanelState`). Called from `process(audioURL:)`'s `.transcribe`
+    /// branch once the original dictation has been transcribed and its
+    /// `.recognized` audit event appended — `recognizedEventId` is that
+    /// event's id, the first link in this session's `supersedesEventId`
+    /// chain.
+    private func beginReviewSession(
+        transcript: String,
+        requestID: UUID,
+        recognizedEventId: UUID
+    ) {
+        reviewSession = ReviewSession(
+            requestId: requestID,
+            capturedContext: capturedContext,
+            lastEventId: recognizedEventId
+        )
+        reviewPanelState = ReviewPanelState(
+            sessionId: requestID,
+            originalTranscript: transcript
+        )
+    }
+
+    /// Handles the audio from a Review-panel voice *correction* (routed here
+    /// by `finishRecording()` when `isCorrectionRecording` is set): ASR only
+    /// (no `VoiceModeRouter`/mode routing — the spoken text is always taken
+    /// as a correction instruction, never a mode-switch command), then
+    /// `POST /transcribe/correct` with the panel's current full text and
+    /// selection, then splices the replacement back into the panel in place.
+    /// Records one `.corrected` audit event chained to the previous event in
+    /// this session via `supersedesEventId`.
+    private func processCorrection(audioURL: URL) async {
+        defer {
+            try? FileManager.default.removeItem(at: audioURL)
+            isCorrectionRecording = false
+        }
+
+        guard let session = reviewSession else {
+            setState(.idle)
+            return
+        }
+        guard let selection = reviewPanel.currentSelection() else {
+            let message = OpenTypeL10n.text(
+                "请先在复核面板中选中要修改的文字",
+                english: "Select text in the Review panel first"
+            )
+            let cancelled = ProcessingState.cancelled(message)
+            setState(cancelled)
+            scheduleIdle(after: cancelled)
+            return
+        }
+
+        do {
+            setState(.transcribing)
+            let instruction = try await transcribeLocally(audioURL: audioURL)
+            try Task.checkCancellation()
+
+            setState(.transforming)
+            reviewPanel.beginCorrecting()
+            let fullText = reviewPanel.currentText()
+
+            struct CorrectRequestBody: Encodable {
+                let fullText: String
+                let selectionStart: Int
+                let selectionEnd: Int
+                let instruction: String
+            }
+            struct CorrectResponseBody: Decodable { let replacement: String }
+
+            let response: CorrectResponseBody
+            do {
+                response = try await sidecarClient.request(
+                    method: "POST",
+                    path: "/transcribe/correct",
+                    body: CorrectRequestBody(
+                        fullText: fullText,
+                        selectionStart: selection.range.location,
+                        selectionEnd: selection.range.location + selection.range.length,
+                        instruction: instruction
+                    )
+                )
+            } catch {
+                reviewPanel.endCorrecting()
+                throw OpenTypeError.service(
+                    "修改请求失败：\(error.localizedDescription)"
+                )
+            }
+            try Task.checkCancellation()
+
+            let updatedText = reviewPanel.applyCorrection(
+                response.replacement,
+                in: selection.range
+            )
+            reviewPanel.endCorrecting()
+
+            let eventId = UUID()
+            try? auditStore.append(
+                ImmutableAuditEvent(
+                    id: eventId,
+                    requestId: session.requestId,
+                    status: .corrected,
+                    mode: .transcribe,
+                    rawTranscript: instruction,
+                    effectiveInput: response.replacement,
+                    selectedContext: selection.substring,
+                    result: updatedText,
+                    provider: Self.sidecarTextProvider,
+                    model: Self.sidecarTextModel,
+                    error: nil,
+                    supersedesEventId: session.lastEventId
+                )
+            )
+            reviewSession?.lastEventId = eventId
+
+            playFeedbackSound(.done)
+            setState(.idle)
+        } catch is CancellationError {
+            reviewPanel.endCorrecting()
+            setState(.idle)
+        } catch {
+            reviewPanel.endCorrecting()
+            reviewPanel.showHint(ErrorMessagePresenter.message(for: error))
+            setState(.idle)
+        }
+    }
+
+    /// Commits the current Review-panel text (Enter button / Cmd+Return) —
+    /// inserts it via the same `ContextBridge.insert` delivery path Direct
+    /// mode uses, into the app that was focused when the Review dictation
+    /// started (the panel is a `.nonactivatingPanel`, so that app has stayed
+    /// frontmost this whole time — see `ReviewPanelController`'s doc
+    /// comment), always keeps the clipboard copy, records history, and
+    /// appends the session's final `.completed` audit event.
+    private func commitReview() {
+        guard let session = reviewSession,
+              let panelState = reviewPanelState else {
+            reviewPanelState = nil
+            reviewSession = nil
+            return
+        }
+
+        let finalText = reviewPanel.currentText()
+        reviewPanelState = nil
+        reviewSession = nil
+
+        lastResult = finalText
+        lastTranscript = panelState.originalTranscript
+        lastApplication = session.capturedContext.applicationName
+        lastResultWasPractice = false
+
+        Task { [weak self] in
+            guard let self else { return }
+            var completionState: ProcessingState = .success
+            do {
+                try await self.contextBridge.insert(finalText, pressEnter: false)
+            } catch {
+                completionState = .copied
+            }
+            self.contextBridge.copyToClipboard(finalText)
+
+            if self.configuration.keepHistory {
+                self.history.add(
+                    HistoryEntry(
+                        mode: .transcribe,
+                        applicationName: session.capturedContext.applicationName,
+                        transcript: panelState.originalTranscript,
+                        result: finalText,
+                        contextPreview: session.capturedContext.selectedText.map {
+                            String($0.prefix(240))
+                        }
+                    )
+                )
+            }
+
+            try? self.auditStore.append(
+                ImmutableAuditEvent(
+                    requestId: session.requestId,
+                    status: .completed,
+                    mode: .transcribe,
+                    rawTranscript: panelState.originalTranscript,
+                    effectiveInput: finalText,
+                    selectedContext: session.capturedContext.selectedText,
+                    result: finalText,
+                    provider: nil,
+                    model: nil,
+                    error: nil,
+                    supersedesEventId: session.lastEventId
+                )
+            )
+
+            self.playFeedbackSound(.done)
+            self.setState(completionState)
+            self.scheduleIdle(after: completionState)
+        }
+    }
+
+    /// Discards the Review session (Cancel button / Escape / click outside)
+    /// — nothing is inserted or copied. Records the session's final
+    /// `.cancelled` audit event so the discard itself is part of the durable
+    /// record, not silently dropped.
+    private func cancelReview() {
+        guard let session = reviewSession else {
+            reviewPanelState = nil
+            return
+        }
+        let panelState = reviewPanelState
+        let currentText = reviewPanel.currentText()
+        reviewPanelState = nil
+        reviewSession = nil
+
+        let message = OpenTypeL10n.text(
+            "已取消，未写入任何内容",
+            english: "Cancelled — nothing was inserted"
+        )
+        try? auditStore.append(
+            ImmutableAuditEvent(
+                requestId: session.requestId,
+                status: .cancelled,
+                mode: .transcribe,
+                rawTranscript: panelState?.originalTranscript ?? "",
+                effectiveInput: currentText,
+                selectedContext: session.capturedContext.selectedText,
+                result: nil,
+                provider: nil,
+                model: nil,
+                error: message,
+                supersedesEventId: session.lastEventId
+            )
+        )
+
+        let cancelled = ProcessingState.cancelled(message)
+        setState(cancelled)
+        scheduleIdle(after: cancelled)
+    }
+
     private var isBusy: Bool {
         switch state {
         case .transcribing, .transforming, .inserting:
@@ -536,10 +863,17 @@ final class AppModel: ObservableObject {
         do {
             let audioURL = try audioRecorder.stop()
             playFeedbackSound(.release)
-            processingTask = Task { [weak self] in
-                await self?.process(audioURL: audioURL)
+            if isCorrectionRecording {
+                processingTask = Task { [weak self] in
+                    await self?.processCorrection(audioURL: audioURL)
+                }
+            } else {
+                processingTask = Task { [weak self] in
+                    await self?.process(audioURL: audioURL)
+                }
             }
         } catch {
+            isCorrectionRecording = false
             fail(error)
         }
     }
@@ -714,15 +1048,22 @@ final class AppModel: ObservableObject {
         var auditEffectiveInput: String?
         var effectiveTextModel: String?
 
+        // Returns the event's id (rather than being purely `Void`) so a
+        // Review session starting from this recording can capture the
+        // `.recognized` event's id as the first link in its
+        // `supersedesEventId` correction chain — see `beginReviewSession`.
+        @discardableResult
         func appendAudit(
             status: AuditEventStatus,
             result: String? = nil,
             error: String? = nil,
             provider: String? = nil,
             model: String? = nil
-        ) {
+        ) -> UUID {
+            let eventId = UUID()
             try? auditStore.append(
                 ImmutableAuditEvent(
+                    id: eventId,
                     requestId: auditRequestID,
                     status: status,
                     mode: auditMode,
@@ -735,6 +1076,7 @@ final class AppModel: ObservableObject {
                     error: error
                 )
             )
+            return eventId
         }
 
         defer {
@@ -762,7 +1104,7 @@ final class AppModel: ObservableObject {
             activeMode = mode
             auditMode = mode
             auditEffectiveInput = transcript
-            appendAudit(
+            let recognizedEventId = appendAudit(
                 status: .recognized,
                 provider: Self.sidecarASRProvider
             )
@@ -787,9 +1129,26 @@ final class AppModel: ObservableObject {
             let result: String?
             switch mode {
             case .transcribe:
-                // Pure ASR passthrough: no sidecar/LLM call at all, and no
-                // Ask popup — the transcript itself is the result.
-                result = transcript
+                if configuration.transcribeVariant == .review {
+                    // Stash the transcript in the Review panel instead of
+                    // delivering it — nothing is inserted/copied yet. The
+                    // rest of this session (corrections, commit/cancel) is
+                    // driven by `processCorrection(audioURL:)`,
+                    // `commitReview()`, and `cancelReview()`, all outside
+                    // this function. `result = nil` routes through the same
+                    // "dispatched, don't wait" early-return path `.agent`
+                    // uses below.
+                    beginReviewSession(
+                        transcript: transcript,
+                        requestID: auditRequestID,
+                        recognizedEventId: recognizedEventId
+                    )
+                    result = nil
+                } else {
+                    // Pure ASR passthrough: no sidecar/LLM call at all, and
+                    // no Ask popup — the transcript itself is the result.
+                    result = transcript
+                }
             case .ask:
                 effectiveTextModel = Self.sidecarTextModel
                 askPanelState = AskPanelState(kind: .ask, query: transcript, answer: nil)
@@ -828,18 +1187,21 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
 
             guard let result else {
-                // `.agent` took the dispatch-and-return path above: give a
-                // brief, transient "dispatched" acknowledgement (the same
-                // sound-cue/overlay pattern every other mode uses for its own
-                // completion signal) and let `state` fall back to idle right
-                // away, rather than staying "busy" for the run's whole
-                // duration. `defer` above still fires normally, so the audio
-                // file is cleaned up and `activeMode`/`isPracticeSession`
-                // reset exactly as any other completed dispatch would.
+                // `.agent` and `.transcribe`+Review both took a
+                // dispatch-and-return path above (`dispatchAgentRun`/
+                // `beginReviewSession`): give a brief, transient
+                // acknowledgement (the same sound-cue/overlay pattern every
+                // other mode uses for its own completion signal) and let
+                // `state` fall back to idle right away, rather than staying
+                // "busy" for the rest of that flow's duration. `defer` above
+                // still fires normally, so the audio file is cleaned up and
+                // `activeMode`/`isPracticeSession` reset exactly as any other
+                // completed dispatch would.
                 playFeedbackSound(.done)
-                let dispatchedState = ProcessingState.dispatched(
-                    OpenTypeL10n.text("已下发给 Agent", english: "Dispatched to Agent")
-                )
+                let message = mode == .agent
+                    ? OpenTypeL10n.text("已下发给 Agent", english: "Dispatched to Agent")
+                    : OpenTypeL10n.text("待复核", english: "Ready to review")
+                let dispatchedState = ProcessingState.dispatched(message)
                 setState(dispatchedState)
                 scheduleIdle(after: dispatchedState)
                 return
@@ -1195,6 +1557,14 @@ final class AppModel: ObservableObject {
 
         NSSound(named: NSSound.Name(cue.fallbackSystemSound))?.play()
     }
+}
+
+/// `AppModel`-internal bookkeeping for one open Review session — see
+/// `AppModel.reviewSession`'s doc comment.
+private struct ReviewSession {
+    let requestId: UUID
+    let capturedContext: CapturedContext
+    var lastEventId: UUID
 }
 
 enum AppTab: String, CaseIterable, Identifiable {

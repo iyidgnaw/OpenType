@@ -5,6 +5,20 @@ enum AuditEventStatus: String, Codable {
     case completed
     case cancelled
     case failed
+    /// Review-mode only: one voice-driven correction round within a Review
+    /// session (spoken instruction -> LLM replacement spliced into a
+    /// specific span of the stashed text), *not* the session's final
+    /// outcome. A Review session normally produces one `.recognized` event
+    /// (the original dictation), zero or more `.corrected` events (one per
+    /// correction round), and exactly one final `.completed` or `.cancelled`
+    /// event — all sharing the same `requestId` and chained in order via
+    /// `supersedesEventId`, so a reader can replay the full correction chain
+    /// instead of only ever seeing the final result. `rawTranscript` carries
+    /// the spoken correction instruction, `selectedContext` the substring
+    /// that was replaced, `effectiveInput` the model's replacement, and
+    /// `result` the full text after splicing — reusing the existing fields'
+    /// meanings rather than adding parallel ones.
+    case corrected
 }
 
 struct ImmutableAuditEvent: Codable, Equatable, Identifiable {

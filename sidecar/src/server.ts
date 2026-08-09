@@ -15,6 +15,7 @@ import { buildOneShotRoutes } from "./oneshot/routes";
 import { createFileContextUsageLogWriter, type ContextUsageLogWriter } from "./oneshot/contextDebugLog";
 import { createDeepSeekClient } from "./provider/deepseek";
 import { createRouter } from "./router";
+import { buildTranscribeRoutes } from "./transcribe/routes";
 
 /**
  * `chat` is typed `AgentChatFn` (rather than the narrower `OneShotChatFn`)
@@ -46,6 +47,7 @@ export function buildApp(
     ...buildMemoryRoutes(store, callLLM),
     ...buildAgentRoutes(store, chat, tools, contextLogWriter),
     ...buildAsrRoutes(transcribe),
+    ...buildTranscribeRoutes(chat),
   ]);
 }
 

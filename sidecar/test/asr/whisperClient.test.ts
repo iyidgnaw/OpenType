@@ -2,9 +2,32 @@ import { describe, expect, test } from "bun:test";
 import {
   WhisperClient,
   WhisperClientError,
+  augmentPathForFfmpeg,
   type SpawnedProcess,
   type WhisperClientFactories,
 } from "../../src/asr/whisperClient";
+
+describe("augmentPathForFfmpeg", () => {
+  test("appends common Homebrew/local bin directories not already present", () => {
+    const result = augmentPathForFfmpeg("/usr/bin:/bin");
+    const entries = result.split(":");
+    expect(entries).toContain("/usr/bin");
+    expect(entries).toContain("/bin");
+    expect(entries).toContain("/opt/homebrew/bin");
+    expect(entries).toContain("/usr/local/bin");
+  });
+
+  test("does not duplicate a directory already present in PATH", () => {
+    const result = augmentPathForFfmpeg("/opt/homebrew/bin:/usr/bin");
+    const entries = result.split(":");
+    expect(entries.filter((entry) => entry === "/opt/homebrew/bin")).toHaveLength(1);
+  });
+
+  test("handles an undefined/empty starting PATH", () => {
+    const result = augmentPathForFfmpeg(undefined);
+    expect(result.split(":")).toContain("/opt/homebrew/bin");
+  });
+});
 
 function makeFakeProcess() {
   let killed = false;

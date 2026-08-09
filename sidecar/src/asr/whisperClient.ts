@@ -113,6 +113,39 @@ interface DefaultFactoryOptions {
 }
 
 /**
+ * Directories `mlx_whisper.transcribe()` needs on `PATH` at runtime that a
+ * GUI-launched app doesn't reliably have: it shells out to `ffmpeg` for
+ * every transcription (via openai-whisper's `load_audio`, which mlx-whisper
+ * reuses), unconditionally, regardless of input format. When OpenType.app is
+ * launched via LaunchServices (`open`, Finder double-click, Dock), it
+ * inherits macOS's minimal default PATH (roughly `/usr/bin:/bin:/usr/sbin:
+ * /sbin` plus a couple of Apple entries) rather than an interactive shell's
+ * PATH, which is where Homebrew's `ffmpeg` normally lives on Apple Silicon
+ * (`/opt/homebrew/bin`) -- this bit a real transcription request in testing:
+ * `{"error": "[Errno 2] No such file or directory: 'ffmpeg'"}`, even though
+ * the exact same binary transcribed correctly moments earlier when a
+ * differently-launched (dev-mode) sidecar process happened to inherit a
+ * richer PATH. Appending these directories (only if not already present)
+ * fixes it regardless of how the app was launched.
+ */
+const FFMPEG_SEARCH_DIRECTORIES = [
+  "/opt/homebrew/bin",
+  "/opt/homebrew/sbin",
+  "/usr/local/bin",
+];
+
+/** Pure/exported so the augmentation logic is directly unit-testable. */
+export function augmentPathForFfmpeg(existingPath: string | undefined): string {
+  const entries = (existingPath ?? "").split(":").filter((entry) => entry.length > 0);
+  for (const directory of FFMPEG_SEARCH_DIRECTORIES) {
+    if (!entries.includes(directory)) {
+      entries.push(directory);
+    }
+  }
+  return entries.join(":");
+}
+
+/**
  * Real, Bun-backed factories: spawns `whisper-env/bin/python3 whisper/serve.py`
  * (paths relative to the sidecar source directory, matching how
  * `sidecar/whisper-env/` and `sidecar/whisper/serve.py` are laid out next to
@@ -129,8 +162,10 @@ export function defaultWhisperClientFactories(
 
   return {
     spawnProcess: (env) => {
+      const mergedEnv = { ...process.env, ...env } as Record<string, string>;
+      mergedEnv.PATH = augmentPathForFfmpeg(mergedEnv.PATH);
       const proc = Bun.spawn([pythonBin, scriptPath], {
-        env: { ...process.env, ...env } as Record<string, string>,
+        env: mergedEnv,
         stdout: "inherit",
         stderr: "inherit",
       });

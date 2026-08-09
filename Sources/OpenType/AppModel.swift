@@ -157,11 +157,7 @@ final class AppModel: ObservableObject {
         guard !isBusy, !isStartingRecording else { return }
 
         let context = contextBridge.capture()
-        let selectedMode = configuration.selectedMode
-        let mode = SmartEditRouter.mode(
-            selectedMode: selectedMode,
-            selectedText: context.selectedText
-        )
+        let mode = configuration.selectedMode
         if mode.requiresSelection, !contextBridge.accessibilityGranted {
             fail(OpenTypeError.accessibilityRequired)
             return
@@ -193,7 +189,7 @@ final class AppModel: ObservableObject {
                 applicationName: "OpenType 试用",
                 bundleIdentifier: "ai.rain.opentype"
             ),
-            mode: .clean,
+            mode: .askAnything,
             practice: true
         )
     }
@@ -573,6 +569,11 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Every mode now routes to the sidecar for its text generation, always
+    /// using this fixed model, so audit events record it directly rather than
+    /// asking the (now ASR-only) `AIServiceClient` to resolve one.
+    private static let sidecarTextModel = "deepseek-v4-flash"
+
     /// Request/response bodies for the sidecar's `/oneshot/ask` endpoint,
     /// used by the `askAnything` mode branch below.
     private struct AskRequestBody: Encodable { let question: String }
@@ -647,7 +648,6 @@ final class AppModel: ObservableObject {
         var auditMode = startingMode
         var auditRawTranscript = ""
         var auditEffectiveInput: String?
-        var usedTextModel = false
         var effectiveTextModel: String?
 
         func appendAudit(
@@ -692,12 +692,11 @@ final class AppModel: ObservableObject {
                     audioURL: audioURL,
                     personalVocabulary: configuration.personalDictionary
                 )
-            } catch OpenTypeError.emptyRecording where startingMode == .xReply
-                || startingMode == .sidecarXReply {
+            } catch OpenTypeError.emptyRecording where startingMode == .sidecarXReply {
                 // Silence is a valid X Reply instruction: generate a useful
                 // conversational response from the selected post alone.
                 rawTranscript = ""
-            } catch OpenTypeError.emptyRecording where startingMode == .command {
+            } catch OpenTypeError.emptyRecording where startingMode == .sidecarPolish {
                 throw OpenTypeError.missingEditInstruction
             }
             try Task.checkCancellation()
@@ -707,8 +706,8 @@ final class AppModel: ObservableObject {
                 rawTranscript,
                 enabled: configuration.pressEnterCommand
             )
-            let routed = startingMode == .command
-                ? RoutedTranscript(mode: .command, text: sendCommand.text)
+            let routed = startingMode == .sidecarPolish
+                ? RoutedTranscript(mode: .sidecarPolish, text: sendCommand.text)
                 : VoiceModeRouter.route(
                     sendCommand.text,
                     currentMode: startingMode
@@ -724,11 +723,6 @@ final class AppModel: ObservableObject {
                 model: serviceSelection.speechModel
             )
 
-            if mode == .command,
-               !EditInstructionValidator.isExplicit(transcript) {
-                throw OpenTypeError.missingEditInstruction
-            }
-
             if mode.requiresSelection,
                !contextBridge.accessibilityGranted {
                 throw OpenTypeError.accessibilityRequired
@@ -743,9 +737,9 @@ final class AppModel: ObservableObject {
 
             setState(.transforming)
             let result: String
-            if mode == .askAnything {
-                usedTextModel = true
-                effectiveTextModel = "deepseek-v4-flash"
+            switch mode {
+            case .askAnything:
+                effectiveTextModel = Self.sidecarTextModel
                 do {
                     let response: AskResponseBody = try await sidecarClient.request(
                         method: "POST",
@@ -758,9 +752,8 @@ final class AppModel: ObservableObject {
                         "Ask Anything 请求失败：\(error.localizedDescription)"
                     )
                 }
-            } else if mode == .sidecarPolish {
-                usedTextModel = true
-                effectiveTextModel = "deepseek-v4-flash"
+            case .sidecarPolish:
+                effectiveTextModel = Self.sidecarTextModel
                 let response: PolishResponseBody
                 do {
                     response = try await sidecarClient.request(
@@ -783,9 +776,8 @@ final class AppModel: ObservableObject {
                     throw OpenTypeError.invalidResponse
                 }
                 result = polished
-            } else if mode == .sidecarTranslate {
-                usedTextModel = true
-                effectiveTextModel = "deepseek-v4-flash"
+            case .sidecarTranslate:
+                effectiveTextModel = Self.sidecarTextModel
                 let response: TranslateResponseBody
                 do {
                     response = try await sidecarClient.request(
@@ -810,9 +802,8 @@ final class AppModel: ObservableObject {
                     throw OpenTypeError.invalidResponse
                 }
                 result = translated
-            } else if mode == .sidecarXReply {
-                usedTextModel = true
-                effectiveTextModel = "deepseek-v4-flash"
+            case .sidecarXReply:
+                effectiveTextModel = Self.sidecarTextModel
                 let response: SidecarXReplyResponseBody
                 do {
                     response = try await sidecarClient.request(
@@ -832,9 +823,8 @@ final class AppModel: ObservableObject {
                     throw OpenTypeError.invalidResponse
                 }
                 result = reply
-            } else if mode == .sidecarAgent {
-                usedTextModel = true
-                effectiveTextModel = "deepseek-v4-flash"
+            case .sidecarAgent:
+                effectiveTextModel = Self.sidecarTextModel
                 lastAgentRunSteps = []
                 do {
                     let response: AgentRunResponseBody = try await sidecarClient.request(
@@ -852,42 +842,6 @@ final class AppModel: ObservableObject {
                         "Agent (Sidecar) 请求失败：\(error.localizedDescription)"
                     )
                 }
-            } else if mode == .raw,
-               !configuration.hasCustomPrompt(for: .raw),
-               !LightTranscriptionPolicy.shouldUseModel(for: transcript) {
-                result = LightTranscriptionPolicy.localResult(for: transcript)
-            } else {
-                usedTextModel = true
-                effectiveTextModel = client.effectiveTextModel(for: mode)
-                let request = TransformRequest(
-                    transcript: transcript,
-                    mode: mode,
-                    context: capturedContext,
-                    personalDictionary: configuration.personalDictionary,
-                    xReplyStyle: configuration.xReplyStyle,
-                    modePromptOverride: configuration.promptOverride(for: mode),
-                    agentMemory: mode == .instruction
-                        && configuration.agentMemoryEnabled
-                        ? agentMemory.memoriesForPrompt(
-                            query: transcript,
-                            selectedContext: capturedContext.selectedText,
-                            applicationName: capturedContext.applicationName
-                        )
-                        : [],
-                    memoryProfile: configuration.agentMemoryEnabled
-                        && mode != .raw
-                        ? agentMemory.profileContextForPrompt()
-                        : .empty
-                )
-                let transformResult = try await client.transformResult(request)
-                effectiveTextModel = transformResult.model
-                let transformed = transformResult.text
-                result = mode == .raw
-                    ? LightTranscriptionPolicy.validatedResult(
-                        original: transcript,
-                        candidate: transformed
-                    )
-                    : transformed
             }
             try Task.checkCancellation()
 
@@ -960,8 +914,8 @@ final class AppModel: ObservableObject {
             appendAudit(
                 status: .completed,
                 result: result,
-                provider: usedTextModel ? serviceSelection.textProvider : nil,
-                model: usedTextModel ? effectiveTextModel : nil
+                provider: serviceSelection.textProvider,
+                model: effectiveTextModel
             )
 
             playFeedbackSound(.done)
@@ -993,8 +947,7 @@ final class AppModel: ObservableObject {
                     : serviceSelection.textProvider,
                 model: auditRawTranscript.isEmpty
                     ? serviceSelection.speechModel
-                    : (effectiveTextModel
-                        ?? client.effectiveTextModel(for: auditMode))
+                    : (effectiveTextModel ?? Self.sidecarTextModel)
             )
             fail(error)
         }
@@ -1066,7 +1019,6 @@ final class AppModel: ObservableObject {
 enum AppTab: String, CaseIterable, Identifiable {
     case home
     case history
-    case prompts
     case settings
 
     var id: String { rawValue }
@@ -1075,7 +1027,6 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .home: return OpenTypeL10n.text("输入", english: "Input")
         case .history: return OpenTypeL10n.text("历史", english: "History")
-        case .prompts: return "Prompt"
         case .settings: return OpenTypeL10n.text("设置", english: "Settings")
         }
     }
@@ -1084,7 +1035,6 @@ enum AppTab: String, CaseIterable, Identifiable {
         switch self {
         case .home: return "waveform"
         case .history: return "clock.arrow.circlepath"
-        case .prompts: return "text.bubble"
         case .settings: return "slider.horizontal.3"
         }
     }

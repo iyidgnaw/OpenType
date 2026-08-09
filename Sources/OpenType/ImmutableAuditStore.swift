@@ -67,19 +67,7 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         self.createdAt = createdAt
         platform = "macOS"
         self.status = status
-        self.mode = switch mode {
-        case .clean: "smartEdit"
-        case .english: "english"
-        case .instruction: "agent"
-        case .xReply: "xReply"
-        case .command: "selectedEdit"
-        case .raw: "transcribe"
-        case .askAnything: "askAnything"
-        case .sidecarPolish: "sidecarPolish"
-        case .sidecarTranslate: "sidecarTranslate"
-        case .sidecarXReply: "sidecarXReply"
-        case .sidecarAgent: "sidecarAgent"
-        }
+        self.mode = mode.rawValue
         self.rawTranscript = rawTranscript
         self.effectiveInput = effectiveInput
         self.selectedContext = selectedContext

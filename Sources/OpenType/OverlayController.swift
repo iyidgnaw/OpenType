@@ -4,7 +4,7 @@ import SwiftUI
 @MainActor
 private final class OverlayPresentation: ObservableObject {
     @Published var state: ProcessingState = .idle
-    @Published var mode: InputMode = .clean
+    @Published var mode: InputMode = InputMode.visibleModes[0]
     @Published var liveTranscript = ""
     @Published var audioLevel = 0.0
     @Published var colorTheme: AppColorTheme = .ocean
@@ -44,7 +44,7 @@ final class OverlayController {
         switch state {
         case .modeChanged:
             dismiss(after: 1.2)
-        case .copied where mode == .xReply:
+        case .copied where mode == .sidecarXReply:
             dismiss(after: 2.4)
         case .success, .copied:
             dismiss(after: 0.9)
@@ -208,36 +208,6 @@ private struct OverlayView: View {
             return presentation.liveTranscript
         }
         switch presentation.mode {
-        case .command:
-            return OpenTypeL10n.text(
-                "已选中文字，请说修改要求…",
-                english: "Text selected. Say how you want to change it…"
-            )
-        case .english:
-            return OpenTypeL10n.text(
-                "只转换为英文，不回答、不执行…",
-                english: "English transformation only — no answers or actions…"
-            )
-        case .clean:
-            return OpenTypeL10n.text(
-                "只整理你的原话，不回答问题…",
-                english: "Clean up your words — never answer them…"
-            )
-        case .instruction:
-            return OpenTypeL10n.text(
-                "说出希望 Agent 完成的任务…",
-                english: "Describe the task for Agent Mode…"
-            )
-        case .xReply:
-            return OpenTypeL10n.text(
-                "说出观点，或直接让 OpenType 帮你回复…",
-                english: "Share your take, or let OpenType draft the reply…"
-            )
-        case .raw:
-            return OpenTypeL10n.text(
-                "保留原话，只清理口癖与重复…",
-                english: "Keep your words; clean only filler and repetition…"
-            )
         case .askAnything:
             return OpenTypeL10n.text(
                 "说出你的问题，直接获得答案…",
@@ -267,9 +237,7 @@ private struct OverlayView: View {
     }
 
     private var modeBadgeTitle: String {
-        presentation.mode == .command
-            ? OpenTypeL10n.text("智能编辑 · 修改选中", english: "Smart Edit · Selection")
-            : presentation.mode.title
+        presentation.mode.title
     }
 
     private var symbolColor: Color {

@@ -163,7 +163,7 @@ enum LocalMemoryRetriever {
            event.applicationName.lowercased() == normalizedApplication {
             score += 1.6
         }
-        if event.mode == .instruction {
+        if event.mode == .sidecarAgent {
             score += 0.45
         }
 

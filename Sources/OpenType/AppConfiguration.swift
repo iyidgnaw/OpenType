@@ -87,10 +87,6 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(personalDictionaryText, forKey: Keys.personalDictionaryText) }
     }
 
-    @Published private(set) var promptOverrides: [String: String] {
-        didSet { defaults.set(promptOverrides, forKey: Keys.promptOverrides) }
-    }
-
     private let defaults: UserDefaults
 
     var personalDictionary: [String] {
@@ -149,44 +145,11 @@ final class AppConfiguration: ObservableObject {
         textModels = updated
     }
 
-    func promptOverride(for mode: InputMode) -> String? {
-        promptOverrides[mode.rawValue]
-    }
-
-    func promptText(for mode: InputMode) -> String {
-        promptOverride(for: mode) ?? PromptBuilder.defaultModePrompt(for: mode)
-    }
-
-    func hasCustomPrompt(for mode: InputMode) -> Bool {
-        promptOverride(for: mode) != nil
-    }
-
-    func updatePrompt(_ text: String, for mode: InputMode) {
-        guard mode.supportsCustomPrompt else { return }
-        var updated = promptOverrides
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let defaultText = PromptBuilder.defaultModePrompt(for: mode)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if normalized.isEmpty || normalized == defaultText {
-            updated.removeValue(forKey: mode.rawValue)
-        } else {
-            updated[mode.rawValue] = text
-        }
-        promptOverrides = updated
-    }
-
-    func resetPrompt(for mode: InputMode) {
-        var updated = promptOverrides
-        updated.removeValue(forKey: mode.rawValue)
-        promptOverrides = updated
-    }
-
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let savedMode = InputMode(
+        selectedMode = InputMode(
             rawValue: defaults.string(forKey: Keys.selectedMode) ?? ""
-        ) ?? .clean
-        selectedMode = savedMode == .command ? .clean : savedMode
+        ) ?? InputMode.visibleModes[0]
         xReplyStyle = XReplyStyle(
             rawValue: defaults.string(forKey: Keys.xReplyStyle) ?? ""
         ) ?? .adaptive
@@ -229,8 +192,6 @@ final class AppConfiguration: ObservableObject {
         liveCaptionsEnabled = defaults.object(forKey: Keys.liveCaptionsEnabled) as? Bool ?? true
         personalDictionaryText = defaults.string(forKey: Keys.personalDictionaryText)
             ?? "Rain, OpenType, OpenClaw, Mingle, Clawborn"
-        promptOverrides = defaults.dictionary(forKey: Keys.promptOverrides)
-            as? [String: String] ?? [:]
         OpenTypeL10n.language = interfaceLanguage
     }
 
@@ -254,6 +215,5 @@ final class AppConfiguration: ObservableObject {
         static let playFeedbackSounds = "playFeedbackSounds"
         static let liveCaptionsEnabled = "liveCaptionsEnabled"
         static let personalDictionaryText = "personalDictionaryText"
-        static let promptOverrides = "promptOverrides"
     }
 }

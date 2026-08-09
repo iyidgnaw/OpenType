@@ -1069,4 +1069,163 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(AgentRunHistory.runningCount(in: [completed, failed]), 0)
     }
 
+    // MARK: - Review mode (Direct/Review transcribe variant + correction chain)
+
+    @MainActor
+    func testTranscribeVariantDefaultsToDirectAndPersistsReview() {
+        let suiteName = "OpenTypeTests.TranscribeVariant.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let configuration = AppConfiguration(defaults: defaults)
+        XCTAssertEqual(configuration.transcribeVariant, .direct)
+        configuration.transcribeVariant = .review
+
+        let reloaded = AppConfiguration(defaults: defaults)
+        XCTAssertEqual(reloaded.transcribeVariant, .review)
+    }
+
+    func testTextSpanCorrectionReplacesOnlyTheGivenUTF16Range() {
+        // "呸泡" mishearing -> "PayPal" correction, matching the feature's
+        // own motivating example. The surrounding text on both sides must
+        // survive untouched.
+        let original = "请把这笔钱通过呸泡转给他"
+        let ns = original as NSString
+        let range = ns.range(of: "呸泡")
+        XCTAssertNotEqual(range.location, NSNotFound)
+
+        let corrected = TextSpanCorrection.apply(
+            replacement: "PayPal",
+            to: original,
+            range: range
+        )
+
+        XCTAssertEqual(corrected, "请把这笔钱通过PayPal转给他")
+    }
+
+    func testTextSpanCorrectionSupportsWholeTextRewrite() {
+        let original = "hey can u send this over thanks"
+        let range = NSRange(location: 0, length: (original as NSString).length)
+
+        let corrected = TextSpanCorrection.apply(
+            replacement: "Could you please send this over? Thank you.",
+            to: original,
+            range: range
+        )
+
+        XCTAssertEqual(corrected, "Could you please send this over? Thank you.")
+    }
+
+    func testAuditEventCorrectedStatusRoundTripsAndChainsViaSupersedesEventId() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenType-Audit-Review-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let requestID = UUID()
+        let recognizedID = UUID()
+        let correctedID = UUID()
+        let completedID = UUID()
+        // The audit file round-trips `createdAt` through ISO8601 (whole
+        // seconds only, no fractional component), so a `Date()` default
+        // with sub-second precision would never compare equal after a
+        // read-back — floor to the second first, matching
+        // `testImmutableAuditStoreAppendsWithoutRewritingEarlierEvents`.
+        let timestamp = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))
+
+        let recognized = ImmutableAuditEvent(
+            id: recognizedID,
+            requestId: requestID,
+            createdAt: timestamp,
+            status: .recognized,
+            mode: .transcribe,
+            rawTranscript: "请把这笔钱通过呸泡转给他",
+            effectiveInput: "请把这笔钱通过呸泡转给他",
+            selectedContext: nil,
+            result: nil,
+            provider: "mlx-whisper",
+            model: nil,
+            error: nil
+        )
+        let corrected = ImmutableAuditEvent(
+            id: correctedID,
+            requestId: requestID,
+            createdAt: timestamp,
+            status: .corrected,
+            mode: .transcribe,
+            rawTranscript: "这不对，应该是英文PayPal",
+            effectiveInput: "PayPal",
+            selectedContext: "呸泡",
+            result: "请把这笔钱通过PayPal转给他",
+            provider: "deepseek",
+            model: "deepseek-v4-flash",
+            error: nil,
+            supersedesEventId: recognizedID
+        )
+        let completed = ImmutableAuditEvent(
+            id: completedID,
+            requestId: requestID,
+            createdAt: timestamp,
+            status: .completed,
+            mode: .transcribe,
+            rawTranscript: "请把这笔钱通过呸泡转给他",
+            effectiveInput: "请把这笔钱通过PayPal转给他",
+            selectedContext: nil,
+            result: "请把这笔钱通过PayPal转给他",
+            provider: nil,
+            model: nil,
+            error: nil,
+            supersedesEventId: correctedID
+        )
+
+        let store = ImmutableAuditStore(directoryURL: directory)
+        try store.append(recognized)
+        try store.append(corrected)
+        try store.append(completed)
+
+        let events = store.recent(limit: 10)
+        XCTAssertEqual(events, [recognized, corrected, completed])
+
+        // The full chain is reconstructible purely from supersedesEventId,
+        // not just "here's the final result" -- this is the point of
+        // extending the audit schema this way rather than only recording
+        // the last event.
+        XCTAssertNil(recognized.supersedesEventId)
+        XCTAssertEqual(corrected.supersedesEventId, recognizedID)
+        XCTAssertEqual(completed.supersedesEventId, correctedID)
+        XCTAssertEqual(corrected.selectedContext, "呸泡")
+        XCTAssertEqual(corrected.effectiveInput, "PayPal")
+    }
+
+    func testAuditEventCancelledReviewSessionRecordsNoResult() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenType-Audit-Review-Cancel-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let requestID = UUID()
+        let recognizedID = UUID()
+        let timestamp = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))
+        let cancelled = ImmutableAuditEvent(
+            requestId: requestID,
+            createdAt: timestamp,
+            status: .cancelled,
+            mode: .transcribe,
+            rawTranscript: "一些草稿文字",
+            effectiveInput: "编辑后的草稿",
+            selectedContext: nil,
+            result: nil,
+            provider: nil,
+            model: nil,
+            error: "Cancelled — nothing was inserted",
+            supersedesEventId: recognizedID
+        )
+
+        let store = ImmutableAuditStore(directoryURL: directory)
+        try store.append(cancelled)
+
+        let events = store.recent(limit: 10)
+        XCTAssertEqual(events, [cancelled])
+        XCTAssertNil(events[0].result)
+        XCTAssertEqual(events[0].status, .cancelled)
+    }
+
 }

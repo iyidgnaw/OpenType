@@ -71,6 +71,53 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
 
 }
 
+/// The two ways `transcribe` mode can deliver its result, chosen in Settings
+/// and applied to every `transcribe`-mode recording until changed (not a
+/// per-recording toggle — see `docs/superpowers/specs/2026-08-09-current-system-state.md`
+/// for the design rationale). `ask`/`agent` are unaffected by this setting.
+enum TranscribeVariant: String, CaseIterable, Codable, Identifiable {
+    case direct
+    case review
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .direct: return OpenTypeL10n.text("直接模式", english: "Direct")
+        case .review: return OpenTypeL10n.text("复核模式", english: "Review")
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .direct:
+            return OpenTypeL10n.text(
+                "松开后直接写入光标所在位置",
+                english: "Released speech is inserted straight into the focused field"
+            )
+        case .review:
+            return OpenTypeL10n.text(
+                "松开后先在预览面板中查看、编辑或用语音修改，确认后再写入",
+                english: "Released speech is staged in a review panel to check, edit, or voice-correct before it's inserted"
+            )
+        }
+    }
+}
+
+/// Drives the floating Review panel (`ReviewPanelController`), shown after a
+/// `transcribe`-mode recording when `TranscribeVariant.review` is active.
+/// `AppModel` is the single source of truth: non-nil means the panel is
+/// showing a review session in progress. Unlike `AskPanelState`, the
+/// in-progress *text* itself is not mirrored here — the panel's own
+/// `NSTextView` is the authoritative source for the current (possibly
+/// user-edited or voice-corrected) text once the session starts, to avoid a
+/// two-way-sync bug between SwiftUI state and free-form text editing (see
+/// `ReviewPanelController`'s doc comment).
+struct ReviewPanelState: Equatable {
+    let sessionId: UUID
+    let originalTranscript: String
+}
+
 /// Drives the floating "Ask"/"Agent" popup (`AskPanelController`) introduced
 /// alongside the 3-mode cut: `nil` means the popup is hidden, non-nil means
 /// it's showing, and `answer == nil` means it's still in the "thinking"

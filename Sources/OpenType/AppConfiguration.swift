@@ -30,6 +30,15 @@ final class AppConfiguration: ObservableObject {
         }
     }
 
+    /// Direct vs. Review, applied to every `transcribe`-mode recording until
+    /// changed here — see `TranscribeVariant`'s doc comment. Persisted the
+    /// same way every other enum setting on this object is.
+    @Published var transcribeVariant: TranscribeVariant {
+        didSet {
+            defaults.set(transcribeVariant.rawValue, forKey: Keys.transcribeVariant)
+        }
+    }
+
     @Published var automaticallyInsert: Bool {
         didSet { defaults.set(automaticallyInsert, forKey: Keys.automaticallyInsert) }
     }
@@ -98,6 +107,9 @@ final class AppConfiguration: ObservableObject {
         transcriptionLanguage = TranscriptionLanguage(
             rawValue: defaults.string(forKey: Keys.transcriptionLanguage) ?? ""
         ) ?? .automatic
+        transcribeVariant = TranscribeVariant(
+            rawValue: defaults.string(forKey: Keys.transcribeVariant) ?? ""
+        ) ?? .direct
         automaticallyInsert = defaults.object(forKey: Keys.automaticallyInsert) as? Bool ?? true
         keepHistory = defaults.object(forKey: Keys.keepHistory) as? Bool ?? true
         agentMemoryEnabled = defaults.object(forKey: Keys.agentMemoryEnabled) as? Bool ?? true
@@ -118,6 +130,7 @@ final class AppConfiguration: ObservableObject {
         static let colorTheme = "colorTheme"
         static let interfaceLanguage = "interfaceLanguage"
         static let transcriptionLanguage = "transcriptionLanguage"
+        static let transcribeVariant = "transcribeVariant"
         static let automaticallyInsert = "automaticallyInsert"
         static let keepHistory = "keepHistory"
         static let agentMemoryEnabled = "agentMemoryEnabled"

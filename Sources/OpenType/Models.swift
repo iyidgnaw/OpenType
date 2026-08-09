@@ -83,33 +83,105 @@ struct AskPanelState: Equatable {
     var answer: String?
 }
 
-enum XReplyStyle: String, CaseIterable, Codable, Identifiable {
-    case adaptive
-    case concise
-    case friendly
-    case sharp
+/// Locale for the ASR pass. Fed to the sidecar's `/asr/transcribe` request
+/// isn't language-scoped (MLX-Whisper auto-detects), so this now only drives
+/// the Apple on-device live-caption preview's locale
+/// (`AppModel.hotKeyPressed`/`beginRecording` -> `LiveSpeechTranscriber.start`)
+/// via `appleLocaleIdentifier`.
+enum TranscriptionLanguage: String, CaseIterable, Codable, Identifiable {
+    case automatic
+    case chinese
+    case cantonese
+    case english
+    case japanese
+    case korean
+    case german
+    case french
+    case spanish
+    case italian
+    case portuguese
+    case russian
+    case arabic
+    case hindi
+    case indonesian
+    case thai
+    case turkish
+    case vietnamese
+    case ukrainian
+    case czech
+    case danish
+    case filipino
+    case finnish
+    case icelandic
+    case malay
+    case norwegian
+    case polish
+    case swedish
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .adaptive: return OpenTypeL10n.text("自动判断", english: "Adaptive")
-        case .concise: return OpenTypeL10n.text("简短直接", english: "Short & direct")
-        case .friendly: return OpenTypeL10n.text("友好交流", english: "Friendly")
-        case .sharp: return OpenTypeL10n.text("有一点锋芒", english: "A little sharp")
+        case .automatic: return OpenTypeL10n.text("自动识别（支持混合语言）", english: "Auto-detect (mixed languages)")
+        case .chinese: return OpenTypeL10n.text("中文", english: "Chinese")
+        case .cantonese: return OpenTypeL10n.text("粤语", english: "Cantonese")
+        case .english: return OpenTypeL10n.text("英语", english: "English")
+        case .japanese: return OpenTypeL10n.text("日语", english: "Japanese")
+        case .korean: return OpenTypeL10n.text("韩语", english: "Korean")
+        case .german: return OpenTypeL10n.text("德语", english: "German")
+        case .french: return OpenTypeL10n.text("法语", english: "French")
+        case .spanish: return OpenTypeL10n.text("西班牙语", english: "Spanish")
+        case .italian: return OpenTypeL10n.text("意大利语", english: "Italian")
+        case .portuguese: return OpenTypeL10n.text("葡萄牙语", english: "Portuguese")
+        case .russian: return OpenTypeL10n.text("俄语", english: "Russian")
+        case .arabic: return OpenTypeL10n.text("阿拉伯语", english: "Arabic")
+        case .hindi: return OpenTypeL10n.text("印地语", english: "Hindi")
+        case .indonesian: return OpenTypeL10n.text("印尼语", english: "Indonesian")
+        case .thai: return OpenTypeL10n.text("泰语", english: "Thai")
+        case .turkish: return OpenTypeL10n.text("土耳其语", english: "Turkish")
+        case .vietnamese: return OpenTypeL10n.text("越南语", english: "Vietnamese")
+        case .ukrainian: return OpenTypeL10n.text("乌克兰语", english: "Ukrainian")
+        case .czech: return OpenTypeL10n.text("捷克语", english: "Czech")
+        case .danish: return OpenTypeL10n.text("丹麦语", english: "Danish")
+        case .filipino: return OpenTypeL10n.text("菲律宾语", english: "Filipino")
+        case .finnish: return OpenTypeL10n.text("芬兰语", english: "Finnish")
+        case .icelandic: return OpenTypeL10n.text("冰岛语", english: "Icelandic")
+        case .malay: return OpenTypeL10n.text("马来语", english: "Malay")
+        case .norwegian: return OpenTypeL10n.text("挪威语", english: "Norwegian")
+        case .polish: return OpenTypeL10n.text("波兰语", english: "Polish")
+        case .swedish: return OpenTypeL10n.text("瑞典语", english: "Swedish")
         }
     }
 
-    var promptInstruction: String {
+    var appleLocaleIdentifier: String {
         switch self {
-        case .adaptive:
-            return "Match the social temperature of the exchange. If the user's thought is casual or rough-edged, keep it that way instead of upgrading it into polished commentary."
-        case .concise:
-            return "Use the shortest natural wording that carries the user's point. Prefer one sentence and stop as soon as the point lands."
-        case .friendly:
-            return "Sound open and conversational. Add warmth only through phrasing; do not add praise, agreement, or a question the user did not express."
-        case .sharp:
-            return "State the user's disagreement or distinction cleanly. Keep the edge in the idea, not in grand phrasing, sarcasm, or performative provocation."
+        case .automatic, .chinese: return "zh-CN"
+        case .cantonese: return "yue-Hant-HK"
+        case .english: return "en-US"
+        case .japanese: return "ja-JP"
+        case .korean: return "ko-KR"
+        case .german: return "de-DE"
+        case .french: return "fr-FR"
+        case .spanish: return "es-ES"
+        case .italian: return "it-IT"
+        case .portuguese: return "pt-PT"
+        case .russian: return "ru-RU"
+        case .arabic: return "ar-SA"
+        case .hindi: return "hi-IN"
+        case .indonesian: return "id-ID"
+        case .thai: return "th-TH"
+        case .turkish: return "tr-TR"
+        case .vietnamese: return "vi-VN"
+        case .ukrainian: return "uk-UA"
+        case .czech: return "cs-CZ"
+        case .danish: return "da-DK"
+        case .filipino: return "fil-PH"
+        case .finnish: return "fi-FI"
+        case .icelandic: return "is-IS"
+        case .malay: return "ms-MY"
+        case .norwegian: return "nb-NO"
+        case .polish: return "pl-PL"
+        case .swedish: return "sv-SE"
         }
     }
 }

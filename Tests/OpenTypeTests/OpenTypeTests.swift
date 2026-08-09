@@ -19,69 +19,6 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(values["EMPTY"], "")
     }
 
-    func testResponseParserReadsOpenAICompatibleContent() throws {
-        let data = """
-        {
-          "choices": [
-            {
-              "message": {
-                "role": "assistant",
-                "content": "A natural reply."
-              }
-            }
-          ]
-        }
-        """.data(using: .utf8)!
-
-        XCTAssertEqual(
-            try ResponseParser.content(from: data),
-            "A natural reply."
-        )
-    }
-
-    func testASRRequestContainsOnlyAudioMessage() throws {
-        let body = ASRRequestBuilder.body(
-            model: "qwen3-asr-flash",
-            dataURI: "data:audio/wav;base64,UklGRg=="
-        )
-        let data = try JSONSerialization.data(withJSONObject: body)
-        let root = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: data) as? [String: Any]
-        )
-        let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
-
-        XCTAssertEqual(messages.count, 1)
-        XCTAssertEqual(messages.first?["role"] as? String, "user")
-        XCTAssertNil(messages.first?["system"])
-
-        let content = try XCTUnwrap(
-            messages.first?["content"] as? [[String: Any]]
-        )
-        XCTAssertEqual(content.count, 1)
-        XCTAssertEqual(content.first?["type"] as? String, "input_audio")
-
-        let options = try XCTUnwrap(root["asr_options"] as? [String: Any])
-        XCTAssertNil(options["language"])
-    }
-
-    func testASRRequestAddsAnExplicitLanguageWithoutAddingTextMessages() throws {
-        let body = ASRRequestBuilder.body(
-            model: "qwen3-asr-flash",
-            dataURI: "data:audio/wav;base64,UklGRg==",
-            languageCode: "ja"
-        )
-        let data = try JSONSerialization.data(withJSONObject: body)
-        let root = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: data) as? [String: Any]
-        )
-        let messages = try XCTUnwrap(root["messages"] as? [[String: Any]])
-        let options = try XCTUnwrap(root["asr_options"] as? [String: Any])
-
-        XCTAssertEqual(messages.count, 1)
-        XCTAssertEqual(messages.first?["role"] as? String, "user")
-        XCTAssertEqual(options["language"] as? String, "ja")
-    }
-
     func testSelectionRequiredErrorUsesGenericMessage() {
         // No remaining mode (transcribe/ask/agent) requires a selection, so
         // this error path is unreachable in practice; it still needs a
@@ -778,100 +715,17 @@ final class OpenTypeTests: XCTestCase {
 
         let reloaded = AppConfiguration(defaults: defaults)
         XCTAssertEqual(reloaded.transcriptionLanguage, .japanese)
-        XCTAssertEqual(reloaded.serviceSelection.transcriptionLanguage, .japanese)
     }
 
-    func testMainstreamTranscriptionLanguagesMapAcrossProviders() {
+    func testMainstreamTranscriptionLanguagesCoverAppleLiveCaptionLocales() {
+        // MLX-Whisper (the sidecar's ASR) auto-detects language on its own,
+        // so `TranscriptionLanguage` only still drives the Apple on-device
+        // live-caption preview's locale -- see `appleLocaleIdentifier`.
         XCTAssertGreaterThanOrEqual(TranscriptionLanguage.allCases.count, 25)
-        XCTAssertNil(TranscriptionLanguage.automatic.code(for: .dashScope))
-        XCTAssertEqual(TranscriptionLanguage.chinese.code(for: .dashScope), "zh")
-        XCTAssertEqual(TranscriptionLanguage.japanese.code(for: .openAI), "ja")
-        XCTAssertEqual(TranscriptionLanguage.french.code(for: .elevenLabs), "fr")
-        XCTAssertEqual(TranscriptionLanguage.cantonese.code(for: .dashScope), "yue")
-        XCTAssertEqual(TranscriptionLanguage.cantonese.code(for: .openAI), "zh")
-        XCTAssertEqual(TranscriptionLanguage.filipino.code(for: .dashScope), "fil")
-        XCTAssertEqual(TranscriptionLanguage.filipino.code(for: .openAI), "tl")
         XCTAssertEqual(TranscriptionLanguage.automatic.appleLocaleIdentifier, "zh-CN")
         XCTAssertEqual(TranscriptionLanguage.japanese.appleLocaleIdentifier, "ja-JP")
         XCTAssertEqual(TranscriptionLanguage.english.appleLocaleIdentifier, "en-US")
-    }
-
-    @MainActor
-
-    func testProviderCapabilitiesSeparateSpeechAndText() {
-        XCTAssertEqual(
-            AIProvider.speechProviders,
-            [.dashScope, .openAI, .elevenLabs]
-        )
-        XCTAssertEqual(
-            AIProvider.textProviders,
-            [.dashScope, .volcengine, .openAI, .anthropic]
-        )
-        XCTAssertFalse(AIProvider.anthropic.supportsSpeechRecognition)
-        XCTAssertFalse(AIProvider.elevenLabs.supportsTextGeneration)
-        XCTAssertFalse(AIProvider.volcengine.supportsSpeechRecognition)
-    }
-
-    @MainActor
-    func testProviderAndModelSelectionPersistIndependently() {
-        let suiteName = "OpenTypeTests.Providers.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let configuration = AppConfiguration(defaults: defaults)
-        configuration.speechProvider = .elevenLabs
-        configuration.textProvider = .anthropic
-        configuration.updateSpeechModel("scribe_custom", for: .elevenLabs)
-        configuration.updateTextModel("claude-custom", for: .anthropic)
-
-        let reloaded = AppConfiguration(defaults: defaults)
-        XCTAssertEqual(reloaded.speechProvider, .elevenLabs)
-        XCTAssertEqual(reloaded.textProvider, .anthropic)
-        XCTAssertEqual(reloaded.speechModel(for: .elevenLabs), "scribe_custom")
-        XCTAssertEqual(reloaded.textModel(for: .anthropic), "claude-custom")
-        XCTAssertEqual(reloaded.textModel(for: .openAI), "gpt-5-mini")
-    }
-
-    func testProviderVaultTrimsStoresAndDeletesTokens() throws {
-        let store = InMemoryProviderTokenStore()
-        let vault = ProviderVault(store: store)
-
-        XCTAssertFalse(vault.hasToken(for: .openAI))
-        try vault.save("  test-token  \n", for: .openAI)
-        XCTAssertTrue(vault.hasToken(for: .openAI))
-        XCTAssertEqual(try vault.token(for: .openAI), "test-token")
-
-        try vault.delete(for: .openAI)
-        XCTAssertFalse(vault.hasToken(for: .openAI))
-        XCTAssertThrowsError(try vault.token(for: .openAI))
-    }
-
-    func testEncryptedFileProviderTokenStorePersistsWithoutPlaintext() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("OpenType-ProviderVault-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let store = EncryptedFileProviderTokenStore(directoryURL: directory)
-        try store.save("super-secret-token", provider: .openAI)
-
-        let reloaded = EncryptedFileProviderTokenStore(directoryURL: directory)
-        XCTAssertEqual(
-            try reloaded.read(provider: .openAI),
-            "super-secret-token"
-        )
-        let vaultData = try Data(contentsOf: store.vaultURL)
-        XCTAssertFalse(
-            String(data: vaultData, encoding: .utf8)?
-                .contains("super-secret-token") == true
-        )
-        let attributes = try FileManager.default.attributesOfItem(
-            atPath: store.vaultURL.path
-        )
-        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
-        XCTAssertEqual(permissions, 0o600)
-
-        try reloaded.delete(provider: .openAI)
-        XCTAssertNil(try reloaded.read(provider: .openAI))
+        XCTAssertEqual(TranscriptionLanguage.cantonese.appleLocaleIdentifier, "yue-Hant-HK")
     }
 
     func testImmutableAuditStoreAppendsWithoutRewritingEarlierEvents() throws {
@@ -1215,20 +1069,4 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(AgentRunHistory.runningCount(in: [completed, failed]), 0)
     }
 
-}
-
-private final class InMemoryProviderTokenStore: ProviderTokenStoring {
-    private var tokens: [AIProvider: String] = [:]
-
-    func read(provider: AIProvider) throws -> String? {
-        tokens[provider]
-    }
-
-    func save(_ token: String, provider: AIProvider) throws {
-        tokens[provider] = token
-    }
-
-    func delete(provider: AIProvider) throws {
-        tokens.removeValue(forKey: provider)
-    }
 }

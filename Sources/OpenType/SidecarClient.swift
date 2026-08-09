@@ -1,5 +1,46 @@
 import Foundation
 
+/// Parses simple `KEY=VALUE` environment-file text (shell-style comments,
+/// optional `export ` prefix, optional quoting) — used by
+/// `SidecarClient.loadBundledEnvironment(resourcePath:)` to read the
+/// `sidecar.env` file `build-app.sh` bundles into the packaged app's
+/// Resources so the sidecar child process can find its DeepSeek API key at
+/// runtime. Previously also backed the now-removed cloud-provider
+/// `CredentialProvider`/`~/.openclaw/.env` lookup; this is its only
+/// remaining consumer.
+enum EnvironmentFileParser {
+    static func parse(_ contents: String) -> [String: String] {
+        var result: [String: String] = [:]
+
+        for rawLine in contents.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+
+            let normalized = line.hasPrefix("export ")
+                ? String(line.dropFirst("export ".count))
+                : line
+            guard let separator = normalized.firstIndex(of: "=") else { continue }
+
+            let key = normalized[..<separator]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            var value = normalized[normalized.index(after: separator)...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if value.count >= 2,
+               (value.hasPrefix("\"") && value.hasSuffix("\""))
+                || (value.hasPrefix("'") && value.hasSuffix("'")) {
+                value.removeFirst()
+                value.removeLast()
+            }
+
+            guard !key.isEmpty else { continue }
+            result[key] = value
+        }
+
+        return result
+    }
+}
+
 /// Errors surfaced by `SidecarClient` while launching, health-checking, or
 /// issuing HTTP-over-Unix-socket requests to the local sidecar process.
 enum SidecarClientError: Error, LocalizedError, Equatable {

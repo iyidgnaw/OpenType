@@ -417,10 +417,6 @@ private struct SetupCard: View {
 
             HStack(spacing: 6) {
                 SetupStatusPill(
-                    title: "云端",
-                    status: model.cloudConnected ? .granted : .denied
-                )
-                SetupStatusPill(
                     title: "麦克风",
                     status: model.microphonePermission
                 )
@@ -456,7 +452,6 @@ private struct SetupCard: View {
 
     private var completedStepCount: Int {
         var checks = [
-            model.cloudConnected,
             model.microphonePermission == .granted,
             model.accessibilityGranted
         ]
@@ -467,7 +462,7 @@ private struct SetupCard: View {
     }
 
     private var totalStepCount: Int {
-        model.configuration.liveCaptionsEnabled ? 4 : 3
+        model.configuration.liveCaptionsEnabled ? 3 : 2
     }
 
     private var setupProgress: CGFloat {
@@ -484,9 +479,6 @@ private struct SetupCard: View {
     }
 
     private var setupDetail: String {
-        if !model.cloudConnected {
-            return OpenTypeL10n.text("先连接你的 DashScope 云端模型", english: "Connect your DashScope model first")
-        }
         if model.microphonePermission != .granted {
             return OpenTypeL10n.text("允许麦克风后，就可以开始说话", english: "Allow microphone access to start speaking")
         }
@@ -501,7 +493,6 @@ private struct SetupCard: View {
     }
 
     private var primaryActionTitle: String {
-        if !model.cloudConnected { return OpenTypeL10n.text("查看连接", english: "View connection") }
         if model.microphonePermission == .denied { return OpenTypeL10n.text("打开麦克风设置", english: "Open Microphone Settings") }
         if model.microphonePermission != .granted { return OpenTypeL10n.text("允许麦克风", english: "Allow Microphone") }
         if !model.accessibilityGranted { return OpenTypeL10n.text("开启辅助功能", english: "Enable Accessibility") }
@@ -517,9 +508,6 @@ private struct SetupCard: View {
     }
 
     private var primaryAction: () -> Void {
-        if !model.cloudConnected {
-            return { model.selectedTab = .settings }
-        }
         if model.microphonePermission != .granted {
             return model.requestMicrophonePermission
         }
@@ -708,10 +696,6 @@ private struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
     @ObservedObject var agentMemory: AgentMemoryStore
-    @State private var editingProvider: AIProvider?
-    @State private var tokenDraft = ""
-    @State private var providerMessage = ""
-    @State private var providerPendingDeletion: AIProvider?
     @State private var appearanceExpanded = false
     @State private var ownerProfileExpanded = true
     @State private var dataManagementExpanded = false
@@ -898,7 +882,7 @@ private struct SettingsView: View {
                         "识别“发送 / press enter”命令",
                         isOn: $configuration.pressEnterCommand
                     )
-                    Text("X Reply 始终复制到剪贴板，由你手动粘贴和发布。")
+                    Text("Agent 模式的结果始终复制到剪贴板，由你手动粘贴，不会自动发送或执行。")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 }
@@ -1075,7 +1059,7 @@ private struct SettingsView: View {
                     AgentTaskLogView(model: model)
                 }
 
-                SettingsSection("AI 服务") {
+                SettingsSection("转写") {
                     Picker(
                         "转写语言",
                         selection: Binding(
@@ -1089,124 +1073,10 @@ private struct SettingsView: View {
                     }
                     .pickerStyle(.menu)
 
-                    Text("中英夹杂或一段音频包含多种语言时，请使用“自动识别”；单一语言可明确选择，以提高识别准确率。")
+                    Text("中英夹杂或一段音频包含多种语言时，请使用“自动识别”；单一语言可明确选择，以提高实时字幕预览的准确率。最终识别始终使用本机 MLX-Whisper。")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-
-                    Picker(
-                        "语音识别",
-                        selection: Binding(
-                            get: { configuration.speechProvider },
-                            set: { model.changeSpeechProvider($0) }
-                        )
-                    ) {
-                        ForEach(AIProvider.speechProviders) { provider in
-                            Text(provider.title).tag(provider)
-                        }
-                    }
-                    .pickerStyle(.menu)
-
-                    TextField(
-                        "语音模型 ID",
-                        text: Binding(
-                            get: {
-                                configuration.speechModel(
-                                    for: configuration.speechProvider
-                                )
-                            },
-                            set: { model.updateSpeechModel($0) }
-                        )
-                    )
-
-                    Picker(
-                        "文字生成",
-                        selection: Binding(
-                            get: { configuration.textProvider },
-                            set: { model.changeTextProvider($0) }
-                        )
-                    ) {
-                        ForEach(AIProvider.textProviders) { provider in
-                            Text(provider.title).tag(provider)
-                        }
-                    }
-                    .pickerStyle(.menu)
-
-                    TextField(
-                        "文字模型 ID",
-                        text: Binding(
-                            get: {
-                                configuration.textModel(
-                                    for: configuration.textProvider
-                                )
-                            },
-                            set: { model.updateTextModel($0) }
-                        )
-                    )
-
-                    Divider()
-
-                    HStack {
-                        Text("Provider Vault")
-                            .font(.system(size: 10.5, weight: .semibold))
-                        Spacer()
-                        Label("本地加密", systemImage: "lock.fill")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    ForEach(AIProvider.allCases) { provider in
-                        ProviderCredentialRow(
-                            provider: provider,
-                            configured: model.providerIsConfigured(provider),
-                            expanded: editingProvider == provider,
-                            tokenDraft: $tokenDraft,
-                            message: editingProvider == provider
-                                ? providerMessage
-                                : "",
-                            onToggle: {
-                                if editingProvider == provider {
-                                    editingProvider = nil
-                                } else {
-                                    editingProvider = provider
-                                    tokenDraft = ""
-                                    providerMessage = ""
-                                }
-                            },
-                            onSave: {
-                                guard !tokenDraft
-                                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                                    .isEmpty else {
-                                    providerMessage = "请输入 API Key 或 Token"
-                                    return
-                                }
-                                if let error = model.saveProviderToken(
-                                    tokenDraft,
-                                    for: provider
-                                ) {
-                                    providerMessage = error
-                                } else {
-                                    tokenDraft = ""
-                                    providerMessage = "已保存到 OpenType 本地加密凭据库"
-                                }
-                            },
-                            onDelete: {
-                                providerPendingDeletion = provider
-                            }
-                        )
-                    }
-                }
-
-                SettingsSection("X Reply") {
-                    Picker(
-                        "X Reply 风格",
-                        selection: $configuration.xReplyStyle
-                    ) {
-                        ForEach(XReplyStyle.allCases) { style in
-                            Text(style.title).tag(style)
-                        }
-                    }
-                    .pickerStyle(.menu)
                 }
 
                 SettingsSection("个人词典") {
@@ -1230,19 +1100,6 @@ private struct SettingsView: View {
                 }
 
                 SettingsSection("连接与权限") {
-                    Label(
-                        model.credentialStatus,
-                        systemImage: model.cloudConnected
-                            ? "circle.fill"
-                            : "exclamationmark.triangle.fill"
-                    )
-                    .font(.system(size: 11))
-                    .foregroundStyle(
-                        model.cloudConnected
-                            ? Color.secondary
-                            : Color.orange
-                    )
-
                     HStack {
                         Label(
                             "麦克风\(model.microphonePermission.title)",
@@ -1354,7 +1211,7 @@ private struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Text("实时字幕优先使用 Apple 本机识别，仅作为录音预览；最终音频与文字只发送给你在上方选择的服务。API Key 保存在 OpenType 本地加密凭据库，不写入设置、日志或历史。")
+                Text("实时字幕优先使用 Apple 本机识别，仅作为录音预览；最终识别始终在本机运行（MLX-Whisper），文字生成由本地 sidecar 转发给固定的 DeepSeek 模型，均不需要你手动配置或选择云端服务商。")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1363,24 +1220,6 @@ private struct SettingsView: View {
             .padding(.vertical, 14)
         }
         .scrollIndicators(.hidden)
-        .alert(item: $providerPendingDeletion) { provider in
-            Alert(
-                title: Text("移除 \(provider.title) Token？"),
-                message: Text("将从 OpenType 本地加密凭据库移除；需要时可以重新添加。"),
-                primaryButton: .destructive(Text("移除")) {
-                    if let error = model.deleteProviderToken(for: provider) {
-                        editingProvider = provider
-                        providerMessage = error
-                    } else {
-                        if editingProvider == provider {
-                            tokenDraft = ""
-                            providerMessage = "Token 已移除"
-                        }
-                    }
-                },
-                secondaryButton: .cancel()
-            )
-        }
         .confirmationDialog(
             "重置输入历史？",
             isPresented: $showingHistoryResetConfirmation,
@@ -1958,123 +1797,6 @@ private struct AgentRunRow: View {
         default:
             return stepType
         }
-    }
-}
-
-private struct ProviderCredentialRow: View {
-    let provider: AIProvider
-    let configured: Bool
-    let expanded: Bool
-    @Binding var tokenDraft: String
-    let message: String
-    let onToggle: () -> Void
-    let onSave: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button(action: onToggle) {
-                HStack(spacing: 9) {
-                    Image(systemName: provider.symbol)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.secondary)
-                        .frame(width: 25, height: 25)
-                        .background(Color.primary.opacity(0.045), in: Circle())
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(provider.title)
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(.primary)
-                        HStack(spacing: 5) {
-                            if provider.supportsSpeechRecognition {
-                                capabilityPill("语音")
-                            }
-                            if provider.supportsTextGeneration {
-                                capabilityPill("文字")
-                            }
-                        }
-                    }
-
-                    Spacer()
-
-                    Text(
-                        configured
-                            ? OpenTypeL10n.text("已配置", english: "Configured")
-                            : OpenTypeL10n.text("添加", english: "Add")
-                    )
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(configured ? Color.secondary : Color.accentColor)
-
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            if expanded {
-                SecureField(provider.tokenHint, text: $tokenDraft)
-                    .textFieldStyle(.roundedBorder)
-
-                Text(
-                    configured
-                        ? OpenTypeL10n.text(
-                            "Token 已保存；输入新值可覆盖，现有 Token 不会显示。",
-                            english: "The token is saved. Enter a new value to replace it; the current token is never displayed."
-                        )
-                        : OpenTypeL10n.text(
-                            "Token 只会写入 OpenType 本地加密凭据库。",
-                            english: "The token is stored only in OpenType's local encrypted vault."
-                        )
-                )
-                .font(.system(size: 8.8))
-                .foregroundStyle(.secondary)
-
-                if !message.isEmpty {
-                    Text(message)
-                        .font(.system(size: 8.8, weight: .medium))
-                        .foregroundStyle(
-                            message.contains("已安全") || message.contains("已移除")
-                                ? Color.secondary
-                                : Color.orange
-                        )
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                HStack {
-                    if configured {
-                        Button("移除 Token", role: .destructive, action: onDelete)
-                            .controlSize(.small)
-                    }
-                    Spacer()
-                    Button(configured ? "更新 Token" : "保存 Token", action: onSave)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                }
-            }
-        }
-        .padding(9)
-        .background(
-            expanded ? Color.accentColor.opacity(0.055) : Color.primary.opacity(0.025),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(
-                    expanded ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.055),
-                    lineWidth: 0.7
-                )
-        )
-    }
-
-    private func capabilityPill(_ title: String) -> some View {
-        Text(LocalizedStringKey(title))
-            .font(.system(size: 8, weight: .medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2)
-            .background(Color.primary.opacity(0.045), in: Capsule())
     }
 }
 

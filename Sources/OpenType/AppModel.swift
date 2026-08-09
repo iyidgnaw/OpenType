@@ -5,7 +5,6 @@ import UserNotifications
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var state: ProcessingState = .idle
-    @Published private(set) var credentialStatus = "正在检查…"
     @Published private(set) var shortcutStatus = "正在注册…"
     @Published private(set) var sidecarStatus = "正在启动…"
     @Published private(set) var shortcutKeys = HotKeyPreset.controlShiftSpace.keys
@@ -19,7 +18,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastResult = ""
     @Published private(set) var lastTranscript = ""
     @Published private(set) var lastApplication = ""
-    @Published private(set) var configuredProviders: Set<AIProvider> = []
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
     /// Bounded history of recent Agent (`/agent/run`) dispatches, most recent
@@ -51,7 +49,6 @@ final class AppModel: ObservableObject {
     let configuration: AppConfiguration
     let history: HistoryStore
     let agentMemory: AgentMemoryStore
-    let providerVault = ProviderVault()
     private let auditStore = ImmutableAuditStore()
 
     private let sidecarClient = SidecarClient()
@@ -63,7 +60,6 @@ final class AppModel: ObservableObject {
     private let askPanel = AskPanelController()
     private var customSounds: [String: NSSound] = [:]
     private var activeFeedbackSound: NSSound?
-    private var client: AIServiceClient?
     private var capturedContext = CapturedContext(
         selectedText: nil,
         applicationName: "Unknown app",
@@ -97,13 +93,8 @@ final class AppModel: ObservableObject {
         contextBridge.accessibilityGranted
     }
 
-    var cloudConnected: Bool {
-        client?.isFullyConfigured == true
-    }
-
     var setupReady: Bool {
-        cloudConnected
-            && microphonePermission == .granted
+        microphonePermission == .granted
             && accessibilityGranted
             && (!configuration.liveCaptionsEnabled
                 || speechRecognitionPermission == .granted)
@@ -113,7 +104,7 @@ final class AppModel: ObservableObject {
 
     var canTogglePractice: Bool {
         if isPracticeSession, state == .listening { return true }
-        return cloudConnected && !isBusy && !isStartingRecording
+        return !isBusy && !isStartingRecording
     }
 
     var canUndo: Bool {
@@ -158,7 +149,6 @@ final class AppModel: ObservableObject {
             // denied/failed authorization is silently ignored rather than
             // surfaced as an error anywhere.
         }
-        loadCredential()
         start()
 
         Task { [weak self] in
@@ -428,28 +418,14 @@ final class AppModel: ObservableObject {
         configuration.interfaceLanguage = language
         overlay.updateInterfaceLanguage(language)
         askPanel.updateInterfaceLanguage(language)
-        refreshAIService()
         updateShortcutPresentation(
             preference: configuration.hotKeyPreset,
             installed: shortcutReady
         )
     }
 
-    func changeSpeechProvider(_ provider: AIProvider) {
-        guard provider.supportsSpeechRecognition else { return }
-        configuration.speechProvider = provider
-        refreshAIService()
-    }
-
     func changeTranscriptionLanguage(_ language: TranscriptionLanguage) {
         configuration.transcriptionLanguage = language
-        refreshAIService()
-    }
-
-    func changeTextProvider(_ provider: AIProvider) {
-        guard provider.supportsTextGeneration else { return }
-        configuration.textProvider = provider
-        refreshAIService()
     }
 
     func changeAutomaticOwnerProfileUpdates(_ enabled: Bool) {
@@ -459,42 +435,6 @@ final class AppModel: ObservableObject {
             enabled: true,
             personalDictionary: configuration.personalDictionary
         )
-    }
-
-    func updateSpeechModel(_ model: String) {
-        configuration.updateSpeechModel(model, for: configuration.speechProvider)
-        refreshAIService()
-    }
-
-    func updateTextModel(_ model: String) {
-        configuration.updateTextModel(model, for: configuration.textProvider)
-        refreshAIService()
-    }
-
-    func providerIsConfigured(_ provider: AIProvider) -> Bool {
-        configuredProviders.contains(provider)
-    }
-
-    @discardableResult
-    func saveProviderToken(_ token: String, for provider: AIProvider) -> String? {
-        do {
-            try providerVault.save(token, for: provider)
-            refreshAIService()
-            return nil
-        } catch {
-            return error.localizedDescription
-        }
-    }
-
-    @discardableResult
-    func deleteProviderToken(for provider: AIProvider) -> String? {
-        do {
-            try providerVault.delete(for: provider)
-            refreshAIService()
-            return nil
-        } catch {
-            return error.localizedDescription
-        }
     }
 
     func copyLastResult() {
@@ -600,26 +540,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func loadCredential() {
-        let legacyCredential = try? CredentialProvider().load()
-        providerVault.migrateDashScopeIfNeeded(legacyCredential)
-        refreshAIService()
-    }
-
-    private func refreshAIService() {
-        configuredProviders = Set(
-            AIProvider.allCases.filter { providerVault.hasToken(for: $0) }
-        )
-        let service = AIServiceClient(
-            selection: configuration.serviceSelection,
-            vault: providerVault
-        )
-        client = service
-        credentialStatus = service.isFullyConfigured
-            ? OpenTypeL10n.text("AI 服务已配置 · \(service.safeStatusDescription)", english: "AI services ready · \(service.safeStatusDescription)")
-            : service.safeStatusDescription
-    }
-
     private func refreshPreferredShortcut() {
         let preference = configuration.hotKeyPreset
         let installed = hotKey.reinstall(preference: preference)
@@ -663,15 +583,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Every mode now routes to the sidecar for its text generation, always
-    /// using this fixed model, so audit events record it directly rather than
-    /// asking `AIServiceClient` to resolve one. ASR also now runs locally via
-    /// the sidecar's MLX-Whisper process (see `transcribeLocally(audioURL:)`
-    /// below), so `AIServiceClient`/`client` is unused by the recording
-    /// pipeline entirely -- it's left in place (still backing
-    /// `cloudConnected`/onboarding UI) rather than excised, per product
-    /// direction to not expose cloud provider configuration right now but
-    /// without risking a wider UI rewrite of the onboarding flow tonight.
+    /// using this fixed model, and ASR always runs locally via the sidecar's
+    /// MLX-Whisper process (see `transcribeLocally(audioURL:)` below) --
+    /// there is no cloud-provider selection anywhere in the pipeline anymore,
+    /// so audit events (`appendAudit` in `process(audioURL:)`) record these
+    /// fixed labels directly instead of resolving a configured provider.
     private static let sidecarTextModel = "deepseek-v4-flash"
+    private static let sidecarTextProvider = "deepseek"
+    private static let sidecarASRProvider = "mlx-whisper"
 
     /// Request/response bodies for the sidecar's `/asr/transcribe` endpoint
     /// (proxies to the local MLX-Whisper python process -- see
@@ -729,9 +648,8 @@ final class AppModel: ObservableObject {
 
     /// Local ASR via the sidecar's `/asr/transcribe` endpoint, which proxies
     /// to a persistent MLX-Whisper python process (`sidecar/whisper/serve.py`,
-    /// managed by `sidecar/src/asr/whisperClient.ts`). Replaces the previous
-    /// cloud-provider call (`AIServiceClient.transcribe`) as the ASR step
-    /// shared by all modes -- no credential/provider configuration required.
+    /// managed by `sidecar/src/asr/whisperClient.ts`) -- the ASR step shared
+    /// by all modes, with no credential/provider configuration required.
     private func transcribeLocally(audioURL: URL) async throws -> String {
         let audioData = try Data(contentsOf: audioURL)
         guard !audioData.isEmpty else { throw OpenTypeError.emptyRecording }
@@ -749,7 +667,6 @@ final class AppModel: ObservableObject {
         let startingMode = activeMode ?? configuration.selectedMode
         let practice = isPracticeSession
         let auditRequestID = UUID()
-        let serviceSelection = configuration.serviceSelection
         var auditMode = startingMode
         var auditRawTranscript = ""
         var auditEffectiveInput: String?
@@ -759,7 +676,7 @@ final class AppModel: ObservableObject {
             status: AuditEventStatus,
             result: String? = nil,
             error: String? = nil,
-            provider: AIProvider? = nil,
+            provider: String? = nil,
             model: String? = nil
         ) {
             try? auditStore.append(
@@ -771,7 +688,7 @@ final class AppModel: ObservableObject {
                     effectiveInput: auditEffectiveInput,
                     selectedContext: capturedContext.selectedText,
                     result: result,
-                    provider: provider?.rawValue,
+                    provider: provider,
                     model: model,
                     error: error
                 )
@@ -805,8 +722,7 @@ final class AppModel: ObservableObject {
             auditEffectiveInput = transcript
             appendAudit(
                 status: .recognized,
-                provider: serviceSelection.speechProvider,
-                model: serviceSelection.speechModel
+                provider: Self.sidecarASRProvider
             )
 
             if mode.requiresSelection,
@@ -863,8 +779,7 @@ final class AppModel: ObservableObject {
                     transcript: transcript,
                     context: capturedContext,
                     practice: practice,
-                    requestID: auditRequestID,
-                    serviceSelection: serviceSelection
+                    requestID: auditRequestID
                 )
                 result = nil
             }
@@ -957,7 +872,10 @@ final class AppModel: ObservableObject {
             appendAudit(
                 status: .completed,
                 result: result,
-                provider: serviceSelection.textProvider,
+                // `.transcribe` is a pure ASR passthrough with no sidecar
+                // text-generation call (see the `switch mode` above), so it
+                // has no text provider/model of its own to record here.
+                provider: mode == .transcribe ? nil : Self.sidecarTextProvider,
                 model: effectiveTextModel
             )
 
@@ -986,10 +904,10 @@ final class AppModel: ObservableObject {
                 status: .failed,
                 error: ErrorMessagePresenter.message(for: error),
                 provider: auditRawTranscript.isEmpty
-                    ? serviceSelection.speechProvider
-                    : serviceSelection.textProvider,
+                    ? Self.sidecarASRProvider
+                    : Self.sidecarTextProvider,
                 model: auditRawTranscript.isEmpty
-                    ? serviceSelection.speechModel
+                    ? nil
                     : (effectiveTextModel ?? Self.sidecarTextModel)
             )
             fail(error)
@@ -1008,8 +926,7 @@ final class AppModel: ObservableObject {
         transcript: String,
         context: CapturedContext,
         practice: Bool,
-        requestID: UUID,
-        serviceSelection: AIServiceSelection
+        requestID: UUID
     ) {
         let record = AgentRunRecord(
             task: transcript,
@@ -1026,8 +943,7 @@ final class AppModel: ObservableObject {
                 transcript: transcript,
                 context: context,
                 practice: practice,
-                requestID: requestID,
-                serviceSelection: serviceSelection
+                requestID: requestID
             )
         }
     }
@@ -1049,8 +965,7 @@ final class AppModel: ObservableObject {
         transcript: String,
         context: CapturedContext,
         practice: Bool,
-        requestID: UUID,
-        serviceSelection: AIServiceSelection
+        requestID: UUID
     ) async {
         defer { runningAgentTasks[runID] = nil }
 
@@ -1080,7 +995,7 @@ final class AppModel: ObservableObject {
                     effectiveInput: transcript,
                     selectedContext: context.selectedText,
                     result: response.result,
-                    provider: serviceSelection.textProvider.rawValue,
+                    provider: Self.sidecarTextProvider,
                     model: Self.sidecarTextModel,
                     error: nil
                 )
@@ -1139,7 +1054,7 @@ final class AppModel: ObservableObject {
                     effectiveInput: transcript,
                     selectedContext: context.selectedText,
                     result: nil,
-                    provider: serviceSelection.textProvider.rawValue,
+                    provider: Self.sidecarTextProvider,
                     model: Self.sidecarTextModel,
                     error: message
                 )

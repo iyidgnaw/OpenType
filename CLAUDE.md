@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-OpenType is a local-first, cross-platform AI voice-input tool: it turns spontaneous speech into ready-to-use text. It has three independent platform clients (macOS, iOS, Android) that must all conform to one shared behavioral contract — same 5 modes, same prompt/safety rules, same provider semantics, same audit protocol — but each platform uses whatever native input mechanism actually works on that OS.
+OpenType is a local-first, cross-platform AI voice-input tool: it turns spontaneous speech into ready-to-use text. It has three independent platform clients (macOS, iOS, Android) that were originally meant to conform to one shared behavioral contract — same modes, same prompt/safety rules, same provider semantics, same audit protocol — but each platform uses whatever native input mechanism actually works on that OS.
 
-- macOS (`Sources/OpenType`, SwiftPM) is the reference implementation — most complete, and the baseline for prompts/mode behavior/output safety rules.
+- macOS (`Sources/OpenType` for the Swift shell, `sidecar/` for the TypeScript/Bun process it spawns) is the reference implementation — most complete, and the one that went through a from-scratch rewrite most recently. See "Architecture (macOS reference implementation)" below for its current shape.
 - iOS (`Platforms/iOS`, Xcode project) — host app records/processes; a separate custom keyboard extension inserts the most recent result via `textDocumentProxy.insertText`. Apple forbids keyboard extensions from accessing the microphone, so recording can never happen in the keyboard itself.
 - Android (`Platforms/Android`, Gradle/Kotlin) — a real `InputMethodService` records via `SpeechRecognizer` and writes with `InputConnection.commitText` directly, no separate host-app round trip needed.
 
-The machine-readable cross-platform contract lives in `Shared/OpenTypeContract.json` (modes, providers, invariants, personalization precedence, pipeline stages) with request/response/audit-event JSON Schemas in `Shared/Schemas/`, and cross-platform acceptance vectors in `Shared/AcceptanceCases.json`. `docs/MULTIPLATFORM_ARCHITECTURE.md` explains the shared product core and per-platform boundaries in prose. When changing product behavior (modes, invariants, providers), update the contract/schemas/docs together with whichever platform's code changed, and check whether the other two platforms need the same change to stay in sync.
+The machine-readable cross-platform contract lives in `Shared/OpenTypeContract.json` (modes, providers, invariants, personalization precedence, pipeline stages) with request/response/audit-event JSON Schemas in `Shared/Schemas/`, and cross-platform acceptance vectors in `Shared/AcceptanceCases.json`. `docs/MULTIPLATFORM_ARCHITECTURE.md` explains the shared product core and per-platform boundaries in prose.
+
+**This contract is currently stale relative to macOS.** The macOS client went through a from-scratch rewrite (old 6-mode system deleted, then cut down to exactly 3 modes, plus a sidecar-owned memory/LLM/agent layer — see "Architecture" below) that `Shared/OpenTypeContract.json` and iOS/Android were **not** updated to match: the contract file still describes the old 5-mode set (`smartEdit`/`english`/`agent`/`xReply`/`transcribe`) and per-platform cloud-provider selection, neither of which reflects what macOS actually does anymore. Treat the contract/iOS/Android as historical/aspirational until someone does the (explicitly out-of-scope-for-now) work of reconciling them with the macOS rewrite — don't assume they're in sync, and don't update macOS behavior by reading the contract as ground truth. When changing product behavior going forward, update the contract/schemas/docs together with whichever platform's code changed if you're touching more than macOS; if you're only touching macOS, it's fine (for now) to leave the contract as-is and note the growing gap rather than block on reconciling all three platforms.
 
 ## Development workflow
 
@@ -39,7 +41,19 @@ swift test --filter <TestClassOrMethodName>   # run a single test
 open dist/OpenType.app
 ```
 
-`scripts/build-app.sh` builds release, compiles the `sidecar/` TypeScript/Bun server into a standalone `opentype-sidecar` binary (requires `bun` on PATH), assembles the `.app` bundle (binary, Info.plist, Sounds, en.lproj, the bundled sidecar binary), strips quarantine, and codesigns with a stable designated requirement (`identifier "ai.rain.opentype"`) so TCC permissions (mic/Accessibility) survive rebuilds.
+`scripts/build-app.sh` builds release, compiles the `sidecar/` TypeScript/Bun server into a standalone `opentype-sidecar` binary (requires `bun` on PATH), assembles the `.app` bundle (binary, Info.plist, Sounds, en.lproj, the bundled sidecar binary, the bundled MLX-Whisper Python venv + script), strips quarantine, and codesigns the sidecar binary standalone *before* folding it into the app (a `bun build --compile` binary's non-standard Mach-O format breaks under `codesign --deep` on the outer app — sign inner-then-outer, outer without `--deep`), then codesigns the outer `.app` with a stable designated requirement (`identifier "ai.rain.opentype"`) so TCC permissions (mic/Accessibility) survive rebuilds.
+
+### macOS sidecar (TypeScript/Bun, `sidecar/`)
+
+```bash
+cd sidecar
+bun install
+bun test                  # run all sidecar tests
+bun run src/server.ts     # run standalone (dev mode), listens on a Unix socket
+bun run build              # -> dist/opentype-sidecar, the standalone binary build-app.sh bundles
+```
+
+See `sidecar/README.md` for env vars (`DEEPSEEK_API_KEY` etc.), endpoint list, and directory layout. The Swift app spawns this as a child process (`Sources/OpenType/SidecarClient.swift`) rather than talking to any of the old cloud speech/text providers directly.
 
 ### iOS (Xcode project, no CocoaPods/SPM deps)
 
@@ -72,23 +86,31 @@ Needs JDK 17, Android SDK Platform 35, Build Tools. Debug APK lands at `Platform
 
 ## Architecture (macOS reference implementation)
 
-`Sources/OpenType/AppModel.swift` is the central `@MainActor` orchestrator (`ObservableObject`) that every view binds to. It owns the shared pipeline all platforms implement: **capture context → recognize speech → route by mode → transform text → validate output → persist locally → deliver result**. Key collaborators it wires together:
+macOS is a **Swift shell + TypeScript sidecar** split, not a pure Swift app. `Sources/OpenType/AppModel.swift` is still the central `@MainActor` orchestrator (`ObservableObject`) every view binds to, but it no longer talks to any cloud speech/text provider directly — the Swift side owns recording, hotkeys, Accessibility, delivery, and local history/memory bookkeeping, and hands every actual ASR/text-generation call off to a local `sidecar/` (TypeScript/Bun) child process it spawns and manages over a Unix socket. See `sidecar/README.md` for the sidecar's own layout and standalone run/test instructions, and `docs/superpowers/specs/2026-08-09-current-system-state.md` for the full as-built reference (endpoints, request/response shapes, known gaps).
 
-- `AudioRecorder` / `LiveSpeechTranscriber` — recording and on-device live-caption preview (preview only; final recognition always goes through the selected speech provider).
+**The pipeline**: capture context → record → local ASR (sidecar `/asr/transcribe`, MLX-Whisper) → route by mode → (for `ask`/`agent`) sidecar text generation (DeepSeek) → deliver result (clipboard always; auto-insert into the focused field when enabled).
+
+**The 3 modes** (`InputMode` in `Models.swift`) — down from an original 6-mode set, cut in two rounds tonight (6→5, then 5→3):
+
+- `transcribe` — pure ASR passthrough, no sidecar/LLM call at all: whatever MLX-Whisper hears is the result.
+- `ask` — no selection needed; speaks a question, sidecar's `/oneshot/ask` (DeepSeek) answers it directly in a floating popup (`AskPanelController`). The one mode that answers rather than preserves/transforms the input.
+- `agent` — speaks a task; dispatched non-blockingly to the sidecar's `/agent/run`, which runs a tool-calling loop (MCP) and returns a result plus a step log. Draft-only like every mode (copied to clipboard, never auto-sent/auto-executed) — this is a policy backstop for agentic side effects specifically, since a tool call is an external action the instant it runs.
+
+Every mode's result is copied to the clipboard; auto-insert into the focused field is an additional delivery step, gated on the `automaticallyInsert` setting, never a replacement for the clipboard copy. There is no PromptBuilder/EnglishOutputPolicy/LightTranscriptionPolicy layer anymore — those belonged to the old 5/6-mode Swift-native pipeline and were deleted along with it; mode-specific system prompts now live in the sidecar (`sidecar/src/oneshot/prompts.ts`, `sidecar/src/agent/loop.ts`), not in Swift, and are not user-editable (no Prompt Studio in the current design).
+
+Key Swift-side collaborators `AppModel` wires together:
+
+- `AudioRecorder` / `LiveSpeechTranscriber` — recording and on-device live-caption preview only (Apple's on-device recognizer, gated on the `liveCaptionsEnabled` setting); final recognition always goes through the sidecar's local MLX-Whisper, never this preview transcript.
 - `GlobalHotKey` — configurable hotkey (hold left Option / double-tap Ctrl·Option·Shift / etc.) that starts/stops a recording session; each recording locks in the active mode for that session.
 - `ContextBridge` — Accessibility-based read of the current app's selection and write-back into the focused text field; clipboard is always the fallback delivery path.
-- `AIServiceClient` + `DashScopeClient` + `AIProvider` — provider-agnostic request/response layer. `AIProvider` enumerates providers (dashScope, volcengine, openAI, anthropic, elevenLabs) and which of speech-recognition/text-generation each supports; DashScope's Chinese→English mode uses a dedicated Qwen-MT translation protocol, never the general chat prompt.
-- `PromptBuilder` — assembles the final prompt per mode: fixed safety rules + mode system instruction (mirrored from `Shared/OpenTypeContract.json`) + current app + personal dictionary + dynamic context, following the personalization precedence: explicit instruction > active mode > current app/source > confirmed profile > learned preferences > product defaults.
-- `EnglishOutputPolicy` — validates Chinese→English mode output: rejects leftover Han characters, excessive length expansion, and speech-act drift (a question answered instead of translated, a request executed instead of translated). On failure, retries once with a stricter translation-only model before refusing to insert a bad result — mirrors `englishRepairAttemptsMaximum: 1` in the contract.
-- `LightTranscriptionPolicy` — the Transcribe mode's fidelity guard: only removes filler/disfluency/basic punctuation, must never treat dictation as a question to answer.
-- `ProviderVault` (`CredentialProvider`, Keychain-backed token storage) — per-provider API tokens, AES-GCM encrypted at rest, never echoed back to the UI once saved, never logged.
-- `ImmutableAuditStore` — append-only local audit trail (`audit-events.v1.jsonl`) of `recognized`/`completed`/`cancelled`/`failed` events per request; not affected by history reset or preference relearning. Raw audio itself is ephemeral and deleted after recognition.
-- `HistoryStore` / `AgentMemoryStore` / `MemoryInsightsAnalyzer` / `LocalMemoryRetriever` / `OwnerProfileAutoUpdater` — local SQLite-backed history and long-term memory: manually-confirmed "About Me" profile (never auto-rewritten) plus periodically-consolidated "Learned Preferences" (every 100 tasks), injected into Agent-mode context with a budget cap (~12 recent tasks); other text modes only pull in what's relevant to the current task.
-- `Views.swift` — all SwiftUI UI (menu bar, settings, Prompt Studio, onboarding, history) driving/observing `AppModel`.
+- `SidecarClient` — spawns and health-checks the `sidecar/` child process, then issues every request to it (`curl` over the Unix socket, not a native HTTP transport — a known simplification, see the current-state spec's gaps list). Also resolves `sidecar.env` (bundled by `build-app.sh` into the packaged app's Resources) so the DeepSeek API key reaches the sidecar at runtime even from a `bun build --compile` binary that can't find `sidecar/.env.local` on its own.
+- `ImmutableAuditStore` — append-only local audit trail (`audit-events.v1.jsonl`) of `recognized`/`completed`/`cancelled`/`failed` events per request; not affected by history reset or preference relearning. Raw audio itself is ephemeral and deleted after recognition. `provider`/`model` fields now record fixed labels (`"mlx-whisper"`, `"deepseek"`/`deepseek-v4-flash`) rather than a user-configured provider, since there's no provider selection left to record.
+- `HistoryStore` / `AgentMemoryStore` / `MemoryInsightsAnalyzer` / `LocalMemoryRetriever` / `OwnerProfileAutoUpdater` — local SQLite-backed history and long-term memory: manually-confirmed "About Me" profile (never auto-rewritten) plus periodically-consolidated "Learned Preferences" (every 100 tasks), injected into Agent-mode context with a budget cap (~12 recent tasks); other text modes only pull in what's relevant to the current task. This sits alongside (not instead of) the sidecar's own separate entity-dictionary memory (`sidecar/src/memory/`), read-only-visible in Settings via `/memory/terms` and `/memory/consolidation-runs`.
+- `Views.swift` / `MenuBarPopoverView.swift` — the UI, split Alfred-style: the menubar `NSPopover` (`MenuBarPopoverView`) is a compact mode-switcher only (pick transcribe/ask/agent, glance at status); Settings, History, the Memory panel, and the Agent Task List all live in a separate real, resizable app window (`RootView` in `Views.swift`, opened via the popover's gear button), not in the popover. There is no cloud-provider setup UI anymore — Settings' "转写" section only exposes the live-caption preview's locale (`TranscriptionLanguage`), since ASR/text-generation have no user-facing provider choice left to configure.
 
-The 5 modes (`smartEdit`, `english`, `agent`, `xReply`, `transcribe`) and their invariants — copy every successful result to the clipboard, never auto-publish/auto-send (`agent`, `xReply` are draft-only), selected-text edits require an explicit spoken instruction, Transcribe must never answer dictation as a question — are defined once in `Shared/OpenTypeContract.json` and reimplemented per platform; `PromptBuilder`/`EnglishOutputPolicy`/`LightTranscriptionPolicy` on macOS are the canonical enforcement of those invariants and are the files to check first when a mode's behavior needs to change on any platform.
+There's no `ProviderVault`/`AIServiceClient`/`AIProvider`/`CredentialProvider` layer anymore (removed as dead code once the sidecar took over ASR and text generation) — if you're looking for where a provider/model gets chosen, it isn't chosen on the Swift side at all; check `sidecar/src/env.ts` (`DEEPSEEK_API_KEY`/`DEEPSEEK_MODEL`) and `sidecar/whisper/serve.py` (`OPENTYPE_WHISPER_MODEL`) instead.
 
-iOS and Android mirror this pipeline with platform-native equivalents (Apple Speech vs. Android `SpeechRecognizer`; Keychain vs. Android Keystore for token storage; App Group hand-off vs. direct `InputConnection.commitText`) — see their own `Platforms/*/README.md` for platform-specific constraints and current verification status.
+iOS and Android were **not** part of tonight's rewrite and still reflect the old 5/6-mode, per-platform-cloud-provider design described by `Shared/OpenTypeContract.json` — see the staleness note under "What this repo is" above. Don't use this section as a guide to iOS/Android's current behavior.
 
 ## Reference implementations and design docs
 

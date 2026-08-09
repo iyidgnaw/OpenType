@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    Hardened runtime's library validation normally requires every dylib a
+    signed binary loads to be signed by the same Team ID (or Apple). The
+    bundled MLX-Whisper venv's python interpreter dlopens a large tree of
+    scientific-computing native extensions (numpy/torch/mlx .so files, in
+    turn loading further native libs via rpath) that get re-signed under
+    this app's Developer ID as part of packaging, but a python venv's
+    dependency graph is large and easy to miss an entry in -- silently
+    breaking ASR only on a friend's machine, far harder to debug remotely
+    than accepting this narrower, well-precedented relaxation for the
+    interpreter binary specifically (not the main app or sidecar binary,
+    neither of which loads third-party native code).
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

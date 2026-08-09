@@ -58,17 +58,6 @@ fi
 rm -rf "$resources_dir/whisper"
 ditto "$project_dir/sidecar/whisper" "$resources_dir/whisper"
 
-# Sign the sidecar binary on its own, before it becomes part of the app
-# bundle's seal below. `bun build --compile` binaries have a non-standard
-# Mach-O shape (an appended module-graph trailer) that a later
-# `codesign --deep` pass on the outer app corrupts -- spctl then reports
-# "invalid signature (code or signature have been modified)" and macOS
-# silently kills the process the instant the running app tries to spawn
-# it, even though the app itself launches fine. Signing it here, then
-# signing the outer app WITHOUT --deep (this bundle has no other nested
-# executables that need it), leaves both signatures valid.
-codesign --force --sign - "$resources_dir/opentype-sidecar"
-
 # A `bun build --compile` binary doesn't carry the source tree's
 # sidecar/.env.local with it, and doesn't know to look for one at an
 # arbitrary launch-time cwd. Bundle it (if present) as sidecar.env next to
@@ -85,12 +74,94 @@ fi
 # otherwise Finder may refuse to launch an otherwise valid ad-hoc build.
 xattr -dr com.apple.quarantine "$app_dir" 2>/dev/null || true
 
-# Keep a stable designated requirement across local ad-hoc builds. Without an
-# explicit requirement, macOS may bind TCC permissions to a changing code hash
-# and ask for Microphone / Accessibility access again after every rebuild.
-codesign \
-  --force \
-  --sign - \
-  --requirements '=designated => identifier "ai.rain.opentype"' \
-  "$app_dir"
+# --- Signing -----------------------------------------------------------
+#
+# Two paths:
+#
+# 1. Default (OPENTYPE_NOTARIZE unset): fast ad-hoc signing for local
+#    iteration, unchanged from before. `bun build --compile` binaries have a
+#    non-standard Mach-O shape (an appended module-graph trailer) that a
+#    `codesign --deep` pass on the outer app corrupts -- spctl then reports
+#    "invalid signature (code or signature have been modified)" and macOS
+#    silently kills the process the instant the running app tries to spawn
+#    it, even though the app itself launches fine. Sign the sidecar binary
+#    standalone first, then the outer app WITHOUT --deep, to avoid that.
+#
+# 2. OPENTYPE_NOTARIZE=1: a real Developer ID Application identity, signing
+#    every nested Mach-O individually (notarization -- unlike ad-hoc/local
+#    Gatekeeper checks -- rejects the whole submission if any nested
+#    executable/dylib lacks a valid signature+hardened-runtime+timestamp),
+#    then submits to Apple's notary service and staples the ticket so the
+#    app opens with no Gatekeeper warning even offline. Needs a Developer ID
+#    Application certificate in the login Keychain and notarytool credentials
+#    stored under OPENTYPE_NOTARY_PROFILE (default: OpenTypeNotary) -- see
+#    docs/onboarding/coding-agent-setup-prompt.md's release-build note, or
+#    just `xcrun notarytool store-credentials`.
+if [ "${OPENTYPE_NOTARIZE:-}" = "1" ]; then
+  notary_profile="${OPENTYPE_NOTARY_PROFILE:-OpenTypeNotary}"
+  identity=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
+  if [ -z "$identity" ]; then
+    echo "error: OPENTYPE_NOTARIZE=1 but no 'Developer ID Application' certificate found in the login Keychain." >&2
+    exit 1
+  fi
+  echo "notarized release build: signing with identity: $identity"
+
+  # Sign every nested Mach-O in the bundled Whisper venv first (bottom-up).
+  # `file` per-entry is slow across a venv this size but correctness here
+  # matters more than build speed for a release build, and only runs when
+  # explicitly opted into.
+  if [ -d "$resources_dir/whisper-env" ]; then
+    find "$resources_dir/whisper-env" -type f -print0 | while IFS= read -r -d '' f; do
+      if file "$f" 2>/dev/null | grep -q "Mach-O"; then
+        entitlements_arg=()
+        case "$f" in
+          "$resources_dir/whisper-env/bin/"*)
+            entitlements_arg=(--entitlements "$project_dir/Resources/PythonRuntime.entitlements")
+            ;;
+        esac
+        codesign --force --sign "$identity" --options runtime --timestamp "${entitlements_arg[@]}" "$f"
+      fi
+    done
+  fi
+
+  codesign --force --sign "$identity" --options runtime --timestamp "$resources_dir/opentype-sidecar"
+
+  codesign \
+    --force \
+    --sign "$identity" \
+    --options runtime \
+    --timestamp \
+    --entitlements "$project_dir/Resources/OpenType.entitlements" \
+    --requirements '=designated => identifier "ai.rain.opentype"' \
+    "$app_dir"
+
+  echo "submitting to Apple notary service (profile: $notary_profile)..."
+  notarize_zip="$project_dir/dist/OpenType-notarize.zip"
+  rm -f "$notarize_zip"
+  ditto -c -k --keepParent "$app_dir" "$notarize_zip"
+  xcrun notarytool submit "$notarize_zip" --keychain-profile "$notary_profile" --wait
+  rm -f "$notarize_zip"
+
+  echo "stapling notarization ticket..."
+  xcrun stapler staple "$app_dir"
+
+  echo "verifying..."
+  spctl --assess --type execute -vv "$app_dir"
+  codesign --verify --deep --strict --verbose=2 "$app_dir"
+else
+  # Sign the sidecar binary on its own -- see the note above on why --deep
+  # on the outer app corrupts a `bun build --compile` binary's signature.
+  codesign --force --sign - "$resources_dir/opentype-sidecar"
+
+  # Keep a stable designated requirement across local ad-hoc builds. Without
+  # an explicit requirement, macOS may bind TCC permissions to a changing
+  # code hash and ask for Microphone / Accessibility access again after
+  # every rebuild.
+  codesign \
+    --force \
+    --sign - \
+    --requirements '=designated => identifier "ai.rain.opentype"' \
+    "$app_dir"
+fi
+
 echo "$app_dir"

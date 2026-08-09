@@ -168,6 +168,10 @@ enum ProcessingState: Equatable {
     case inserting
     case success
     case copied
+    /// A non-blocking acknowledgment that an Agent-mode task was handed off
+    /// to the detached `/agent/run` call — distinct from `.success`/`.copied`
+    /// because nothing has actually finished yet. See `AppModel.dispatchAgentRun`.
+    case dispatched(String)
     case cancelled(String)
     case failure(String)
 
@@ -181,6 +185,7 @@ enum ProcessingState: Equatable {
         case .inserting: return OpenTypeL10n.text("正在写入", english: "Inserting")
         case .success: return OpenTypeL10n.text("完成", english: "Done")
         case .copied: return OpenTypeL10n.text("已复制", english: "Copied")
+        case .dispatched: return OpenTypeL10n.text("已下发", english: "Dispatched")
         case .cancelled: return OpenTypeL10n.text("未执行", english: "Not run")
         case .failure: return OpenTypeL10n.text("出现问题", english: "Something went wrong")
         }
@@ -196,6 +201,7 @@ enum ProcessingState: Equatable {
         case .inserting: return "text.cursor"
         case .success: return "circle.fill"
         case .copied: return "doc.on.clipboard.fill"
+        case .dispatched: return "paperplane.fill"
         case .cancelled: return "circle.slash"
         case .failure: return "exclamationmark.triangle.fill"
         }
@@ -203,6 +209,8 @@ enum ProcessingState: Equatable {
 
     func overlayDetail(for mode: InputMode) -> String {
         switch self {
+        case .dispatched(let message):
+            return message
         case .cancelled(let message):
             return message
         case .failure(let message):

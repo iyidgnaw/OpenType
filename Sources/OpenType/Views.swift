@@ -38,6 +38,13 @@ private extension View {
     }
 }
 
+/// Content of the real, resizable app window (Part A of the menubar split):
+/// mode switching lives in the compact `MenuBarPopoverView` popover instead,
+/// so everything here — Home's setup/last-result cards, History, and all of
+/// Settings (provider vault, Memory panel, Agent Task List) — is what the
+/// product owner asked to keep out of the menubar. Opened via the popover's
+/// gear button or `AppModel.openMainWindow()`/`focusAgentRun(_:)`, hosted by
+/// `MainWindowController` (`OpenTypeApp.swift`).
 struct RootView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
@@ -69,7 +76,14 @@ struct RootView: View {
 
             TabBar(model: model)
         }
-        .frame(width: 424, height: 568)
+        .frame(
+            minWidth: 420,
+            idealWidth: 460,
+            maxWidth: .infinity,
+            minHeight: 480,
+            idealHeight: 600,
+            maxHeight: .infinity
+        )
         .background {
             ZStack {
                 Color(nsColor: .windowBackgroundColor)
@@ -241,6 +255,8 @@ private struct ShortcutHero: View {
             return gestureHint
         case .copied:
             return OpenTypeL10n.text("已复制到剪贴板，按 ⌘V 即可粘贴", english: "Copied. Press ⌘V to paste")
+        case .dispatched(let message):
+            return message
         case .cancelled(let message):
             return message
         case .listening:
@@ -285,7 +301,7 @@ private struct ShortcutHero: View {
     }
 }
 
-private struct ModeGrid: View {
+struct ModeGrid: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
 
@@ -703,6 +719,7 @@ private struct SettingsView: View {
     @State private var showingAgentMemoryResetConfirmation = false
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 SettingsSection("外观") {
@@ -1388,6 +1405,23 @@ private struct SettingsView: View {
         } message: {
             Text("本地任务记录和系统推断会被移除；你在“关于我”中手动填写的内容会保留。此操作不可撤销，建议先保存重要信息。")
         }
+        .onChange(of: model.focusedAgentRunID) { newValue in
+            // Scroll the Task List panel to a run focused by a tapped
+            // "Agent finished" notification (`AppModel.focusAgentRun(_:)`),
+            // then clear the highlight after a moment so it reads as a
+            // transient pointer rather than a sticky selection.
+            guard let newValue else { return }
+            withAnimation {
+                proxy.scrollTo(newValue, anchor: .top)
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if model.focusedAgentRunID == newValue {
+                    model.focusedAgentRunID = nil
+                }
+            }
+        }
+        }
     }
 
     @ViewBuilder
@@ -1716,59 +1750,176 @@ private struct MemoryPanelView: View {
     }()
 }
 
-/// Minimal display of the most recent `agent` mode run's
-/// step-by-step log (`AppModel.lastAgentRunSteps`), returned all at once by
-/// the sidecar's `POST /agent/run` after it finishes — there is no
-/// real-time streaming yet, and only one run's worth of history is kept
-/// (no multi-run queue), so this simply observes the published property
-/// rather than fetching anything itself.
+/// History of recent Agent (`/agent/run`) dispatches (`AppModel.agentRuns`,
+/// most recent first, capped — see `AgentRunTracking.swift`). Each run
+/// dispatches non-blockingly (`AppModel.dispatchAgentRun`) and updates in
+/// place here as it progresses from `.running` to `.completed`/`.failed`, so
+/// unlike the old single-run log this reflects live state for tasks still in
+/// flight, not just a snapshot taken once a run finishes.
 private struct AgentTaskLogView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(OpenTypeL10n.text(
-                "最近一次 Agent (Sidecar) 任务的执行步骤，任务完成后一次性显示，仅供查看。",
-                english: "Step-by-step log of the most recent Agent (Sidecar) run, shown all at once when it finishes. Read-only."
+                "最近下发给 Agent (Sidecar) 的任务，包含仍在运行、已完成和失败的任务，仅供查看。",
+                english: "Recent tasks dispatched to the Agent (Sidecar), including still-running, completed, and failed runs. Read-only."
             ))
             .font(.system(size: 9.5))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-            if model.lastAgentRunSteps.isEmpty {
+            if model.agentRuns.isEmpty {
                 Text(OpenTypeL10n.text("暂无 Agent 任务", english: "No agent runs yet"))
                     .font(.system(size: 9.5))
                     .foregroundStyle(.secondary)
             } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(model.lastAgentRunSteps.enumerated()), id: \.offset) { _, step in
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: Self.symbol(for: step.type))
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Self.color(for: step.type))
-                                .frame(width: 14)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(Self.label(for: step.type))
-                                    .font(.system(size: 8.8, weight: .semibold))
-                                    .foregroundStyle(Self.color(for: step.type))
-                                Text(step.detail)
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.primary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            Color.primary.opacity(0.028),
-                            in: RoundedRectangle(cornerRadius: 8)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(model.agentRuns) { run in
+                        AgentRunRow(
+                            run: run,
+                            isFocused: model.focusedAgentRunID == run.id
                         )
+                        .id(run.id)
                     }
                 }
             }
         }
     }
+}
+
+/// A single row in `AgentTaskLogView`: the task text, a status badge
+/// (running / done / failed), the result or error once available, and an
+/// optional expandable step-by-step log (same step rendering the old
+/// single-run view had, just per-row now).
+private struct AgentRunRow: View {
+    let run: AgentRunRecord
+    let isFocused: Bool
+    @State private var stepsExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(run.task)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(2)
+                    Text(Self.dateFormatter.string(from: run.dispatchedAt))
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 6)
+                statusBadge
+            }
+
+            switch run.status {
+            case .running:
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text(OpenTypeL10n.text("运行中…", english: "Running…"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                }
+            case .completed(let result):
+                Text(result)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.primary)
+                    .lineLimit(stepsExpanded ? nil : 3)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .failed(let message):
+                Text(message)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !run.steps.isEmpty {
+                Button {
+                    stepsExpanded.toggle()
+                } label: {
+                    Text(stepsExpanded
+                        ? OpenTypeL10n.text("收起步骤", english: "Hide steps")
+                        : OpenTypeL10n.text("查看步骤（\(run.steps.count)）", english: "View steps (\(run.steps.count))"))
+                        .font(.system(size: 8.8, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+
+                if stepsExpanded {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(Array(run.steps.enumerated()), id: \.offset) { _, step in
+                            HStack(alignment: .top, spacing: 7) {
+                                Image(systemName: Self.symbol(for: step.type))
+                                    .font(.system(size: 9.5, weight: .semibold))
+                                    .foregroundStyle(Self.color(for: step.type))
+                                    .frame(width: 13)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(Self.label(for: step.type))
+                                        .font(.system(size: 8.3, weight: .semibold))
+                                        .foregroundStyle(Self.color(for: step.type))
+                                    Text(step.detail)
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.primary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+            }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isFocused ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.028),
+            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(
+                    isFocused ? Color.accentColor.opacity(0.55) : .clear,
+                    lineWidth: 1.2
+                )
+        )
+    }
+
+    private var statusBadge: some View {
+        let (text, symbol, color): (String, String, Color) = {
+            switch run.status {
+            case .running:
+                return (
+                    OpenTypeL10n.text("运行中", english: "Running"),
+                    "circle.dotted",
+                    .secondary
+                )
+            case .completed:
+                return (
+                    OpenTypeL10n.text("完成", english: "Done"),
+                    "checkmark.circle.fill",
+                    .green
+                )
+            case .failed:
+                return (
+                    OpenTypeL10n.text("失败", english: "Failed"),
+                    "exclamationmark.triangle.fill",
+                    .red
+                )
+            }
+        }()
+        return Label(text, systemImage: symbol)
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(color)
+            .labelStyle(.titleAndIcon)
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     private static func symbol(for stepType: String) -> String {
         switch stepType {

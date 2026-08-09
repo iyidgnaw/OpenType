@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UserNotifications
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -21,7 +22,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var configuredProviders: Set<AIProvider> = []
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
-    @Published private(set) var lastAgentRunSteps: [AgentStepSummary] = []
+    /// Bounded history of recent Agent (`/agent/run`) dispatches, most recent
+    /// first — see `AgentRunTracking.swift`. Replaces the old
+    /// `lastAgentRunSteps` (singular, overwritten every run) now that Agent
+    /// dispatch is non-blocking and multiple runs can be in flight or queued
+    /// up in history at once.
+    @Published private(set) var agentRuns: [AgentRunRecord] = []
+    /// Count of `agentRuns` still `.running` — backs the lightweight menubar
+    /// badge (`MenuBarStatusIcon`). Recomputed alongside every `agentRuns`
+    /// mutation rather than as a computed property so the menubar icon's
+    /// Combine pipeline (`OpenTypeApp.observeStatusPresentation`) has a
+    /// `@Published` value of its own to subscribe to.
+    @Published private(set) var runningAgentRunCount = 0
+    /// Set when a completion notification is tapped (or the Task List's own
+    /// "N running" affordance is used) so the app window's Task List panel
+    /// can scroll to and briefly highlight that specific run.
+    @Published var focusedAgentRunID: UUID?
     @Published var selectedTab: AppTab = .home
     /// Drives the floating Ask/Agent popup (`AskPanelController`). `nil`
     /// hides it; non-nil shows it; `answer == nil` is the "thinking" state.
@@ -59,6 +75,23 @@ final class AppModel: ObservableObject {
     private var didStart = false
     private var isHotKeyHeld = false
     private var isStartingRecording = false
+    /// Detached, un-awaited units of work for in-flight `/agent/run` calls,
+    /// keyed by `AgentRunRecord.id`. Deliberately not awaited by
+    /// `process(audioURL:)` — see `dispatchAgentRun(...)` — so a slow Agent
+    /// task never keeps the app's general recording pipeline busy. Entries
+    /// are removed once their run finishes (success or failure); nothing
+    /// currently cancels them early (e.g. on quit), matching the sidecar's
+    /// own agent loop continuing server-side regardless of whether the Swift
+    /// side is still listening for the HTTP response.
+    private var runningAgentTasks: [UUID: Task<Void, Never>] = [:]
+    private let agentNotificationDelegate = AgentNotificationDelegate()
+
+    /// Set by `OpenTypeAppDelegate` once the main app window controller
+    /// exists (Part A). Lets both the menubar popover's gear button and
+    /// `focusAgentRun(_:)` (a tapped Agent-completion notification) open the
+    /// same real, resizable window without `AppModel` owning any AppKit
+    /// window/view-controller state itself.
+    var onOpenMainWindowRequested: (() -> Void)?
 
     var accessibilityGranted: Bool {
         contextBridge.accessibilityGranted
@@ -111,6 +144,19 @@ final class AppModel: ObservableObject {
         }
         liveSpeechTranscriber.onAudioLevel = { [weak self] level in
             self?.overlay.updateAudioLevel(level)
+        }
+        agentNotificationDelegate.onAgentRunTapped = { [weak self] runID in
+            self?.focusAgentRun(runID)
+        }
+        UNUserNotificationCenter.current().delegate = agentNotificationDelegate
+        UNUserNotificationCenter.current().requestAuthorization(
+            options: [.alert, .sound]
+        ) { _, _ in
+            // Best-effort: an Agent-completion notification is a convenience
+            // on top of the in-app Task List panel and the always-updated
+            // menubar badge, not the only way to learn a run finished, so a
+            // denied/failed authorization is silently ignored rather than
+            // surfaced as an error anywhere.
         }
         loadCredential()
         start()
@@ -500,6 +546,23 @@ final class AppModel: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
+    /// Opens the real, resizable app window (Part A) — settings, Memory
+    /// panel, and Agent history all live there now, not in the menubar
+    /// popover. Called from the popover's gear button.
+    func openMainWindow() {
+        onOpenMainWindowRequested?()
+    }
+
+    /// Opens the main app window, switches to the Settings tab (where the
+    /// Task List panel lives), and marks `runID` to be scrolled to and
+    /// briefly highlighted — the target of a tapped "Agent finished"
+    /// notification (`AgentNotificationDelegate.onAgentRunTapped`).
+    func focusAgentRun(_ runID: UUID) {
+        focusedAgentRunID = runID
+        selectedTab = .settings
+        openMainWindow()
+    }
+
     /// Explicit dismissal entry point for the Ask/Agent popup, in addition to
     /// the panel's own close button / Escape / click-outside handling.
     func dismissAskPanel() {
@@ -759,11 +822,15 @@ final class AppModel: ObservableObject {
             lastTranscript = transcript
 
             setState(.transforming)
-            let result: String
+            // Optional rather than `String`: the `.agent` branch below never
+            // has a result at this point (it dispatches a detached run and
+            // returns before anything below this switch runs) — see the
+            // `guard let result else { ... return }` immediately after.
+            let result: String?
             switch mode {
             case .transcribe:
                 // Pure ASR passthrough: no sidecar/LLM call at all, and no
-                // Ask/Agent popup — the transcript itself is the result.
+                // Ask popup — the transcript itself is the result.
                 result = transcript
             case .ask:
                 effectiveTextModel = Self.sidecarTextModel
@@ -783,29 +850,43 @@ final class AppModel: ObservableObject {
                     )
                 }
             case .agent:
+                // Non-blocking dispatch (see `dispatchAgentRun` below): the
+                // `/agent/run` call runs as an independent, detached `Task`
+                // that is never awaited here, so a slow multi-step Agent
+                // loop can't hold the app's general recording pipeline busy.
+                // No Ask/Agent popup either — completion is surfaced later
+                // via a `UNUserNotification` plus the Task List panel in the
+                // main app window (Part A), not a panel the user waits in
+                // front of.
                 effectiveTextModel = Self.sidecarTextModel
-                lastAgentRunSteps = []
-                askPanelState = AskPanelState(kind: .agent, query: transcript, answer: nil)
-                do {
-                    let response: AgentRunResponseBody = try await sidecarClient.request(
-                        method: "POST",
-                        path: "/agent/run",
-                        body: AgentRunRequestBody(
-                            task: transcript,
-                            context: capturedContext.selectedText
-                        )
-                    )
-                    lastAgentRunSteps = response.steps
-                    result = response.result
-                    askPanelState?.answer = result
-                } catch {
-                    askPanelState = nil
-                    throw OpenTypeError.service(
-                        "Agent 请求失败：\(error.localizedDescription)"
-                    )
-                }
+                dispatchAgentRun(
+                    transcript: transcript,
+                    context: capturedContext,
+                    practice: practice,
+                    requestID: auditRequestID,
+                    serviceSelection: serviceSelection
+                )
+                result = nil
             }
             try Task.checkCancellation()
+
+            guard let result else {
+                // `.agent` took the dispatch-and-return path above: give a
+                // brief, transient "dispatched" acknowledgement (the same
+                // sound-cue/overlay pattern every other mode uses for its own
+                // completion signal) and let `state` fall back to idle right
+                // away, rather than staying "busy" for the run's whole
+                // duration. `defer` above still fires normally, so the audio
+                // file is cleaned up and `activeMode`/`isPracticeSession`
+                // reset exactly as any other completed dispatch would.
+                playFeedbackSound(.done)
+                let dispatchedState = ProcessingState.dispatched(
+                    OpenTypeL10n.text("已下发给 Agent", english: "Dispatched to Agent")
+                )
+                setState(dispatchedState)
+                scheduleIdle(after: dispatchedState)
+                return
+            }
 
             lastResult = result
             lastApplication = capturedContext.applicationName
@@ -913,6 +994,187 @@ final class AppModel: ObservableObject {
             )
             fail(error)
         }
+    }
+
+    /// Kicks off an Agent-mode task as an independent, detached unit of work
+    /// and returns immediately — the "non-blocking dispatch" half of the
+    /// Agent redesign. Records a `.running` `AgentRunRecord` right away (so
+    /// the Task List panel and menubar badge reflect it instantly) and hands
+    /// the actual `/agent/run` HTTP call off to `runAgentDispatch`, tracked
+    /// in `runningAgentTasks` but never awaited by `process(audioURL:)`.
+    /// This is what lets a second recording — including a second Agent task
+    /// — start immediately without waiting for this one to finish.
+    private func dispatchAgentRun(
+        transcript: String,
+        context: CapturedContext,
+        practice: Bool,
+        requestID: UUID,
+        serviceSelection: AIServiceSelection
+    ) {
+        let record = AgentRunRecord(
+            task: transcript,
+            applicationName: context.applicationName,
+            contextPreview: context.selectedText.map { String($0.prefix(240)) }
+        )
+        agentRuns = AgentRunHistory.inserting(record, into: agentRuns)
+        runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
+
+        let runID = record.id
+        runningAgentTasks[runID] = Task { [weak self] in
+            await self?.runAgentDispatch(
+                runID: runID,
+                transcript: transcript,
+                context: context,
+                practice: practice,
+                requestID: requestID,
+                serviceSelection: serviceSelection
+            )
+        }
+    }
+
+    /// The detached unit of work started by `dispatchAgentRun`: issues the
+    /// (potentially long-running, multi-step) `/agent/run` call, then updates
+    /// `agentRuns` in place, records history/memory, and fires the
+    /// completion notification — all independent of whatever `state`/mode
+    /// the app has moved on to in the meantime. Deliberately does **not**
+    /// call `contextBridge.insert(...)`: by the time a run this long
+    /// finishes, the focused text field the user had in mind when they spoke
+    /// the task may no longer be focused (or may not even exist anymore), so
+    /// auto-typing into "whatever is focused now" would be surprising at
+    /// best. The result is always copied to the clipboard and surfaced via
+    /// notification + Task List instead, consistent with Agent results being
+    /// drafts the user reviews, never something auto-inserted unattended.
+    private func runAgentDispatch(
+        runID: UUID,
+        transcript: String,
+        context: CapturedContext,
+        practice: Bool,
+        requestID: UUID,
+        serviceSelection: AIServiceSelection
+    ) async {
+        defer { runningAgentTasks[runID] = nil }
+
+        do {
+            let response: AgentRunResponseBody = try await sidecarClient.request(
+                method: "POST",
+                path: "/agent/run",
+                body: AgentRunRequestBody(
+                    task: transcript,
+                    context: context.selectedText
+                )
+            )
+
+            agentRuns = AgentRunHistory.updating(id: runID, in: agentRuns) { record in
+                record.steps = response.steps
+                record.status = .completed(response.result)
+                record.completedAt = Date()
+            }
+            runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
+
+            try? auditStore.append(
+                ImmutableAuditEvent(
+                    requestId: requestID,
+                    status: .completed,
+                    mode: .agent,
+                    rawTranscript: transcript,
+                    effectiveInput: transcript,
+                    selectedContext: context.selectedText,
+                    result: response.result,
+                    provider: serviceSelection.textProvider.rawValue,
+                    model: Self.sidecarTextModel,
+                    error: nil
+                )
+            )
+
+            lastResult = response.result
+            lastApplication = context.applicationName
+            lastResultWasPractice = practice
+
+            if configuration.agentMemoryEnabled, !practice {
+                agentMemory.record(
+                    MemoryEvent(
+                        mode: .agent,
+                        applicationName: context.applicationName,
+                        bundleIdentifier: context.bundleIdentifier,
+                        rawTranscript: transcript,
+                        effectiveInput: transcript,
+                        selectedContext: context.selectedText,
+                        result: response.result
+                    )
+                )
+                agentMemory.refreshOwnerProfileIfNeeded(
+                    enabled: configuration.automaticOwnerProfileUpdates,
+                    personalDictionary: configuration.personalDictionary
+                )
+            }
+            if configuration.keepHistory, !practice {
+                history.add(
+                    HistoryEntry(
+                        mode: .agent,
+                        applicationName: context.applicationName,
+                        transcript: transcript,
+                        result: response.result,
+                        contextPreview: context.selectedText.map {
+                            String($0.prefix(240))
+                        }
+                    )
+                )
+            }
+
+            contextBridge.copyToClipboard(response.result)
+        } catch {
+            let message = ErrorMessagePresenter.message(for: error)
+            agentRuns = AgentRunHistory.updating(id: runID, in: agentRuns) { record in
+                record.status = .failed(message)
+                record.completedAt = Date()
+            }
+            runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
+
+            try? auditStore.append(
+                ImmutableAuditEvent(
+                    requestId: requestID,
+                    status: .failed,
+                    mode: .agent,
+                    rawTranscript: transcript,
+                    effectiveInput: transcript,
+                    selectedContext: context.selectedText,
+                    result: nil,
+                    provider: serviceSelection.textProvider.rawValue,
+                    model: Self.sidecarTextModel,
+                    error: message
+                )
+            )
+        }
+
+        if let record = agentRuns.first(where: { $0.id == runID }) {
+            postAgentCompletionNotification(record)
+        }
+    }
+
+    /// Fires the "Agent finished" `UNUserNotification` for a just-completed
+    /// or just-failed run. Tapping it routes through
+    /// `AgentNotificationDelegate.onAgentRunTapped` -> `focusAgentRun(_:)`.
+    private func postAgentCompletionNotification(_ record: AgentRunRecord) {
+        let content = UNMutableNotificationContent()
+        switch record.status {
+        case .completed(let result):
+            content.title = OpenTypeL10n.text("Agent 完成任务", english: "Agent finished the task")
+            content.body = String(result.prefix(140))
+        case .failed(let message):
+            content.title = OpenTypeL10n.text("Agent 任务失败", english: "Agent task failed")
+            content.body = String(message.prefix(140))
+        case .running:
+            return
+        }
+        content.sound = .default
+        content.userInfo = ["agentRunID": record.id.uuidString]
+
+        let request = UNNotificationRequest(
+            identifier: record.id.uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     private func scheduleIdle(after completionState: ProcessingState) {

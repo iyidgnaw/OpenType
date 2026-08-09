@@ -21,12 +21,23 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     private var statusItem: NSStatusItem?
     private var cancellables = Set<AnyCancellable>()
     private var didFinishLaunching = false
+    /// The real, resizable app window from Part A of the menubar split
+    /// (settings/History/Memory/Agent Task List — everything that's not
+    /// mode-switching). Created lazily on first request rather than at
+    /// launch, and kept around (not released on close) so re-opening it
+    /// doesn't lose SwiftUI state like scroll position or an in-progress
+    /// Settings edit.
+    private var mainWindowController: MainWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         configurePopover()
         configureStatusItem()
         observeStatusPresentation()
+
+        model.onOpenMainWindowRequested = { [weak self] in
+            self?.showMainWindow()
+        }
 
         model.start()
         model.refreshPermissionStatus()
@@ -101,36 +112,57 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         )
     }
 
+    /// Alfred-style split (Part A): the popover is now just the compact mode
+    /// switcher (`MenuBarPopoverView`), not the full-featured `RootView` it
+    /// used to host. Settings/History/Memory/Agent history all moved to
+    /// `mainWindowController`'s real window instead, opened from this view's
+    /// gear button.
     private func configurePopover() {
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 424, height: 568)
+        popover.contentSize = NSSize(width: 264, height: 246)
         popover.delegate = self
         popover.contentViewController = NSHostingController(
-            rootView: RootView(model: model)
+            rootView: MenuBarPopoverView(model: model) { [weak self] in
+                self?.showMainWindow()
+                self?.popover.performClose(nil)
+            }
         )
     }
 
+    private func showMainWindow() {
+        let controller = mainWindowController ?? MainWindowController(model: model)
+        mainWindowController = controller
+        controller.show()
+    }
+
     private func observeStatusPresentation() {
-        Publishers.CombineLatest(
+        Publishers.CombineLatest3(
             model.$state.removeDuplicates(),
-            model.configuration.$colorTheme.removeDuplicates()
+            model.configuration.$colorTheme.removeDuplicates(),
+            model.$runningAgentRunCount.removeDuplicates()
         )
             .receive(on: RunLoop.main)
-            .sink { [weak self] state, colorTheme in
-                self?.updateStatusIcon(for: state, colorTheme: colorTheme)
+            .sink { [weak self] state, colorTheme, runningAgentCount in
+                self?.updateStatusIcon(
+                    for: state,
+                    colorTheme: colorTheme,
+                    runningAgentCount: runningAgentCount
+                )
             }
             .store(in: &cancellables)
     }
 
     private func updateStatusIcon(
         for state: ProcessingState,
-        colorTheme: AppColorTheme
+        colorTheme: AppColorTheme,
+        runningAgentCount: Int = 0
     ) {
         guard let button = statusItem?.button else { return }
         button.image = MenuBarStatusIcon.image(
             for: state,
-            colorTheme: colorTheme
+            colorTheme: colorTheme,
+            runningAgentCount: runningAgentCount
         )
     }
 
@@ -156,10 +188,49 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     }
 }
 
+/// The real, resizable app window from Part A of the Alfred-style menubar
+/// split. Distinct from `OverlayController`/`AskPanelController`'s borderless
+/// `.nonactivatingPanel`s (transient HUD-style feedback) — this is a normal
+/// titled window with standard close/miniaturize/resize chrome, since it
+/// hosts content (Settings, History, Memory panel, Agent Task List) the user
+/// is meant to sit in front of and interact with at length, not glance at
+/// and dismiss. OpenType stays an accessory app (no Dock icon) throughout;
+/// showing this window doesn't change that.
+@MainActor
+final class MainWindowController: NSWindowController {
+    init(model: AppModel) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "OpenType"
+        window.minSize = NSSize(width: 420, height: 480)
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.contentViewController = NSHostingController(
+            rootView: RootView(model: model)
+        )
+        super.init(window: window)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func show() {
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
 enum MenuBarStatusIcon {
     static func image(
         for state: ProcessingState,
-        colorTheme: AppColorTheme = .ocean
+        colorTheme: AppColorTheme = .ocean,
+        runningAgentCount: Int = 0
     ) -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let pixelWidth = 36
@@ -183,6 +254,9 @@ enum MenuBarStatusIcon {
         NSGraphicsContext.current = context
         context.imageInterpolation = .high
         drawPixels(for: state, colorTheme: colorTheme)
+        if runningAgentCount > 0 {
+            drawRunningAgentBadge(count: runningAgentCount)
+        }
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
 
@@ -230,7 +304,41 @@ enum MenuBarStatusIcon {
         }
     }
 
-    private static func backgroundColor(
+    /// Lightweight "N Agent tasks running" indicator (Part B, requirement 3):
+    /// a small filled dot in the icon's top-right corner, with the count
+    /// inside once it's more than a single task. Deliberately minimal —
+    /// this is meant to be glanceable, not a second status surface; the real
+    /// detail lives in the Task List panel (`AgentTaskLogView`) in the main
+    /// app window.
+    private static func drawRunningAgentBadge(count: Int) {
+        let badgeDiameter: CGFloat = 15
+        let badgeRect = NSRect(
+            x: 36 - badgeDiameter - 1,
+            y: 36 - badgeDiameter - 1,
+            width: badgeDiameter,
+            height: badgeDiameter
+        )
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: badgeRect.insetBy(dx: -1.4, dy: -1.4)).fill()
+        NSColor.systemBlue.setFill()
+        NSBezierPath(ovalIn: badgeRect).fill()
+
+        let text = count > 9 ? "9+" : "\(count)"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 9.5, weight: .bold),
+            .foregroundColor: NSColor.white
+        ]
+        let attributedText = NSAttributedString(string: text, attributes: attributes)
+        let textSize = attributedText.size()
+        attributedText.draw(
+            at: NSPoint(
+                x: badgeRect.midX - textSize.width / 2,
+                y: badgeRect.midY - textSize.height / 2
+            )
+        )
+    }
+
+    static func backgroundColor(
         for state: ProcessingState,
         colorTheme: AppColorTheme
     ) -> NSColor {

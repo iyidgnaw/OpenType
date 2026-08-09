@@ -203,6 +203,18 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(state.overlayDetail(for: .ask), message)
     }
 
+    func testDispatchedStateShowsTheAcknowledgementMessageAndIsNotBusy() {
+        // Part B: Agent-mode dispatch is a transient, non-blocking
+        // acknowledgement — distinct from `.success`/`.copied` because
+        // nothing has actually finished when it's shown.
+        let message = "已下发给 Agent"
+        let state = ProcessingState.dispatched(message)
+
+        XCTAssertEqual(state.title, "已下发")
+        XCTAssertEqual(state.symbol, "paperplane.fill")
+        XCTAssertEqual(state.overlayDetail(for: .agent), message)
+    }
+
     func testEveryModeKeepsItsResultOnTheClipboard() {
         for mode in InputMode.allCases {
             XCTAssertTrue(
@@ -1126,6 +1138,81 @@ final class OpenTypeTests: XCTestCase {
             // Also acceptable: the request itself fails once the process
             // and its socket are gone.
         }
+    }
+
+    // MARK: - Agent run history (Part B: non-blocking Agent dispatch)
+
+    func testAgentRunHistoryInsertsNewestFirst() {
+        let older = AgentRunRecord(task: "older", applicationName: "Notes", contextPreview: nil)
+        let newer = AgentRunRecord(task: "newer", applicationName: "Notes", contextPreview: nil)
+
+        let history = AgentRunHistory.inserting(
+            newer,
+            into: AgentRunHistory.inserting(older, into: [])
+        )
+
+        XCTAssertEqual(history.map(\.task), ["newer", "older"])
+    }
+
+    func testAgentRunHistoryCapsAtCapacityByEvictingOldest() {
+        var history: [AgentRunRecord] = []
+        for index in 0..<(AgentRunHistory.capacity + 5) {
+            history = AgentRunHistory.inserting(
+                AgentRunRecord(task: "task-\(index)", applicationName: "Notes", contextPreview: nil),
+                into: history
+            )
+        }
+
+        XCTAssertEqual(history.count, AgentRunHistory.capacity)
+        // Most recent run (last inserted) stays at the front...
+        XCTAssertEqual(history.first?.task, "task-\(AgentRunHistory.capacity + 4)")
+        // ...and the oldest 5 runs were evicted rather than the newest.
+        XCTAssertFalse(history.contains { $0.task == "task-0" })
+        XCTAssertTrue(history.contains { $0.task == "task-5" })
+    }
+
+    func testAgentRunHistoryUpdatingMutatesOnlyTheMatchingRecordInPlace() {
+        let target = AgentRunRecord(task: "target", applicationName: "Notes", contextPreview: nil)
+        let other = AgentRunRecord(task: "other", applicationName: "Notes", contextPreview: nil)
+        let history = AgentRunHistory.inserting(
+            other,
+            into: AgentRunHistory.inserting(target, into: [])
+        )
+
+        let updated = AgentRunHistory.updating(id: target.id, in: history) { record in
+            record.status = .completed("done")
+            record.steps = [AgentStepSummary(type: "done", detail: "finished")]
+        }
+
+        XCTAssertEqual(updated.first(where: { $0.id == target.id })?.status, .completed("done"))
+        XCTAssertEqual(updated.first(where: { $0.id == other.id })?.status, .running)
+        // Order is preserved, not re-sorted by the update.
+        XCTAssertEqual(updated.map(\.id), history.map(\.id))
+    }
+
+    func testAgentRunHistoryUpdatingIsANoOpForAnUnknownID() {
+        let record = AgentRunRecord(task: "task", applicationName: "Notes", contextPreview: nil)
+        let history = AgentRunHistory.inserting(record, into: [])
+
+        let updated = AgentRunHistory.updating(id: UUID(), in: history) { record in
+            record.status = .failed("should not apply")
+        }
+
+        XCTAssertEqual(updated, history)
+    }
+
+    func testAgentRunHistoryRunningCountOnlyCountsInFlightRuns() {
+        let running = AgentRunRecord(task: "running", applicationName: "Notes", contextPreview: nil)
+        var completed = AgentRunRecord(task: "completed", applicationName: "Notes", contextPreview: nil)
+        completed.status = .completed("ok")
+        var failed = AgentRunRecord(task: "failed", applicationName: "Notes", contextPreview: nil)
+        failed.status = .failed("nope")
+
+        XCTAssertEqual(
+            AgentRunHistory.runningCount(in: [running, completed, failed]),
+            1
+        )
+        XCTAssertEqual(AgentRunHistory.runningCount(in: [completed, failed]), 0)
     }
 
 }

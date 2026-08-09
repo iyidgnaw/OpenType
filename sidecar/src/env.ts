@@ -5,6 +5,13 @@ export interface SidecarEnv {
   deepSeekBaseUrl: string;
   dbPath: string;
   contextLogPath: string;
+  whisperSocketPath: string;
+  /** Overrides `WhisperClient`'s default relative `whisper-env/bin/python3`;
+   *  unset in dev mode, set to an absolute bundled path by the packaged app. */
+  whisperPythonBin?: string;
+  /** Overrides `WhisperClient`'s default relative `whisper/serve.py`;
+   *  unset in dev mode, set to an absolute bundled path by the packaged app. */
+  whisperScriptPath?: string;
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
@@ -21,6 +28,33 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
   // `OPENTYPE_SIDECAR_SOCKET`/`OPENTYPE_SIDECAR_DB_PATH` for real app runs.
   const contextLogPath =
     source.OPENTYPE_CONTEXT_LOG_PATH ?? "sidecar/.data/context-debug.log";
+  // Unix socket the local MLX-Whisper python server (sidecar/whisper/serve.py,
+  // managed by `asr/whisperClient.ts`) listens on. Same
+  // env-var-override-with-dev-default convention as the other paths above;
+  // `SidecarClient.swift` sets this alongside `OPENTYPE_SIDECAR_SOCKET` for
+  // real app runs, next to the sidecar's own socket.
+  const whisperSocketPath =
+    source.OPENTYPE_WHISPER_SOCKET ?? "sidecar/.data/whisper.sock";
+  // Bundled-app packaging: `build-app.sh` copies `sidecar/whisper-env/` and
+  // `sidecar/whisper/` into the app's Resources directory, and
+  // `SidecarClient.swift` points these at the copied, absolute paths for a
+  // packaged launch (a `bun build --compile` binary has no reliable way to
+  // find the original source checkout at an arbitrary launch-time cwd, same
+  // reasoning as `dbPath`/`contextLogPath` above). Left unset in dev mode,
+  // where `defaultWhisperClientFactories()`'s relative defaults
+  // ("whisper-env/bin/python3", "whisper/serve.py") are correct as-is.
+  const whisperPythonBin = source.OPENTYPE_WHISPER_PYTHON_BIN;
+  const whisperScriptPath = source.OPENTYPE_WHISPER_SCRIPT_PATH;
 
-  return { socketPath, deepSeekApiKey, deepSeekModel, deepSeekBaseUrl, dbPath, contextLogPath };
+  return {
+    socketPath,
+    deepSeekApiKey,
+    deepSeekModel,
+    deepSeekBaseUrl,
+    dbPath,
+    contextLogPath,
+    whisperSocketPath,
+    whisperPythonBin,
+    whisperScriptPath,
+  };
 }

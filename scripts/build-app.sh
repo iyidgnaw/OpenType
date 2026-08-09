@@ -41,6 +41,22 @@ chmod +x "$binary_dir/OpenType"
 cp "$project_dir/sidecar/dist/opentype-sidecar" "$resources_dir/opentype-sidecar"
 chmod +x "$resources_dir/opentype-sidecar"
 
+# Local MLX-Whisper ASR: bundle the python venv + server script so the
+# packaged sidecar binary can spawn it without depending on the source
+# checkout (SidecarClient.swift points OPENTYPE_WHISPER_PYTHON_BIN /
+# OPENTYPE_WHISPER_SCRIPT_PATH at these bundled, absolute copies -- see its
+# `bundledIsExecutable` branch). This makes the .app noticeably larger (the
+# venv includes mlx/torch/numpy and is several hundred MB) but keeps ASR
+# fully local with no separate install step.
+if [ -d "$project_dir/sidecar/whisper-env" ]; then
+  rm -rf "$resources_dir/whisper-env"
+  ditto "$project_dir/sidecar/whisper-env" "$resources_dir/whisper-env"
+else
+  echo "warning: sidecar/whisper-env/ not found -- packaged app's local ASR will not work. Run the Part 1 setup (python3 -m venv sidecar/whisper-env && sidecar/whisper-env/bin/pip install mlx-whisper) first." >&2
+fi
+rm -rf "$resources_dir/whisper"
+ditto "$project_dir/sidecar/whisper" "$resources_dir/whisper"
+
 # Sign the sidecar binary on its own, before it becomes part of the app
 # bundle's seal below. `bun build --compile` binaries have a non-standard
 # Mach-O shape (an appended module-graph trailer) that a later

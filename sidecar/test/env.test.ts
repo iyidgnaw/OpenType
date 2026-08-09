@@ -10,6 +10,7 @@ describe("loadEnv", () => {
     expect(env.deepSeekApiKey).toBe("");
     expect(env.dbPath).toBe("sidecar/.data/opentype.sqlite3");
     expect(env.contextLogPath).toBe("sidecar/.data/context-debug.log");
+    expect(env.whisperSocketPath).toBe("sidecar/.data/whisper.sock");
   });
 
   test("reads values from the provided source", () => {
@@ -20,6 +21,7 @@ describe("loadEnv", () => {
       DEEPSEEK_BASE_URL: "https://example.invalid",
       OPENTYPE_SIDECAR_DB_PATH: "/tmp/custom.sqlite3",
       OPENTYPE_CONTEXT_LOG_PATH: "/tmp/custom-context-debug.log",
+      OPENTYPE_WHISPER_SOCKET: "/tmp/custom-whisper.sock",
     });
     expect(env.socketPath).toBe("/tmp/custom.sock");
     expect(env.deepSeekApiKey).toBe("sk-test");
@@ -27,5 +29,6 @@ describe("loadEnv", () => {
     expect(env.deepSeekBaseUrl).toBe("https://example.invalid");
     expect(env.dbPath).toBe("/tmp/custom.sqlite3");
     expect(env.contextLogPath).toBe("/tmp/custom-context-debug.log");
+    expect(env.whisperSocketPath).toBe("/tmp/custom-whisper.sock");
   });
 });

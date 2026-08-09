@@ -601,8 +601,20 @@ final class AppModel: ObservableObject {
 
     /// Every mode now routes to the sidecar for its text generation, always
     /// using this fixed model, so audit events record it directly rather than
-    /// asking the (now ASR-only) `AIServiceClient` to resolve one.
+    /// asking `AIServiceClient` to resolve one. ASR also now runs locally via
+    /// the sidecar's MLX-Whisper process (see `transcribeLocally(audioURL:)`
+    /// below), so `AIServiceClient`/`client` is unused by the recording
+    /// pipeline entirely -- it's left in place (still backing
+    /// `cloudConnected`/onboarding UI) rather than excised, per product
+    /// direction to not expose cloud provider configuration right now but
+    /// without risking a wider UI rewrite of the onboarding flow tonight.
     private static let sidecarTextModel = "deepseek-v4-flash"
+
+    /// Request/response bodies for the sidecar's `/asr/transcribe` endpoint
+    /// (proxies to the local MLX-Whisper python process -- see
+    /// `sidecar/src/asr/whisperClient.ts`), used by `transcribeLocally(audioURL:)`.
+    private struct TranscribeRequestBody: Encodable { let audioBase64: String }
+    private struct TranscribeResponseBody: Decodable { let text: String }
 
     /// Request/response bodies for the sidecar's `/oneshot/ask` endpoint,
     /// used by the `ask` mode branch below.
@@ -652,6 +664,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Local ASR via the sidecar's `/asr/transcribe` endpoint, which proxies
+    /// to a persistent MLX-Whisper python process (`sidecar/whisper/serve.py`,
+    /// managed by `sidecar/src/asr/whisperClient.ts`). Replaces the previous
+    /// cloud-provider call (`AIServiceClient.transcribe`) as the ASR step
+    /// shared by all modes -- no credential/provider configuration required.
+    private func transcribeLocally(audioURL: URL) async throws -> String {
+        let audioData = try Data(contentsOf: audioURL)
+        guard !audioData.isEmpty else { throw OpenTypeError.emptyRecording }
+        let response: TranscribeResponseBody = try await sidecarClient.request(
+            method: "POST",
+            path: "/asr/transcribe",
+            body: TranscribeRequestBody(audioBase64: audioData.base64EncodedString())
+        )
+        let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw OpenTypeError.emptyRecording }
+        return text
+    }
+
     private func process(audioURL: URL) async {
         let startingMode = activeMode ?? configuration.selectedMode
         let practice = isPracticeSession
@@ -691,17 +721,9 @@ final class AppModel: ObservableObject {
             isPracticeSession = false
         }
 
-        guard let client else {
-            fail(OpenTypeError.missingCredential)
-            return
-        }
-
         do {
             setState(.transcribing)
-            let rawTranscript = try await client.transcribe(
-                audioURL: audioURL,
-                personalVocabulary: configuration.personalDictionary
-            )
+            let rawTranscript = try await transcribeLocally(audioURL: audioURL)
             try Task.checkCancellation()
             auditRawTranscript = rawTranscript
 

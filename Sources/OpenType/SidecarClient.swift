@@ -143,17 +143,36 @@ final class SidecarClient {
             .deletingLastPathComponent()
             .appendingPathComponent("context-debug.log")
             .path
+        // Same rationale as OPENTYPE_SIDECAR_DB_PATH above: the sidecar's own
+        // default for the local MLX-Whisper server's socket
+        // ("sidecar/.data/whisper.sock") is relative and assumes a `bun run`
+        // dev-mode cwd. Pin it to an absolute, writable path next to the
+        // sidecar's own socket for both launch modes.
+        environment["OPENTYPE_WHISPER_SOCKET"] = socketURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("whisper.sock")
+            .path
 
         let bundledBinaryPath = (Bundle.main.resourcePath ?? "")
             .appending("/opentype-sidecar")
         let bundledIsExecutable = FileManager.default.isExecutableFile(atPath: bundledBinaryPath)
         Self.debugLog("bundledBinaryPath=\(bundledBinaryPath) isExecutable=\(bundledIsExecutable) loadedEnvKeys=\(Self.loadBundledEnvironment().keys.sorted())")
         if bundledIsExecutable {
-            // Packaging work later tonight will produce this compiled
-            // binary; this branch isn't exercised yet but is the intended
-            // production path.
             process.executableURL = URL(fileURLWithPath: bundledBinaryPath)
             process.arguments = []
+            // `build-app.sh` copies `sidecar/whisper-env/` and
+            // `sidecar/whisper/` into Contents/Resources alongside the
+            // compiled `opentype-sidecar` binary itself -- the bundled
+            // binary has no reliable way to find the original source
+            // checkout at an arbitrary launch-time cwd (same reasoning as
+            // OPENTYPE_SIDECAR_DB_PATH above), so point it at the bundled,
+            // absolute copies instead of `WhisperClient`'s relative
+            // dev-mode defaults.
+            let resourcePath = Bundle.main.resourcePath ?? ""
+            environment["OPENTYPE_WHISPER_PYTHON_BIN"] = resourcePath
+                .appending("/whisper-env/bin/python3")
+            environment["OPENTYPE_WHISPER_SCRIPT_PATH"] = resourcePath
+                .appending("/whisper/serve.py")
         } else {
             // Dev-mode fallback: run the sidecar straight from TypeScript
             // source via `bun run`. There is no reliable way to find the

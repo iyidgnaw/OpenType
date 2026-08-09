@@ -98,9 +98,13 @@ in Settings and import/export-able as txt/csv/json
 
 ## Faithful transcription vs. generative rewrite: no formal mode split like OpenType's
 
-OpenTypeless has no analog to OpenType's `Shared/OpenTypeContract.json` 5-mode
-contract (`smartEdit`/`english`/`agent`/`xReply`/`transcribe`) with per-mode
-invariants. Instead it has one always-on "polish" system prompt
+OpenTypeless has no analog to what was, at the time this note was written,
+OpenType's `Shared/OpenTypeContract.json` 5-mode contract
+(`smartEdit`/`english`/`agent`/`xReply`/`transcribe`) with per-mode
+invariants — that contract and the iOS/Android platforms it coordinated have
+since been removed outright from OpenType (macOS-only now, 3 modes), so this
+comparison describes OpenType's past design, not its current one. Instead
+OpenTypeless has one always-on "polish" system prompt
 (`BASE_PROMPT` in `llm/prompt.rs`) that both cleans up disfluency/filler AND
 reformats into punctuated prose/lists — i.e., normal dictation already
 gets a fair amount of transformation, not pure verbatim transcription. Fidelity
@@ -164,6 +168,8 @@ commands and events. Platform-specific concerns (active-app detection,
 hotkeys, X11 vs. Windows vs. macOS accessibility APIs) are isolated behind
 small per-OS modules (`app_detector/platform/{macos,windows,linux}.rs`,
 `linux_x11.rs`, `native_hotkey.rs`), which is the same kind of seam
-OpenType's contract-driven multi-platform approach (`Shared/OpenTypeContract.json`
-+ per-platform native implementations) already uses conceptually, just with
+OpenType's now-removed contract-driven multi-platform approach
+(`Shared/OpenTypeContract.json` + per-platform native implementations) used
+conceptually back when it had iOS/Android/macOS clients — worth revisiting
+this reference if that multi-platform ambition ever comes back, just with
 Rust/web instead of three independent native codebases.

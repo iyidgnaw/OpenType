@@ -4,15 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-OpenType is a local-first, cross-platform AI voice-input tool: it turns spontaneous speech into ready-to-use text. It has three independent platform clients (macOS, iOS, Android) that were originally meant to conform to one shared behavioral contract — same modes, same prompt/safety rules, same provider semantics, same audit protocol — but each platform uses whatever native input mechanism actually works on that OS.
+OpenType is a local-first, macOS-only AI voice-input tool: it turns spontaneous speech into ready-to-use text. `Sources/OpenType` is the Swift shell (menubar app, hotkeys, Accessibility, delivery, local history/audit); `sidecar/` is the TypeScript/Bun child process it spawns and manages over a Unix socket, which owns every actual ASR/text-generation call plus the local memory/entity-dictionary store. See "Architecture (macOS reference implementation)" below for the full current shape.
 
-- macOS (`Sources/OpenType` for the Swift shell, `sidecar/` for the TypeScript/Bun process it spawns) is the reference implementation — most complete, and the one that went through a from-scratch rewrite most recently. See "Architecture (macOS reference implementation)" below for its current shape.
-- iOS (`Platforms/iOS`, Xcode project) — host app records/processes; a separate custom keyboard extension inserts the most recent result via `textDocumentProxy.insertText`. Apple forbids keyboard extensions from accessing the microphone, so recording can never happen in the keyboard itself.
-- Android (`Platforms/Android`, Gradle/Kotlin) — a real `InputMethodService` records via `SpeechRecognizer` and writes with `InputConnection.commitText` directly, no separate host-app round trip needed.
-
-The machine-readable cross-platform contract lives in `Shared/OpenTypeContract.json` (modes, providers, invariants, personalization precedence, pipeline stages) with request/response/audit-event JSON Schemas in `Shared/Schemas/`, and cross-platform acceptance vectors in `Shared/AcceptanceCases.json`. `docs/MULTIPLATFORM_ARCHITECTURE.md` explains the shared product core and per-platform boundaries in prose.
-
-**This contract is currently stale relative to macOS.** The macOS client went through a from-scratch rewrite (old 6-mode system deleted, then cut down to exactly 3 modes, plus a sidecar-owned memory/LLM/agent layer — see "Architecture" below) that `Shared/OpenTypeContract.json` and iOS/Android were **not** updated to match: the contract file still describes the old 5-mode set (`smartEdit`/`english`/`agent`/`xReply`/`transcribe`) and per-platform cloud-provider selection, neither of which reflects what macOS actually does anymore. Treat the contract/iOS/Android as historical/aspirational until someone does the (explicitly out-of-scope-for-now) work of reconciling them with the macOS rewrite — don't assume they're in sync, and don't update macOS behavior by reading the contract as ground truth. When changing product behavior going forward, update the contract/schemas/docs together with whichever platform's code changed if you're touching more than macOS; if you're only touching macOS, it's fine (for now) to leave the contract as-is and note the growing gap rather than block on reconciling all three platforms.
+OpenType previously had iOS and Android clients (`Platforms/iOS`, `Platforms/Android`) meant to share one cross-platform behavioral contract with macOS (`Shared/OpenTypeContract.json`, `Shared/Schemas/`, `Shared/AcceptanceCases.json`, `docs/MULTIPLATFORM_ARCHITECTURE.md`) — same modes, same prompt/safety rules, same provider semantics, same audit protocol. That contract went stale once macOS went through its from-zero rewrite (old 5/6-mode system → exactly 3 modes, plus a sidecar-owned memory/LLM/agent layer) without iOS/Android following along, and rather than doing the deferred reconciliation work, the product decision was to **remove iOS, Android, and the shared contract entirely** — they are gone from this repo, not just stale. If you find an old commit, spec, or external reference mentioning them, treat it as history, not as describing current repo contents.
 
 ## Development workflow
 
@@ -55,36 +49,7 @@ bun run build              # -> dist/opentype-sidecar, the standalone binary bui
 
 See `sidecar/README.md` for env vars (`DEEPSEEK_API_KEY` etc.), endpoint list, and directory layout. The Swift app spawns this as a child process (`Sources/OpenType/SidecarClient.swift`) rather than talking to any of the old cloud speech/text providers directly.
 
-### iOS (Xcode project, no CocoaPods/SPM deps)
-
-```bash
-open Platforms/iOS/OpenTypeiOS.xcodeproj
-
-# unsigned build verification (no device needed)
-xcodebuild -project Platforms/iOS/OpenTypeiOS.xcodeproj -scheme OpenTypeiOS \
-  -configuration Debug -destination 'generic/platform=iOS' \
-  -derivedDataPath /tmp/OpenTypeiOSDerivedData CODE_SIGNING_ALLOWED=NO build
-
-# compile the test target
-xcodebuild -project Platforms/iOS/OpenTypeiOS.xcodeproj -scheme OpenTypeiOS \
-  -configuration Debug -destination 'generic/platform=iOS' \
-  -derivedDataPath /tmp/OpenTypeiOSTestDerivedData CODE_SIGNING_ALLOWED=NO build-for-testing
-```
-
-Two targets (`OpenTypeiOS` host app, `OpenTypeKeyboard` extension) must share one Development Team and the App Group `group.ai.opentype.shared` in Signing & Capabilities. If that App Group id isn't available on your account, mint your own and replace it consistently in both `.entitlements` files, `OpenTypeiOS/SharedResultStore.swift`, and `OpenTypeKeyboard/KeyboardViewController.swift`. Full XCTest execution needs a real device/runtime — the build-for-testing step above only proves it compiles and links.
-
-### Android (Gradle/Kotlin + Jetpack Compose)
-
-```bash
-cd Platforms/Android
-zsh ./gradlew :app:testDebugUnitTest :app:assembleDebug   # unit tests + debug APK
-# or, if Gradle 8.9 is already installed:
-gradle :app:testDebugUnitTest :app:assembleDebug
-```
-
-Needs JDK 17, Android SDK Platform 35, Build Tools. Debug APK lands at `Platforms/Android/app/build/outputs/apk/debug/app-debug.apk`. Requires Android Studio for interactive dev; command line is enough for CI-style verification.
-
-## Architecture (macOS reference implementation)
+## Architecture
 
 macOS is a **Swift shell + TypeScript sidecar** split, not a pure Swift app. `Sources/OpenType/AppModel.swift` is still the central `@MainActor` orchestrator (`ObservableObject`) every view binds to, but it no longer talks to any cloud speech/text provider directly — the Swift side owns recording, hotkeys, Accessibility, delivery, and local history/memory bookkeeping, and hands every actual ASR/text-generation call off to a local `sidecar/` (TypeScript/Bun) child process it spawns and manages over a Unix socket. See `sidecar/README.md` for the sidecar's own layout and standalone run/test instructions, and `docs/superpowers/specs/2026-08-09-current-system-state.md` for the full as-built reference (endpoints, request/response shapes, known gaps).
 
@@ -114,8 +79,6 @@ Key Swift-side collaborators `AppModel` wires together:
   - **Config storage/API**: the sidecar persists both configs as plaintext JSON (`ProviderConfigStore`, `sidecar/src/provider/configStore.ts`) next to its existing SQLite data directory, `chmod 600`'d — a deliberate tradeoff (not Keychain) documented in that file's doc comment: the sidecar already stores other locally-sensitive data unencrypted (the memory SQLite DB), and Keychain-on-Swift-side would reintroduce exactly the credential-plumbing-through-env-vars-at-spawn-time coupling this rewrite removed. `sidecar/src/provider/routes.ts` exposes it over HTTP (`GET/PUT /config/llm`, `GET/PUT /config/whisper`, `POST /config/llm/test`, `POST /config/llm/models`, `POST /config/whisper/test`, `GET /config/status`) — Swift never talks to Keychain or writes provider config itself, it just calls these endpoints (`AppModel.swift`'s "Provider configuration" section) the same way it calls every other sidecar endpoint.
   - **"Configured" is explicit, not ambient**: `providerConfigStore.getStatus()`'s `llmConfigured`/`whisperConfigured` flags are only set by an actual `PUT /config/llm`/`PUT /config/whisper` call (i.e. the user finished Test Connection + model pick + Save, or explicitly chose local Whisper) — an ambient `DEEPSEEK_API_KEY` env var alone never flips them. This is what `GET /config/status`'s `ready` field (and Swift's `AppModel.needsProviderOnboarding`) gates the first-run setup wizard on.
   - **Onboarding wizard**: `Sources/OpenType/ProviderSetupViews.swift`'s `OnboardingWizardView` takes over the main window's tab content (`RootView` in `Views.swift`) in place of Home whenever `needsProviderOnboarding` is true, and the app auto-opens that window the first time launch discovers this (`AppModel.init`'s post-sidecar-ready check). It reuses the exact same `WhisperSetupContent`/`LLMProviderSetupContent` views Settings' "语音识别"/"AI 模型" sections embed — one implementation of configure/test/list/save, not a parallel wizard-only copy.
-
-iOS and Android were **not** part of tonight's rewrite and still reflect the old 5/6-mode, per-platform-cloud-provider design described by `Shared/OpenTypeContract.json` — see the staleness note under "What this repo is" above. Don't use this section as a guide to iOS/Android's current behavior.
 
 ## Reference implementations and design docs
 

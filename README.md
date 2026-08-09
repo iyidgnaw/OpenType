@@ -1,32 +1,20 @@
 # OpenType
 
-OpenType 是一个本地优先的跨平台 AI 语音输入工具，把自然口语变成可以直接使用的文字。三端最初的设计目标是共享同一套模式、Prompt 安全规则、Provider 语义和审计协议，但 macOS 端最近经历了一次从零重写（详见下文），iOS/Android 仍是重写前的旧版设计，目前三端**并不同步** —— 具体差异见根目录 [CLAUDE.md](CLAUDE.md) 里的说明。
+OpenType 是一个本地优先的 macOS AI 语音输入工具，把自然口语变成可以直接使用的文字。按住一个快捷键说话，松开后直接转成文字、回答你的问题，或者把一个任务交给 Agent 去做。
 
-macOS 的完整使用情景、操作方式和功能边界见 [OpenType 使用说明书](USER_GUIDE.md)，该文档已按重写后的 3 模式系统全面更新。
+> 曾经有 iOS 与 Android 两端，原计划三端共享同一套模式/Prompt 安全规则/Provider 语义/审计协议。macOS 端经历了一次从零重写后，两端已被整体移除（产品决定，不是遗漏）——本仓库现在只有 macOS 一个平台。
 
-**新用户想在自己电脑上安装 macOS 版？** 仓库目前是私有的、还没有打包发行版，安装方式是 clone 仓库后本地编译。与其手动照抄命令，可以把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 直接发给你自己的 coding agent（Claude Code、Codex 等），让它帮你把 clone、依赖安装、本地 Whisper 环境搭建、编译、首次授权和应用内设置引导全部走一遍。
+完整使用情景、操作方式和功能边界见 [OpenType 使用说明书](USER_GUIDE.md)。
 
-## 三端工程
+**新用户想在自己电脑上安装？** 仓库目前是私有的、还没有打包发行版，安装方式是 clone 仓库后本地编译。与其手动照抄命令，可以把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 直接发给你自己的 coding agent（Claude Code、Codex 等），让它帮你把 clone、依赖安装、本地 Whisper 环境搭建、编译、首次授权和应用内设置引导全部走一遍。
 
-| 平台 | 主要交付方式 | 当前验证 | 工程与说明 |
-| --- | --- | --- | --- |
-| macOS | 全局快捷键录音，Swift 应用 + 本地 TypeScript/Bun sidecar 子进程，Accessibility 写入当前输入框，剪贴板兜底 | Swift 单测与 sidecar 单测均全绿；production app（ad-hoc 签名，非 Developer ID 公证）已本地构建并真实运行验证 | `Sources/OpenType`、`sidecar/`、[macOS 使用说明](USER_GUIDE.md)、[当前系统状态](docs/superpowers/specs/2026-08-09-current-system-state.md) |
-| iOS | 宿主 App 录音处理，通过 App Group 同步；Keyboard Extension 一键插入最近结果 | 中转英专用请求源码已编译与链接；当前 Simulator 包验证受本机 runtime 限制 | `Platforms/iOS`、[iOS README](Platforms/iOS/README.md) |
-| Android | `InputMethodService` 内按住说话，`SpeechRecognizer` 转写，`InputConnection.commitText` 写入 | 中转英专用请求与回归用例已写入；本轮机器缺少 Java Runtime，未执行 JVM 测试 | `Platforms/Android`、[Android README](Platforms/Android/README.md) |
+## 当前交付状态
 
-机器可读的模式和 Provider 规范位于 [共享产品契约](Shared/OpenTypeContract.json)，跨端验收向量位于 [Acceptance Cases](Shared/AcceptanceCases.json)，平台边界见 [多端架构](docs/MULTIPLATFORM_ARCHITECTURE.md)。
+经历过一次从零重写（旧的 5/6 模式系统已删除，改为下方的 3 模式设计），本机通过 `./scripts/build-app.sh` 构建为 `dist/OpenType.app`。当前是 ad-hoc 本地签名版本，不是 Developer ID 公证发行包，也还没有对外发行的 Release —— 目前只能 clone 仓库本地编译，见上方的新用户安装入口。Swift 单测与 sidecar 单测均全绿；production app 已本地构建并真实运行验证。
 
-iOS 的自定义键盘受 Apple 系统限制，不能直接访问麦克风，因此录音必须在宿主 App 内完成；Android IME 可以直接录音与写入。两个移动端都不会自动发送或发布内容。
+## 当前功能
 
-## 当前交付状态（2026-08-08）
-
-- macOS：经历过一次从零重写（旧的 5/6 模式系统已删除，改为下方的 3 模式设计），本机通过 `./scripts/build-app.sh` 构建为 `dist/OpenType.app`。当前是 ad-hoc 本地签名版本，不是 Developer ID 公证发行包，也还没有对外发行的 Release —— 目前只能 clone 仓库本地编译，见上方的新用户安装入口。
-- iOS：宿主 App、Keyboard Extension 和测试 target 均已完成无签名编译，源码包为 `dist/OpenType-iOS-source-v0.1.0.zip`。安装到真机前仍需选择用户自己的 Apple Development Team，并注册两个 target 共用的 App Group；当前没有可分发 IPA。
-- Android：完整源码包为 `dist/OpenType-Android-source-v0.1.0.zip`，可安装的本地验收包为 `dist/OpenType-Android-debug-v0.1.0.apk`。22 项 JVM 单元测试、Debug 构建、Android Lint、APK v2 Debug 签名和压缩完整性均已通过；它仍不是 Play Store 正式签名包，也尚未完成目标手机上的 IME、麦克风、Keystore 与 Provider 联调。
-
-## macOS 当前功能
-
-macOS 端经历过一次从零重写：旧的 5/6 模式系统已整体删除，现在是精确的 3 模式设计，且语音识别与文本生成都交给一个本地 TypeScript/Bun 子进程（`sidecar/`）处理，Swift 侧只负责录音、快捷键、Accessibility 读写和本地历史/审计。完整技术细节见 [`docs/superpowers/specs/2026-08-09-current-system-state.md`](docs/superpowers/specs/2026-08-09-current-system-state.md)。
+经历过一次从零重写：旧的 5/6 模式系统已整体删除，现在是精确的 3 模式设计，且语音识别与文本生成都交给一个本地 TypeScript/Bun 子进程（`sidecar/`）处理，Swift 侧只负责录音、快捷键、Accessibility 读写和本地历史/审计。工程结构见 `Sources/OpenType`、`sidecar/`；完整技术细节见 [`docs/superpowers/specs/2026-08-09-current-system-state.md`](docs/superpowers/specs/2026-08-09-current-system-state.md)。
 
 - **3 种模式**：`transcribe`（纯转写，不经过任何 LLM）、`ask`（提问，浮窗直接给出答案）、`agent`（语音下发任务，非阻塞地交给可调用工具的 Agent Runtime 执行，结果只生成草稿，永远不会自动回车/发布/执行）
 - 模式切换：菜单栏 popover 里的模式选择器、循环快捷键，或录音中途说出“agent 模式”之类的口令自动切换本次模式
@@ -43,7 +31,7 @@ macOS 端经历过一次从零重写：旧的 5/6 模式系统已整体删除，
 - 面向用户的错误提示，不直接暴露底层技术报错
 - 完整审计：每一次识别、每一次修正（Review 模式下的每次语音纠错）、以及最终完成或取消，都会追加写入本地一份不可修改的 JSONL 审计日志，原始音频本身不保留
 
-## macOS 运行
+## 运行
 
 ```bash
 ./scripts/build-app.sh
@@ -59,7 +47,7 @@ open dist/OpenType.app
 
 **全新环境从零安装**（包括本地 Whisper 环境搭建）建议直接把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 交给你自己的 coding agent 执行，而不是手动照抄下面的命令——那份 prompt 把这一节命令之外容易踩的坑（比如 Whisper 的 Python venv 必须用 Homebrew 的 `python3.12` 而不是 Xcode 自带的、`mlx_whisper` 依赖 `ffmpeg`）都写清楚了。
 
-## 隐私（macOS）
+## 隐私
 
 - 最终音频默认只在本机由 MLX-Whisper 处理，不发送到任何服务器；如果在设置里把语音识别改成远程模式，音频才会发送到用户自己配置的远程识别地址。处理结束后删除本地临时音频文件。
 - 识别出的文字只在 `ask`/`agent` 两种模式下会发送给用户自己配置的 LLM Provider；`transcribe` 模式完全不经过任何 LLM，识别到什么就是什么。

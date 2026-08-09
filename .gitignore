@@ -7,15 +7,6 @@ dist/
 **/xcuserdata/
 DerivedData/
 
-Platforms/Android/.gradle/
-Platforms/Android/.kotlin/
-Platforms/Android/**/build/
-Platforms/Android/local.properties
-
-*.jks
-*.keystore
-*.mobileprovision
-
 sidecar/node_modules/
 sidecar/dist/
 sidecar/whisper-env/

@@ -11,9 +11,14 @@ specs (`2026-08-08-system-boundaries-and-memory-v1-design.md`,
 `2026-08-09-b2-agent-runtime-v1-design.md`) are left as-is as a record of how
 the design got here, and are still useful for *why* things are shaped this
 way, but their mode lists (4-6 modes, Polish/Translate/X Reply, per-provider
-tool-calling requirements) are stale. This doc is scoped to macOS only —
-iOS/Android/`Shared/OpenTypeContract.json` were not part of this rewrite and
-are not covered here; see the root `CLAUDE.md` staleness note.
+tool-calling requirements) are stale. This doc is scoped to macOS because
+**macOS is now the only platform in this repo**: iOS (`Platforms/iOS`),
+Android (`Platforms/Android`), and the cross-platform contract
+(`Shared/OpenTypeContract.json`, `Shared/Schemas/`) were removed outright
+(product decision, not an oversight) rather than reconciled with the macOS
+rewrite — don't go looking for them, and don't treat any older doc's
+references to them (this directory's earlier dated specs, git history) as
+describing current repo contents.
 
 ## 1. The 3 modes
 
@@ -200,7 +205,7 @@ Carried forward from the overnight build log and design specs, still true as of 
 - **No technical enforcement of the no-side-effect-tools policy** (§3) — policy-only, by design, for v1.
 - **`SidecarClient`'s transport is `curl` per request over a Unix socket**, not a native HTTP client — a known simplification flagged for a future pass, not a currently-planned fix.
 - **No Memory-panel rollback UI** — `/memory/consolidation-runs` is read-only; a bad consolidation pass can't be undone from the UI yet (the sidecar's DB may support it internally; not exposed).
-- **iOS/Android are untouched by this rewrite** — see the root `CLAUDE.md` staleness note; don't treat anything in this doc as describing their current behavior.
+- ~~iOS/Android are untouched by this rewrite~~ **Removed entirely, not just untouched** — `Platforms/iOS`, `Platforms/Android`, and `Shared/` (the cross-platform contract/schemas) were deleted from the repo by product decision. OpenType is macOS-only going forward. Left struck through rather than deleted for the same reason as the provider-picker reversal above: the history stays legible.
 - **Review-mode voice correction is unverified against a real microphone/hotkey** — see §8's verification note; the backend (`/transcribe/correct`) and all pure logic are proven, but no agent session has yet driven the full mic-capture loop live.
 - **Sidecar/history/audit runtime paths are not per-worktree-scoped** — see §8's "shared-runtime-resource discovery" note; concurrent packaged-app runs across worktrees/checkouts can silently steal each other's socket/DB. `provider-config.json` (§10) inherits this exact gap — observed directly during this feature's own verification: a fresh-launched packaged build showed `whisperConfigured: true` moments after launch with no save action taken from that build's own UI, almost certainly a concurrent packaged-app run (a different worktree/agent session) sharing the same `~/Library/Application Support/OpenType/` directory and bundle identifier writing to the same file.
 - **Force-quitting the app (`pkill`/Force Quit) orphans the sidecar child process** — `applicationWillTerminate` (which calls `stopSidecar()`) only runs on a normal quit; a killed parent leaves its sidecar (and, transitively, the Whisper Python process) running. Observed directly during this doc's verification work. Not fixed — the new "Quit OpenType" actions (§7) give a normal-quit path, but nothing yet detects/reaps a stale orphaned sidecar at next launch.

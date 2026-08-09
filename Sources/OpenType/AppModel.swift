@@ -75,6 +75,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var reviewPanelState: ReviewPanelState? {
         didSet { syncReviewPanel() }
     }
+    /// The sidecar's `/config/status` view of whether the user has
+    /// explicitly finished configuring a Whisper backend and an LLM
+    /// provider through the new provider-config system (see
+    /// `ProviderConfigStore` on the sidecar side for the precise
+    /// "configured" definition -- an ambient `DEEPSEEK_API_KEY` env var
+    /// alone never counts). `nil` until the first successful fetch (right
+    /// after the sidecar becomes ready).
+    @Published private(set) var providerConfigStatus: ProviderConfigStatus?
+    /// True exactly when `providerConfigStatus` has loaded and `ready` is
+    /// false -- gates whether `RootView` shows the first-run setup wizard
+    /// instead of the normal Home tab. Explicit `Bool?` rather than a
+    /// derived computed property so a not-yet-loaded status doesn't
+    /// momentarily flash the wizard before the real answer is known.
+    var needsProviderOnboarding: Bool { providerConfigStatus.map { !$0.ready } ?? false }
+    @Published private(set) var llmConfigSummary: LLMConfigSummary?
+    @Published private(set) var whisperConfigSummary: WhisperConfigSummary?
 
     let configuration: AppConfiguration
     let history: HistoryStore
@@ -100,6 +116,9 @@ final class AppModel: ObservableObject {
     private var accessibilityPollTimer: Timer?
     private var activeMode: InputMode?
     private var didStart = false
+    /// One-shot guard for the first-run provider-setup wizard auto-open —
+    /// see the `refreshProviderConfigStatus()` call site in `init()`.
+    private var didPromptProviderOnboarding = false
     private var isHotKeyHeld = false
     private var isStartingRecording = false
     /// Set for the duration of a hotkey press/release that's a Review-mode
@@ -210,6 +229,21 @@ final class AppModel: ObservableObject {
                     "Sidecar 已就绪",
                     english: "Sidecar ready"
                 )
+                await self.refreshProviderConfigStatus()
+                // First-run setup wizard trigger (spec: "if the user hasn't
+                // configured Whisper or LLM yet, opening the app should
+                // enter a setup wizard"): the popover shows unconditionally
+                // right after launch (see `OpenTypeAppDelegate`), but the
+                // wizard itself lives in the real app window alongside
+                // Settings, so surface that window automatically the first
+                // time we learn the user isn't configured yet. Guarded by
+                // `didPromptProviderOnboarding` so this fires once per
+                // launch, not every time `providerConfigStatus` happens to
+                // refresh (e.g. after the wizard itself saves progress).
+                if self.needsProviderOnboarding, !self.didPromptProviderOnboarding {
+                    self.didPromptProviderOnboarding = true
+                    self.onOpenMainWindowRequested?()
+                }
             } catch {
                 self.sidecarStatus = OpenTypeL10n.text(
                     "Sidecar 启动失败：\(error.localizedDescription)",
@@ -826,8 +860,8 @@ final class AppModel: ObservableObject {
                     effectiveInput: response.replacement,
                     selectedContext: selection.substring,
                     result: updatedText,
-                    provider: Self.sidecarTextProvider,
-                    model: Self.sidecarTextModel,
+                    provider: sidecarTextProvider,
+                    model: sidecarTextModel,
                     error: nil,
                     supersedesEventId: session.lastEventId
                 )
@@ -1027,15 +1061,26 @@ final class AppModel: ObservableObject {
         )
     }
 
-    /// Every mode now routes to the sidecar for its text generation, always
-    /// using this fixed model, and ASR always runs locally via the sidecar's
-    /// MLX-Whisper process (see `transcribeLocally(audioURL:)` below) --
-    /// there is no cloud-provider selection anywhere in the pipeline anymore,
-    /// so audit events (`appendAudit` in `process(audioURL:)`) record these
-    /// fixed labels directly instead of resolving a configured provider.
-    private static let sidecarTextModel = "deepseek-v4-flash"
-    private static let sidecarTextProvider = "deepseek"
-    private static let sidecarASRProvider = "mlx-whisper"
+    /// Audit labels (`ImmutableAuditStore`) for whichever provider actually
+    /// served the request. Reflects the user-configured provider (Settings'
+    /// "AI 模型"/"语音识别" sections, `ProviderSetupViews.swift`) once one has
+    /// been explicitly saved via the provider-config system, falling back to
+    /// the always-available env-based DeepSeek default / local MLX-Whisper
+    /// otherwise -- the same "explicit config wins, otherwise env fallback"
+    /// precedence the sidecar itself applies (`sidecar/src/server.ts`'s
+    /// `resolveChat`/`resolveTranscribe`). `llmConfigSummary`/
+    /// `whisperConfigSummary` are refreshed on sidecar-ready and after every
+    /// successful save (see `refreshProviderConfigStatus()` and friends), so
+    /// this stays in sync without a dedicated audit-time round trip.
+    private var sidecarTextModel: String {
+        llmConfigSummary?.model ?? "deepseek-v4-flash"
+    }
+    private var sidecarTextProvider: String {
+        llmConfigSummary?.type?.rawValue ?? "deepseek"
+    }
+    private var sidecarASRProvider: String {
+        whisperConfigSummary?.mode == .remote ? "remote-whisper" : "mlx-whisper"
+    }
 
     /// Request/response bodies for the sidecar's `/asr/transcribe` endpoint
     /// (proxies to the local MLX-Whisper python process -- see
@@ -1136,6 +1181,183 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Provider configuration (Whisper / LLM)
+    //
+    // Thin wrappers around the sidecar's `/config/*` endpoints
+    // (`sidecar/src/provider/routes.ts`) -- the single source of truth both
+    // the Settings provider sections and the first-run onboarding wizard
+    // call through (`ProviderSetupView` in `Views.swift`), so there is
+    // exactly one place that knows how to test/save/list provider config,
+    // not a parallel wizard-only implementation.
+
+    private struct LLMConfigTestRequestBody: Encodable {
+        let type: String
+        let baseUrl: String
+        let apiKey: String
+    }
+    private struct LLMConfigSaveRequestBody: Encodable {
+        let type: String
+        let baseUrl: String
+        let apiKey: String
+        let model: String
+    }
+    private struct WhisperConfigSaveRequestBody: Encodable {
+        let mode: String
+        let baseUrl: String?
+        let apiKey: String?
+        let model: String?
+    }
+    private struct WhisperConfigTestRequestBody: Encodable {
+        let baseUrl: String
+        let apiKey: String
+    }
+
+    /// Refreshes `providerConfigStatus` (and therefore
+    /// `needsProviderOnboarding`) from `GET /config/status`. Called once
+    /// right after the sidecar becomes ready, and again after every
+    /// successful `saveLLMConfig`/`saveWhisperConfig` so the wizard/Settings
+    /// screen can tell the moment both sides are configured.
+    ///
+    /// Also opportunistically refreshes `llmConfigSummary`/
+    /// `whisperConfigSummary` themselves (not just the booleans) so the
+    /// audit-label computed properties above (`sidecarTextProvider` etc.)
+    /// reflect the real configured provider from the moment the sidecar is
+    /// ready, even in a session where the user never opens Settings or the
+    /// wizard to trigger those views' own `.task` refreshes.
+    func refreshProviderConfigStatus() async {
+        do {
+            let status: ProviderConfigStatus = try await sidecarClient.request(
+                method: "GET",
+                path: "/config/status"
+            )
+            providerConfigStatus = status
+            if status.llmConfigured {
+                await refreshLLMConfigSummary()
+            }
+            if status.whisperConfigured {
+                await refreshWhisperConfigSummary()
+            }
+        } catch {
+            print("OpenType: failed to fetch provider config status from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// Refreshes the Settings "AI 模型" section's display of the currently
+    /// saved LLM provider (masked API key only -- see `LLMConfigSummary`).
+    func refreshLLMConfigSummary() async {
+        do {
+            llmConfigSummary = try await sidecarClient.request(method: "GET", path: "/config/llm")
+        } catch {
+            print("OpenType: failed to fetch LLM config from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// Refreshes the Settings "语音识别" section's display of the currently
+    /// saved Whisper mode.
+    func refreshWhisperConfigSummary() async {
+        do {
+            whisperConfigSummary = try await sidecarClient.request(method: "GET", path: "/config/whisper")
+        } catch {
+            print("OpenType: failed to fetch Whisper config from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// `POST /config/llm/test` -- verifies `baseUrl`/`apiKey` actually work
+    /// against the given provider `type` before the user commits to saving
+    /// them. Never throws: sidecar-level connectivity/auth failures come
+    /// back as `.success == false` with a real provider error message
+    /// (`ProviderTestResultSummary.error`), and a genuine transport failure
+    /// (sidecar not reachable at all) is folded into the same shape so
+    /// callers only need one code path.
+    func testLLMConnection(
+        type: LLMProviderType,
+        baseUrl: String,
+        apiKey: String
+    ) async -> ProviderTestResultSummary {
+        do {
+            return try await sidecarClient.request(
+                method: "POST",
+                path: "/config/llm/test",
+                body: LLMConfigTestRequestBody(type: type.rawValue, baseUrl: baseUrl, apiKey: apiKey)
+            )
+        } catch {
+            return ProviderTestResultSummary(success: false, error: error.localizedDescription)
+        }
+    }
+
+    /// `POST /config/llm/models` -- lists models for the given provider
+    /// config, or the sidecar's hardcoded fallback list
+    /// (`fallback == true`) when live listing isn't supported/fails. Only
+    /// meaningful to call after `testLLMConnection` has reported success.
+    func listLLMModels(
+        type: LLMProviderType,
+        baseUrl: String,
+        apiKey: String
+    ) async throws -> ProviderModelListSummary {
+        try await sidecarClient.request(
+            method: "POST",
+            path: "/config/llm/models",
+            body: LLMConfigTestRequestBody(type: type.rawValue, baseUrl: baseUrl, apiKey: apiKey)
+        )
+    }
+
+    /// `PUT /config/llm` -- persists the chosen provider config sidecar-side
+    /// and marks it `llmConfigured`. This is the one action that actually
+    /// takes the new provider live for `/oneshot/ask`/`/agent/run`; Test
+    /// Connection and model listing above are read-only previews.
+    @discardableResult
+    func saveLLMConfig(
+        type: LLMProviderType,
+        baseUrl: String,
+        apiKey: String,
+        model: String
+    ) async throws -> LLMConfigSummary {
+        let summary: LLMConfigSummary = try await sidecarClient.request(
+            method: "PUT",
+            path: "/config/llm",
+            body: LLMConfigSaveRequestBody(type: type.rawValue, baseUrl: baseUrl, apiKey: apiKey, model: model)
+        )
+        llmConfigSummary = summary
+        await refreshProviderConfigStatus()
+        return summary
+    }
+
+    /// `POST /config/whisper/test` -- remote-mode connectivity check
+    /// (local mode never needs testing, it has no credentials).
+    func testWhisperConnection(baseUrl: String, apiKey: String) async -> ProviderTestResultSummary {
+        do {
+            return try await sidecarClient.request(
+                method: "POST",
+                path: "/config/whisper/test",
+                body: WhisperConfigTestRequestBody(baseUrl: baseUrl, apiKey: apiKey)
+            )
+        } catch {
+            return ProviderTestResultSummary(success: false, error: error.localizedDescription)
+        }
+    }
+
+    /// `PUT /config/whisper` -- persists the chosen Whisper mode (and, for
+    /// remote, its base URL/API key/model) and marks it `whisperConfigured`.
+    /// An explicit save is required even for `local` -- see
+    /// `ProviderConfigStore`'s doc comment on the sidecar side for why an
+    /// unconfigured default doesn't silently count.
+    @discardableResult
+    func saveWhisperConfig(
+        mode: WhisperMode,
+        baseUrl: String? = nil,
+        apiKey: String? = nil,
+        model: String? = nil
+    ) async throws -> WhisperConfigSummary {
+        let summary: WhisperConfigSummary = try await sidecarClient.request(
+            method: "PUT",
+            path: "/config/whisper",
+            body: WhisperConfigSaveRequestBody(mode: mode.rawValue, baseUrl: baseUrl, apiKey: apiKey, model: model)
+        )
+        whisperConfigSummary = summary
+        await refreshProviderConfigStatus()
+        return summary
+    }
+
     /// Local ASR via the sidecar's `/asr/transcribe` endpoint, which proxies
     /// to a persistent MLX-Whisper python process (`sidecar/whisper/serve.py`,
     /// managed by `sidecar/src/asr/whisperClient.ts`) -- the ASR step shared
@@ -1220,7 +1442,7 @@ final class AppModel: ObservableObject {
             auditEffectiveInput = transcript
             let recognizedEventId = appendAudit(
                 status: .recognized,
-                provider: Self.sidecarASRProvider
+                provider: sidecarASRProvider
             )
 
             if mode.requiresSelection,
@@ -1264,7 +1486,7 @@ final class AppModel: ObservableObject {
                     result = transcript
                 }
             case .ask:
-                effectiveTextModel = Self.sidecarTextModel
+                effectiveTextModel = sidecarTextModel
                 askPanelState = AskPanelState(kind: .ask, query: transcript, answer: nil)
                 do {
                     // Continues the Q&A tab's focused thread when one is
@@ -1300,7 +1522,7 @@ final class AppModel: ObservableObject {
                 // via a `UNUserNotification` plus the Task List panel in the
                 // main app window (Part A), not a panel the user waits in
                 // front of.
-                effectiveTextModel = Self.sidecarTextModel
+                effectiveTextModel = sidecarTextModel
                 dispatchAgentRun(
                     transcript: transcript,
                     context: capturedContext,
@@ -1405,7 +1627,7 @@ final class AppModel: ObservableObject {
                 // `.transcribe` is a pure ASR passthrough with no sidecar
                 // text-generation call (see the `switch mode` above), so it
                 // has no text provider/model of its own to record here.
-                provider: mode == .transcribe ? nil : Self.sidecarTextProvider,
+                provider: mode == .transcribe ? nil : sidecarTextProvider,
                 model: effectiveTextModel
             )
 
@@ -1434,11 +1656,11 @@ final class AppModel: ObservableObject {
                 status: .failed,
                 error: ErrorMessagePresenter.message(for: error),
                 provider: auditRawTranscript.isEmpty
-                    ? Self.sidecarASRProvider
-                    : Self.sidecarTextProvider,
+                    ? sidecarASRProvider
+                    : sidecarTextProvider,
                 model: auditRawTranscript.isEmpty
                     ? nil
-                    : (effectiveTextModel ?? Self.sidecarTextModel)
+                    : (effectiveTextModel ?? sidecarTextModel)
             )
             fail(error)
         }
@@ -1537,8 +1759,8 @@ final class AppModel: ObservableObject {
                     effectiveInput: transcript,
                     selectedContext: context.selectedText,
                     result: response.result,
-                    provider: Self.sidecarTextProvider,
-                    model: Self.sidecarTextModel,
+                    provider: sidecarTextProvider,
+                    model: sidecarTextModel,
                     error: nil
                 )
             )
@@ -1596,8 +1818,8 @@ final class AppModel: ObservableObject {
                     effectiveInput: transcript,
                     selectedContext: context.selectedText,
                     result: nil,
-                    provider: Self.sidecarTextProvider,
-                    model: Self.sidecarTextModel,
+                    provider: sidecarTextProvider,
+                    model: sidecarTextModel,
                     error: message
                 )
             )

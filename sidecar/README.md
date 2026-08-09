@@ -1,8 +1,10 @@
 # OpenType sidecar
 
 A local TypeScript/Bun HTTP server (over a Unix socket) that owns everything
-the macOS app doesn't do itself: text generation (DeepSeek), local ASR
-(MLX-Whisper), and the long-term memory/entity-dictionary store. The Swift
+the macOS app doesn't do itself: text generation (DeepSeek by default, or a
+user-configured Anthropic/OpenAI-compatible provider — see `src/provider/`),
+ASR (local MLX-Whisper by default, or a user-configured remote provider —
+see `src/asr/`), and the long-term memory/entity-dictionary store. The Swift
 app (`Sources/OpenType/SidecarClient.swift`) spawns this as a child process
 and talks to it exclusively over `curl` against the socket — see the repo
 root `CLAUDE.md` for how this fits into the overall macOS architecture.
@@ -65,10 +67,20 @@ you're debugging packaging specifically.
 - `src/memory/` — the entity-dictionary `MemoryStore` (SQLite-backed),
   periodic consolidation (`consolidator.ts`), and the read-only
   `/memory/terms` / `/memory/consolidation-runs` endpoints.
-- `src/provider/deepseek.ts` — the one text-generation provider client; see
-  `docs/superpowers/specs/` for why DeepSeek and not a pluggable set.
+- `src/provider/` — the LLM provider abstraction: `deepseek.ts` (the
+  original, still-used env-based zero-config default client),
+  `openaiCompatible.ts`/`anthropic.ts` (the two provider types a user can
+  explicitly configure), `registry.ts` (dispatches by type),
+  `configStore.ts` (persists the saved Whisper/LLM config as local plaintext
+  JSON), and `routes.ts` (the `/config/*` HTTP surface Settings and the
+  onboarding wizard call). See
+  `docs/superpowers/specs/2026-08-09-current-system-state.md` §10 for the
+  full design and why plaintext-JSON over Keychain.
+- `src/asr/` also has `remoteWhisperClient.ts` — the remote-Whisper backend
+  (OpenAI's `/audio/transcriptions` shape) an explicitly-configured Whisper
+  provider routes through instead of the local process below.
 - `whisper/serve.py` + `whisper-env/` — the local MLX-Whisper python server
-  and its bundled virtualenv.
+  and its bundled virtualenv (still the default ASR backend).
 
 See `docs/superpowers/specs/2026-08-09-current-system-state.md` for the
 full as-built system description (all endpoints, request/response shapes,

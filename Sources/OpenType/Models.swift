@@ -860,3 +860,95 @@ struct ConversationDetail: Decodable, Identifiable, Equatable {
     let updatedAt: Int
     let messages: [ConversationMessageSummary]
 }
+
+// MARK: - Provider configuration (Whisper / LLM)
+
+/// Which shape a user-configured LLM provider speaks — mirrors the
+/// sidecar's `LLMProviderType` (`sidecar/src/provider/types.ts`): either the
+/// Anthropic Messages API (`/v1/messages`) or the OpenAI-compatible Chat
+/// Completions API (`/chat/completions`), which DeepSeek/OpenAI itself/many
+/// self-hosted servers all share. Raw values match the sidecar's JSON
+/// literals exactly since they're sent as-is in request bodies.
+enum LLMProviderType: String, CaseIterable, Identifiable, Codable {
+    case anthropic
+    case openaiCompatible = "openai-compatible"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .anthropic:
+            return "Anthropic"
+        case .openaiCompatible:
+            return OpenTypeL10n.text("OpenAI 兼容", english: "OpenAI-compatible")
+        }
+    }
+
+    /// Shown as placeholder text in the base-URL field — a starting point,
+    /// not a hardcoded default that's silently submitted.
+    var baseUrlPlaceholder: String {
+        switch self {
+        case .anthropic:
+            return "https://api.anthropic.com"
+        case .openaiCompatible:
+            return "https://api.deepseek.com"
+        }
+    }
+}
+
+/// Mirrors the sidecar's `WhisperMode` (`sidecar/src/provider/configStore.ts`).
+enum WhisperMode: String, CaseIterable, Identifiable, Codable {
+    case local
+    case remote
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .local:
+            return OpenTypeL10n.text("本机（MLX-Whisper）", english: "Local (MLX-Whisper)")
+        case .remote:
+            return OpenTypeL10n.text("远程 API", english: "Remote API")
+        }
+    }
+}
+
+/// Mirrors the sidecar's `GET /config/status` response.
+struct ProviderConfigStatus: Decodable, Equatable {
+    let llmConfigured: Bool
+    let whisperConfigured: Bool
+    let ready: Bool
+}
+
+/// Mirrors the sidecar's `GET`/`PUT /config/llm` response shape. `type`/
+/// `baseUrl`/`model`/`apiKeyMasked` are only present when `configured` is
+/// true — the raw API key is never sent back to Swift, only a masked form.
+struct LLMConfigSummary: Decodable, Equatable {
+    let configured: Bool
+    let type: LLMProviderType?
+    let baseUrl: String?
+    let model: String?
+    let apiKeyMasked: String?
+}
+
+/// Mirrors the sidecar's `GET`/`PUT /config/whisper` response shape.
+struct WhisperConfigSummary: Decodable, Equatable {
+    let configured: Bool
+    let mode: WhisperMode?
+    let baseUrl: String?
+    let model: String?
+    let apiKeyMasked: String?
+}
+
+/// Mirrors the sidecar's `{success, error?}` shape returned by both
+/// `POST /config/llm/test` and `POST /config/whisper/test`.
+struct ProviderTestResultSummary: Decodable, Equatable {
+    let success: Bool
+    let error: String?
+}
+
+/// Mirrors the sidecar's `POST /config/llm/models` response.
+struct ProviderModelListSummary: Decodable, Equatable {
+    let models: [String]
+    let fallback: Bool
+}

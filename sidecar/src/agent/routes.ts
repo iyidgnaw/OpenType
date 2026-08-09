@@ -1,23 +1,49 @@
 import type { MemoryStore } from "../memory/MemoryStore";
+import type { ConversationStore } from "../memory/conversations";
 import type { Route } from "../router";
 import type { AgentChatFn } from "./loop";
 import { runAgentLoop } from "./loop";
 import type { McpToolSet } from "./mcpClient";
 import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext";
 import { logContextUsage, type ContextUsageLogWriter } from "../oneshot/contextDebugLog";
+import { resolveConversation } from "../oneshot/routes";
+import type { OneShotChatMessage } from "../oneshot/client";
 
 interface AgentRunRequestBody {
   task?: string;
   context?: string;
+  conversationId?: number;
 }
 
 async function readJsonBody<T>(req: Request): Promise<T> {
   return (await req.json()) as T;
 }
 
+/**
+ * Renders prior conversation turns as a short "previous task / previous
+ * result" summary block for the loop's prompt -- enough for the model to
+ * know what was already asked and delivered on this same task, without
+ * replaying the full internal tool-call step trace (`AgentProgressEvent[]`)
+ * from earlier runs.
+ */
+function formatPriorTurns(messages: OneShotChatMessage[]): string | undefined {
+  if (messages.length === 0) {
+    return undefined;
+  }
+  const lines = messages.map((message) =>
+    message.role === "user"
+      ? `Previous task: ${message.content}`
+      : `Previous result: ${message.content}`
+  );
+  return ["PREVIOUS CONVERSATION (for context; this is a follow-up on the same task):", ...lines].join(
+    "\n"
+  );
+}
+
 async function handleAgentRun(
   req: Request,
   store: MemoryStore,
+  conversations: ConversationStore,
   chat: AgentChatFn,
   tools: McpToolSet,
   contextLogWriter: ContextUsageLogWriter
@@ -42,11 +68,29 @@ async function handleAgentRun(
   );
   const knownTerms = buildKnownTermsContext(store, relevantText);
 
-  const loopResult = await runAgentLoop({ task, context, knownTerms }, { chat, tools });
+  const { conversationId, priorMessages } = resolveConversation(
+    conversations,
+    "agent",
+    body.conversationId,
+    task
+  );
+  conversations.appendMessage(conversationId, "user", task);
+
+  const priorTurnsSummary = formatPriorTurns(priorMessages);
+  const combinedContext = [priorTurnsSummary, context].filter(Boolean).join("\n\n") || undefined;
+
+  const loopResult = await runAgentLoop(
+    { task, context: combinedContext, knownTerms },
+    { chat, tools }
+  );
+
+  conversations.appendMessage(conversationId, "assistant", loopResult.result);
 
   // Per design spec §4: the first real write with origin "agent" (distinct
   // from the owner's own dictation), so agent-produced content can be told
-  // apart from the owner's words once it flows through consolidation.
+  // apart from the owner's words once it flows through consolidation. Keeps
+  // recording the caller's original `context` (not `combinedContext`), so
+  // this stays a faithful record of what was actually selected on screen.
   store.recordEpisodicEvent({
     mode: "agent",
     rawTranscript: task,
@@ -58,7 +102,7 @@ async function handleAgentRun(
     origin: "agent",
   });
 
-  return Response.json({ result: loopResult.result, steps: loopResult.steps });
+  return Response.json({ result: loopResult.result, steps: loopResult.steps, conversationId });
 }
 
 /**
@@ -68,6 +112,7 @@ async function handleAgentRun(
  */
 export function buildAgentRoutes(
   store: MemoryStore,
+  conversations: ConversationStore,
   chat: AgentChatFn,
   tools: McpToolSet,
   contextLogWriter: ContextUsageLogWriter
@@ -76,7 +121,7 @@ export function buildAgentRoutes(
     {
       method: "POST",
       path: "/agent/run",
-      handler: (req) => handleAgentRun(req, store, chat, tools, contextLogWriter),
+      handler: (req) => handleAgentRun(req, store, conversations, chat, tools, contextLogWriter),
     },
   ];
 }

@@ -28,6 +28,15 @@ struct AgentRunRecord: Identifiable, Equatable {
     var completedAt: Date?
     var steps: [AgentStepSummary]
     var status: Status
+    /// The sidecar-persisted conversation this run belongs to, once known.
+    /// `/agent/run` is a single blocking call (`SidecarClient.request`
+    /// doesn't return until the whole loop finishes), so this is `nil` while
+    /// `status == .running` and gets filled in from the response's
+    /// `conversationId` the moment the run completes or fails to complete
+    /// with one. Lets `focusAgentRun(_:)` (a tapped completion notification)
+    /// open the matching thread in the Agent tab (`AppModel.openAgentConversation(_:)`)
+    /// instead of just switching tabs.
+    var conversationId: Int?
 
     init(
         id: UUID = UUID(),
@@ -37,7 +46,8 @@ struct AgentRunRecord: Identifiable, Equatable {
         dispatchedAt: Date = Date(),
         completedAt: Date? = nil,
         steps: [AgentStepSummary] = [],
-        status: Status = .running
+        status: Status = .running,
+        conversationId: Int? = nil
     ) {
         self.id = id
         self.task = task
@@ -47,6 +57,7 @@ struct AgentRunRecord: Identifiable, Equatable {
         self.completedAt = completedAt
         self.steps = steps
         self.status = status
+        self.conversationId = conversationId
     }
 }
 

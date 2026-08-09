@@ -87,6 +87,45 @@ describe("openDatabase", () => {
     expect(columns.length).toBeGreaterThan(0);
   });
 
+  test("creates the conversations table with the expected columns", () => {
+    const db = openDatabase(":memory:");
+    const columns = db
+      .query("PRAGMA table_info(conversations)")
+      .all() as Array<{ name: string }>;
+    const names = columns.map((c) => c.name).sort();
+    expect(names).toEqual(["createdAt", "id", "kind", "title", "updatedAt"].sort());
+  });
+
+  test("creates the conversation_messages table with the expected columns", () => {
+    const db = openDatabase(":memory:");
+    const columns = db
+      .query("PRAGMA table_info(conversation_messages)")
+      .all() as Array<{ name: string }>;
+    const names = columns.map((c) => c.name).sort();
+    expect(names).toEqual(
+      ["id", "conversationId", "role", "content", "createdAt"].sort()
+    );
+  });
+
+  test("allows inserting and reading a row from the conversations and conversation_messages tables", () => {
+    const db = openDatabase(":memory:");
+    db.run(
+      `INSERT INTO conversations (kind, title, createdAt, updatedAt) VALUES (?, ?, ?, ?)`,
+      ["ask", "what is 2+2?", Date.now(), Date.now()]
+    );
+    const conversation = db.query("SELECT * FROM conversations").get() as Record<string, unknown>;
+    expect(conversation.kind).toBe("ask");
+    expect(conversation.title).toBe("what is 2+2?");
+
+    db.run(
+      `INSERT INTO conversation_messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)`,
+      [conversation.id, "user", "what is 2+2?", Date.now()]
+    );
+    const message = db.query("SELECT * FROM conversation_messages").get() as Record<string, unknown>;
+    expect(message.role).toBe("user");
+    expect(message.content).toBe("what is 2+2?");
+  });
+
   test("allows inserting and reading a row from each table", () => {
     const db = openDatabase(":memory:");
 

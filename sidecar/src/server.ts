@@ -10,6 +10,8 @@ import { loadEnv } from "./env";
 import { openDatabase } from "./memory/db";
 import { MemoryStore } from "./memory/MemoryStore";
 import { buildMemoryRoutes } from "./memory/routes";
+import { ConversationStore } from "./memory/conversations";
+import { buildConversationRoutes } from "./memory/conversationRoutes";
 import type { CallLLM } from "./memory/consolidator";
 import { buildOneShotRoutes } from "./oneshot/routes";
 import { createFileContextUsageLogWriter, type ContextUsageLogWriter } from "./oneshot/contextDebugLog";
@@ -31,6 +33,7 @@ import { buildTranscribeRoutes } from "./transcribe/routes";
  */
 export function buildApp(
   store: MemoryStore,
+  conversations: ConversationStore,
   chat: AgentChatFn,
   tools: ToolSet,
   contextLogWriter: ContextUsageLogWriter,
@@ -43,9 +46,10 @@ export function buildApp(
       path: "/health",
       handler: () => Response.json({ status: "ok" }),
     },
-    ...buildOneShotRoutes(store, chat, contextLogWriter),
+    ...buildOneShotRoutes(store, conversations, chat, contextLogWriter),
     ...buildMemoryRoutes(store, callLLM),
-    ...buildAgentRoutes(store, chat, tools, contextLogWriter),
+    ...buildAgentRoutes(store, conversations, chat, tools, contextLogWriter),
+    ...buildConversationRoutes(conversations),
     ...buildAsrRoutes(transcribe),
     ...buildTranscribeRoutes(chat),
   ]);
@@ -54,6 +58,9 @@ export function buildApp(
 async function main() {
   const env = loadEnv();
   const store = new MemoryStore(openDatabase(env.dbPath));
+  // Shares the same underlying Database as `store` (one sqlite file per
+  // sidecar instance) rather than opening a second connection.
+  const conversations = new ConversationStore(store.db);
   const deepSeekClient = createDeepSeekClient(env);
   const callLLM: CallLLM = async (prompt) => {
     const result = await deepSeekClient.chat([{ role: "user", content: prompt }]);
@@ -96,10 +103,18 @@ async function main() {
   // each of which `await whisperReady` on its own.
   whisperReady.catch(() => {});
 
-  const fetch = buildApp(store, deepSeekClient.chat, tools, contextLogWriter, callLLM, async (audio) => {
-    await whisperReady;
-    return whisperClient.transcribe(audio);
-  });
+  const fetch = buildApp(
+    store,
+    conversations,
+    deepSeekClient.chat,
+    tools,
+    contextLogWriter,
+    callLLM,
+    async (audio) => {
+      await whisperReady;
+      return whisperClient.transcribe(audio);
+    }
+  );
 
   if (existsSync(env.socketPath)) {
     unlinkSync(env.socketPath);

@@ -70,6 +70,19 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(liveCaptionsEnabled, forKey: Keys.liveCaptionsEnabled) }
     }
 
+    /// Set once the user explicitly chose the first-run "just local
+    /// transcription, skip AI setup" path. Persisted so the choice survives
+    /// relaunches — `OnboardingPolicy.needsProviderOnboarding` reads it to let a
+    /// transcribe-only user past the wizard without ever configuring an LLM.
+    @Published var localTranscriptionOnlyAcknowledged: Bool {
+        didSet {
+            defaults.set(
+                localTranscriptionOnlyAcknowledged,
+                forKey: Keys.localTranscriptionOnlyAcknowledged
+            )
+        }
+    }
+
     private let defaults: UserDefaults
 
     var isMuted: Bool {
@@ -102,6 +115,9 @@ final class AppConfiguration: ObservableObject {
         ) as? Bool ?? true
         playFeedbackSounds = defaults.object(forKey: Keys.playFeedbackSounds) as? Bool ?? true
         liveCaptionsEnabled = defaults.object(forKey: Keys.liveCaptionsEnabled) as? Bool ?? true
+        localTranscriptionOnlyAcknowledged = defaults.object(
+            forKey: Keys.localTranscriptionOnlyAcknowledged
+        ) as? Bool ?? false
     }
 
     private enum Keys {
@@ -116,5 +132,6 @@ final class AppConfiguration: ObservableObject {
         static let automaticOwnerProfileUpdates = "automaticOwnerProfileUpdates"
         static let playFeedbackSounds = "playFeedbackSounds"
         static let liveCaptionsEnabled = "liveCaptionsEnabled"
+        static let localTranscriptionOnlyAcknowledged = "localTranscriptionOnlyAcknowledged"
     }
 }

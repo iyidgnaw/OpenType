@@ -101,7 +101,26 @@ final class AppModel: ObservableObject {
     /// instead of the normal Home tab. Explicit `Bool?` rather than a
     /// derived computed property so a not-yet-loaded status doesn't
     /// momentarily flash the wizard before the real answer is known.
-    var needsProviderOnboarding: Bool { providerConfigStatus.map { !$0.ready } ?? false }
+    var needsProviderOnboarding: Bool {
+        providerConfigStatus.map {
+            OnboardingPolicy.needsProviderOnboarding(
+                whisperConfigured: $0.whisperConfigured,
+                llmConfigured: $0.llmConfigured,
+                localTranscriptionOnlyAcknowledged: configuration.localTranscriptionOnlyAcknowledged
+            )
+        } ?? false
+    }
+    /// True when the currently-selected mode needs an LLM (`ask`/`agent`) but
+    /// none is configured yet — the case a transcribe-only user hits after
+    /// taking the "skip AI setup" path and later switching to Ask/Agent. Drives
+    /// a lightweight inline nudge (with a jump to Settings' AI-model section)
+    /// rather than blocking the mode switch; `transcribe` is never gated. `nil`
+    /// provider status (not yet loaded) suppresses the nudge so it can't flash.
+    var needsLLMForSelectedMode: Bool {
+        guard configuration.selectedMode.requiresLLM else { return false }
+        guard let status = providerConfigStatus else { return false }
+        return !status.llmConfigured
+    }
     @Published private(set) var llmConfigSummary: LLMConfigSummary?
     @Published private(set) var whisperConfigSummary: WhisperConfigSummary?
 

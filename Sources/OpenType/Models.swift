@@ -43,6 +43,19 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
     /// sites in `AppModel` don't need to change shape.
     var requiresSelection: Bool { false }
 
+    /// True for the modes that make an actual LLM/text-generation call
+    /// (`ask` → `/oneshot/ask`, `agent` → `/agent/run`). `transcribe` is pure
+    /// ASR passthrough and never needs an LLM, which is why a transcribe-only
+    /// user can skip provider setup entirely — see `OnboardingPolicy`. Used to
+    /// surface a "configure an AI model first" nudge when one of these modes is
+    /// selected but no LLM is configured yet.
+    var requiresLLM: Bool {
+        switch self {
+        case .transcribe: return false
+        case .ask, .agent: return true
+        }
+    }
+
     var next: InputMode {
         let modes = Self.visibleModes
         guard let index = modes.firstIndex(of: self) else { return modes[0] }
@@ -966,6 +979,29 @@ struct ProviderConfigStatus: Decodable, Equatable {
     let llmConfigured: Bool
     let whisperConfigured: Bool
     let ready: Bool
+}
+
+/// Pure, testable decision for whether the first-run provider-setup wizard must
+/// take over the main window (P1-19). The sidecar's `ready` flag requires BOTH
+/// Whisper and an LLM to be configured, which traps a user who only wants local
+/// transcription (`transcribe` mode makes no LLM call at all) into configuring
+/// an LLM just to reach the app. This seam changes the truth table so that
+/// speech recognition being ready — or the user explicitly choosing the "just
+/// local transcription, skip AI setup" path — is enough to enter the app; LLM
+/// configuration is deferred to when an `ask`/`agent` mode actually needs it.
+///
+/// Rule: onboarding is required iff neither the local-only path was
+/// acknowledged nor Whisper is configured. `llmConfigured` is intentionally not
+/// a factor — an LLM alone can't capture speech, so it never lets the user in,
+/// and its absence never keeps a transcribe-ready user out.
+enum OnboardingPolicy {
+    static func needsProviderOnboarding(
+        whisperConfigured: Bool,
+        llmConfigured: Bool,
+        localTranscriptionOnlyAcknowledged: Bool
+    ) -> Bool {
+        !(localTranscriptionOnlyAcknowledged || whisperConfigured)
+    }
 }
 
 /// Mirrors the sidecar's `GET`/`PUT /config/llm` response shape. `type`/

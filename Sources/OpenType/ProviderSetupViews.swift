@@ -406,19 +406,25 @@ struct LLMProviderSetupContent: View {
 // MARK: - First-run onboarding wizard
 
 /// Shown instead of the normal Home tab (see `RootView` in `Views.swift`)
-/// whenever `AppModel.needsProviderOnboarding` is true -- i.e. the sidecar's
-/// `/config/status` reports the user hasn't explicitly finished configuring
-/// both Whisper and an LLM provider yet. Reuses `WhisperSetupContent`/
+/// whenever `AppModel.needsProviderOnboarding` is true -- i.e. per
+/// `OnboardingPolicy`, the user has neither configured Whisper nor taken the
+/// "just local transcription, skip AI setup" path yet (an LLM is deferred, not
+/// required to enter the app -- P1-19). Reuses `WhisperSetupContent`/
 /// `LLMProviderSetupContent` verbatim (same components `SettingsView` uses),
 /// so there is exactly one implementation of "configure + test + list +
-/// save", not a parallel wizard-only copy. Disappears automatically the
-/// moment both are saved -- `AppModel.saveWhisperConfig`/`saveLLMConfig`
-/// both refresh `providerConfigStatus`, which flips `needsProviderOnboarding`
-/// to false and lets `RootView` fall through to its normal tab content on
-/// the next body evaluation. No separate "Finish" action is needed for that
-/// reason; a lightweight completion banner just confirms it happened.
+/// save", not a parallel wizard-only copy. Disappears automatically the moment
+/// Whisper is saved or the local-only path is acknowledged --
+/// `AppModel.saveWhisperConfig` refreshes `providerConfigStatus` and
+/// `chooseLocalOnly` sets `localTranscriptionOnlyAcknowledged`, either of which
+/// flips `needsProviderOnboarding` to false and lets `RootView` fall through to
+/// its normal tab content on the next body evaluation. No separate "Finish"
+/// action is needed for that reason; a lightweight completion banner just
+/// confirms it happened.
 struct OnboardingWizardView: View {
     @ObservedObject var model: AppModel
+
+    @State private var isChoosingLocalOnly = false
+    @State private var localOnlyError: String?
 
     var body: some View {
         ScrollView {
@@ -427,31 +433,68 @@ struct OnboardingWizardView: View {
                     Text(OpenTypeL10n.text("欢迎使用 OpenType", english: "Welcome to OpenType"))
                         .font(.system(size: 18, weight: .bold))
                     Text(OpenTypeL10n.text(
-                        "开始之前，请先配置语音识别和 AI 模型提供方。两项都设置完成后即可正常使用。",
-                        english: "Before you start, set up speech recognition and an AI model provider below. Once both are configured, OpenType is ready to use."
+                        "先授予权限并设置语音识别即可开始使用。AI 模型（问答 / Agent 需要）可以稍后再配置。",
+                        english: "Grant permissions and set up speech recognition to get started. The AI model provider (needed for Ask / Agent) can wait until later."
                     ))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
 
+                // Permissions first: recording and Accessibility gate every
+                // mode, so guide those before any provider credentials.
                 OnboardingStepCard(
-                    title: OpenTypeL10n.text("1. 语音识别", english: "1. Speech recognition"),
+                    title: OpenTypeL10n.text("1. 权限", english: "1. Permissions"),
+                    done: model.microphonePermission == .granted && model.accessibilityGranted
+                ) {
+                    OnboardingPermissionsContent(model: model)
+                }
+
+                OnboardingStepCard(
+                    title: OpenTypeL10n.text("2. 语音识别", english: "2. Speech recognition"),
                     done: model.providerConfigStatus?.whisperConfigured == true
                 ) {
                     WhisperSetupContent(model: model)
                 }
 
                 OnboardingStepCard(
-                    title: OpenTypeL10n.text("2. AI 模型", english: "2. AI model provider"),
+                    title: OpenTypeL10n.text("3. AI 模型（可选）", english: "3. AI model provider (optional)"),
                     done: model.providerConfigStatus?.llmConfigured == true
                 ) {
                     LLMProviderSetupContent(model: model)
                 }
 
+                // Escape hatch for transcribe-only users: acknowledge local-only
+                // and persist whisper=local so `needsProviderOnboarding` flips to
+                // false and the wizard dismisses to the normal tabs. Ask/Agent
+                // will still prompt for an LLM later, when a mode needs it.
+                VStack(alignment: .leading, spacing: 6) {
+                    Button {
+                        chooseLocalOnly()
+                    } label: {
+                        if isChoosingLocalOnly {
+                            Text(OpenTypeL10n.text("正在设置…", english: "Setting up…"))
+                        } else {
+                            Text(OpenTypeL10n.text(
+                                "仅本地听写，跳过 AI 配置",
+                                english: "Just local transcription — skip AI setup"
+                            ))
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(isChoosingLocalOnly)
+
+                    if let localOnlyError {
+                        Text(localOnlyError)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 Text(OpenTypeL10n.text(
                     "之后可以随时在“设置”中重新配置。",
-                    english: "You can reconfigure either of these anytime from Settings."
+                    english: "You can reconfigure any of these anytime from Settings."
                 ))
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
@@ -459,6 +502,86 @@ struct OnboardingWizardView: View {
             .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func chooseLocalOnly() {
+        isChoosingLocalOnly = true
+        localOnlyError = nil
+        Task { @MainActor in
+            do {
+                // Persist whisper=local via the normal save path so ASR is the
+                // explicit choice (whisperConfigured becomes true) ...
+                _ = try await model.saveWhisperConfig(mode: .local)
+                // ... and record the acknowledgment so the local-only decision
+                // survives relaunch even independently of whisper state.
+                model.configuration.localTranscriptionOnlyAcknowledged = true
+                isChoosingLocalOnly = false
+            } catch {
+                model.configuration.localTranscriptionOnlyAcknowledged = true
+                isChoosingLocalOnly = false
+                localOnlyError = error.localizedDescription
+            }
+        }
+    }
+}
+
+/// Microphone + Accessibility guidance shown as the wizard's first step. Reuses
+/// `AppModel`'s existing permission state/actions (the same ones Settings'
+/// "连接与权限" section drives), so there is one implementation of the request
+/// flow, not a wizard-only copy.
+private struct OnboardingPermissionsContent: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(OpenTypeL10n.text(
+                "OpenType 需要麦克风来录音，需要辅助功能来读取选中文本并写回结果。",
+                english: "OpenType needs the microphone to record, and Accessibility to read your selection and write results back."
+            ))
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Label(
+                    OpenTypeL10n.text(
+                        "麦克风\(model.microphonePermission.title)",
+                        english: "Microphone \(model.microphonePermission.title)"
+                    ),
+                    systemImage: model.microphonePermission.symbol
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(model.microphonePermission == .granted ? Color.secondary : Color.orange)
+                Spacer()
+                if model.microphonePermission != .granted {
+                    Button(model.microphonePermission == .denied
+                        ? OpenTypeL10n.text("打开设置", english: "Open Settings")
+                        : OpenTypeL10n.text("授权", english: "Allow")
+                    ) {
+                        model.requestMicrophonePermission()
+                    }
+                    .controlSize(.small)
+                }
+            }
+
+            HStack {
+                Label(
+                    model.accessibilityGranted
+                        ? OpenTypeL10n.text("辅助功能已授权", english: "Accessibility granted")
+                        : OpenTypeL10n.text("辅助功能未授权", english: "Accessibility not granted"),
+                    systemImage: model.accessibilityGranted ? "circle.fill" : "circle"
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(model.accessibilityGranted ? Color.secondary : Color.orange)
+                Spacer()
+                if !model.accessibilityGranted {
+                    Button(OpenTypeL10n.text("授权", english: "Allow")) {
+                        model.requestAccessibility()
+                    }
+                    .controlSize(.small)
+                }
+            }
+        }
     }
 }
 

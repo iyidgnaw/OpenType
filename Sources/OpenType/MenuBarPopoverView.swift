@@ -25,6 +25,9 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             ModeGrid(model: model, configuration: configuration)
+            if model.needsLLMForSelectedMode {
+                llmSetupNudge
+            }
             Divider()
             statusArea
             Divider()
@@ -86,6 +89,46 @@ struct MenuBarPopoverView: View {
             .font(.system(size: 11.5, weight: .medium))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Shown when the user selects Ask/Agent but has no LLM configured (the
+    /// case a transcribe-only user reaches after skipping AI setup). Guides
+    /// them to configure one rather than silently letting the mode fail —
+    /// tapping it opens the main window on the Settings tab's AI-model section.
+    private var llmSetupNudge: some View {
+        Button {
+            onOpenMainWindow()
+            model.selectedTab = .settings
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10.5, weight: .medium))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(OpenTypeL10n.text(
+                        "该模式需要 AI 模型",
+                        english: "This mode needs an AI model"
+                    ))
+                    .font(.system(size: 10.5, weight: .medium))
+                    Text(OpenTypeL10n.text(
+                        "点此前往设置配置",
+                        english: "Tap to set one up in Settings"
+                    ))
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .foregroundStyle(Color.orange)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

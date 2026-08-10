@@ -11,10 +11,17 @@
  * `provider/routes.ts` expect from the local `WhisperClient` and the LLM
  * provider clients respectively.
  */
+import { DEFAULT_REQUEST_TIMEOUT_MS, requestTimeoutSignal } from "../http/requestTimeout";
+
 export interface RemoteWhisperConfig {
   baseUrl: string;
   apiKey: string;
   model?: string;
+}
+
+export interface RemoteWhisperClientOptions {
+  /** Per-request timeout floor; defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS}. */
+  timeoutMs?: number;
 }
 
 export interface RemoteWhisperTestResult {
@@ -61,8 +68,11 @@ async function parseJsonBody(response: Response): Promise<unknown> {
 
 export function createRemoteWhisperClient(
   config: RemoteWhisperConfig,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  options: RemoteWhisperClientOptions = {}
 ) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+
   async function transcribe(audio: Uint8Array): Promise<string> {
     const form = new FormData();
     form.set("model", config.model ?? DEFAULT_MODEL);
@@ -72,6 +82,7 @@ export function createRemoteWhisperClient(
       method: "POST",
       headers: { Authorization: `Bearer ${config.apiKey}` },
       body: form,
+      signal: requestTimeoutSignal(timeoutMs),
     });
 
     const parsedBody = await parseJsonBody(response);
@@ -93,6 +104,7 @@ export function createRemoteWhisperClient(
       const response = await fetchImpl(`${config.baseUrl}/models`, {
         method: "GET",
         headers: { Authorization: `Bearer ${config.apiKey}` },
+        signal: requestTimeoutSignal(timeoutMs),
       });
       const parsedBody = await parseJsonBody(response);
       if (!response.ok) {

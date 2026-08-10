@@ -1,24 +1,19 @@
 import { createRemoteWhisperClient, type RemoteWhisperConfig } from "../asr/remoteWhisperClient";
 import type { Route } from "../router";
 import type { ProviderConfigStore, StoredWhisperConfig, WhisperMode } from "./configStore";
+import { maskApiKey } from "./maskApiKey";
 import { createLLMClientFromConfig } from "./registry";
 import { KNOWN_MODELS_FALLBACK, type LLMProviderConfig, type LLMProviderType } from "./types";
 
+/**
+ * Re-exported so the masking rule is unit-testable
+ * (`test/provider/maskApiKey.test.ts`) without reaching into route wiring; the
+ * implementation lives in `./maskApiKey`.
+ */
+export { maskApiKey };
+
 async function readJsonBody<T>(req: Request): Promise<T> {
   return (await req.json()) as T;
-}
-
-/**
- * Never echoes a raw API key back to the caller (Swift Settings UI included)
- * -- once saved, only this masked form round-trips over the local socket.
- * Short keys (<=8 chars, effectively only ever test fixtures) are fully
- * starred rather than partially revealed.
- */
-function maskApiKey(apiKey: string): string {
-  if (apiKey.length <= 8) {
-    return "*".repeat(apiKey.length);
-  }
-  return `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`;
 }
 
 interface ProviderConfigRouteDeps {

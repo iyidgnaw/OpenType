@@ -70,7 +70,9 @@ describe("PUT /config/llm", () => {
     expect(status).toBe(200);
     expect(json.configured).toBe(true);
     expect(json.apiKeyMasked).not.toContain("super-secret");
-    expect(json.apiKeyMasked).toContain("-key");
+    // New masking rule reveals only a 3-char suffix ("key"), not the old
+    // 4-char "-key"; the secret middle is fully starred.
+    expect(json.apiKeyMasked).toContain("key");
     expect(store.getStatus().llmConfigured).toBe(true);
     expect(store.getLLMConfig()?.apiKey).toBe("sk-super-secret-key");
   });

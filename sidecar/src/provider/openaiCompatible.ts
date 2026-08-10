@@ -1,3 +1,4 @@
+import { DEFAULT_REQUEST_TIMEOUT_MS, requestTimeoutSignal } from "../http/requestTimeout";
 import type {
   LLMProviderClient,
   LLMProviderConfig,
@@ -7,6 +8,11 @@ import type {
   ProviderModel,
   ProviderTestResult,
 } from "./types";
+
+export interface ProviderClientOptions {
+  /** Per-request timeout floor; defaults to {@link DEFAULT_REQUEST_TIMEOUT_MS}. */
+  timeoutMs?: number;
+}
 
 /**
  * Generic OpenAI-compatible Chat Completions client (`/chat/completions`,
@@ -59,8 +65,11 @@ async function parseJsonBody(response: Response): Promise<unknown> {
 
 export function createOpenAICompatibleClient(
   config: LLMProviderConfig,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  options: ProviderClientOptions = {}
 ): LLMProviderClient {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+
   async function chat(
     messages: ProviderChatMessage[],
     options?: ProviderChatOptions
@@ -81,6 +90,7 @@ export function createOpenAICompatibleClient(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(requestBody),
+      signal: requestTimeoutSignal(timeoutMs),
     });
 
     const parsedBody = await parseJsonBody(response);
@@ -113,6 +123,7 @@ export function createOpenAICompatibleClient(
     const response = await fetchImpl(url, {
       method: "GET",
       headers: { Authorization: `Bearer ${config.apiKey}` },
+      signal: requestTimeoutSignal(timeoutMs),
     });
 
     const parsedBody = await parseJsonBody(response);

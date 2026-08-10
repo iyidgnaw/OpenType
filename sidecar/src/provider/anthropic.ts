@@ -1,3 +1,5 @@
+import { DEFAULT_REQUEST_TIMEOUT_MS, requestTimeoutSignal } from "../http/requestTimeout";
+import type { ProviderClientOptions } from "./openaiCompatible";
 import type {
   LLMProviderClient,
   LLMProviderConfig,
@@ -175,8 +177,10 @@ interface AnthropicResponseContentBlock {
 
 export function createAnthropicClient(
   config: LLMProviderConfig,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  options: ProviderClientOptions = {}
 ): LLMProviderClient {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const authHeaders = {
     "x-api-key": config.apiKey,
     "anthropic-version": "2023-06-01",
@@ -207,6 +211,7 @@ export function createAnthropicClient(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(requestBody),
+      signal: requestTimeoutSignal(timeoutMs),
     });
 
     const parsedBody = await parseJsonBody(response);
@@ -243,6 +248,7 @@ export function createAnthropicClient(
     const response = await fetchImpl(`${config.baseUrl}/v1/models`, {
       method: "GET",
       headers: authHeaders,
+      signal: requestTimeoutSignal(timeoutMs),
     });
 
     const parsedBody = await parseJsonBody(response);

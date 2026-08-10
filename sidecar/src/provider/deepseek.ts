@@ -1,4 +1,5 @@
 import type { SidecarEnv } from "../env";
+import { DEFAULT_REQUEST_TIMEOUT_MS, requestTimeoutSignal } from "../http/requestTimeout";
 
 /**
  * `tool_calls`/`tool_call_id`/`name` support the agent loop's OpenAI-style
@@ -75,8 +76,11 @@ function extractErrorMessage(body: unknown): string | undefined {
 
 export function createDeepSeekClient(
   env: Pick<SidecarEnv, "deepSeekApiKey" | "deepSeekModel" | "deepSeekBaseUrl">,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  options: { timeoutMs?: number } = {}
 ) {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+
   async function chat(
     messages: DeepSeekMessage[],
     options?: DeepSeekChatOptions
@@ -97,6 +101,7 @@ export function createDeepSeekClient(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(requestBody),
+      signal: requestTimeoutSignal(timeoutMs),
     });
 
     const rawText = await response.text();

@@ -54,6 +54,28 @@ export interface RunAgentLoopResult {
 /** Per spec 3 §3: "something in the 8-12 range"; 10 is this implementation's pick. */
 const MAX_ITERATIONS = 10;
 
+/**
+ * Budget for a single tool result before it is fed back into the next chat
+ * call. A tool that returns a huge string would otherwise blow up the context
+ * (Bug P2); kept well under the router's 50k ceiling so an oversized result is
+ * clamped long before it can wedge the request path.
+ */
+const MAX_TOOL_RESULT_CHARS = 20_000;
+
+/**
+ * Pure size cap for a tool result. Returns `text` unchanged when it already
+ * fits within `maxLen`; otherwise truncates to `maxLen` and appends a short
+ * marker (so the total stays close to `maxLen`) carrying a visible truncation
+ * indicator, so the model can tell content was cut rather than silently
+ * receiving a partial blob.
+ */
+export function clampToolResult(text: string, maxLen: number): string {
+  if (text.length <= maxLen) {
+    return text;
+  }
+  return `${text.slice(0, maxLen)}\n...[truncated]`;
+}
+
 interface OpenAiToolCall {
   id: string;
   type: "function";
@@ -155,7 +177,7 @@ export async function runAgentLoop(
         role: "tool",
         tool_call_id: toolCall.id,
         name: toolCall.function.name,
-        content: toolResultContent,
+        content: clampToolResult(toolResultContent, MAX_TOOL_RESULT_CHARS),
       });
     }
   }

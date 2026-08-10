@@ -63,14 +63,6 @@ final class ContextBridge {
         snapshot.restore(to: pasteboard)
     }
 
-    func undoLastChange() throws {
-        guard accessibilityGranted else {
-            requestAccessibilityPermission()
-            throw OpenTypeError.accessibilityRequired
-        }
-        postKey(keyCode: CGKeyCode(kVK_ANSI_Z), flags: .maskCommand)
-    }
-
     private func selectedText() -> String? {
         guard accessibilityGranted,
               let focusedElement = focusedElement() else { return nil }

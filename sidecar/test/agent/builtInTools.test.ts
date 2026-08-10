@@ -35,7 +35,7 @@ describe("createBuiltInTools", () => {
   });
 
   describe("opentype__remember_fact", () => {
-    test("category 'term' writes directly into entity_terms with confidence 1.0, origin 'owner'", async () => {
+    test("category 'term' writes directly into entity_terms with confidence 1.0, origin 'untrusted'", async () => {
       const store = makeStore();
       const callLLM: CallLLM = async () => JSON.stringify({ candidates: [] });
       const tools = createBuiltInTools({ store, callLLM });
@@ -52,7 +52,7 @@ describe("createBuiltInTools", () => {
       expect(terms[0]?.canonicalTerm).toBe("PayPal");
       expect(terms[0]?.aliases.sort()).toEqual(["pay pal", "paypal"].sort());
       expect(terms[0]?.confidence).toBe(1.0);
-      expect(terms[0]?.origin).toBe("owner");
+      expect(terms[0]?.origin).toBe("untrusted");
       expect(terms[0]?.category).toBe("term");
     });
 
@@ -105,7 +105,7 @@ describe("createBuiltInTools", () => {
       const facts = store.allOwnerFacts();
       expect(facts).toHaveLength(1);
       expect(facts[0]?.content).toBe("The owner's name is Diyi.");
-      expect(facts[0]?.origin).toBe("owner");
+      expect(facts[0]?.origin).toBe("untrusted");
     });
 
     test("category 'profile' without content returns an error, without writing anything", async () => {

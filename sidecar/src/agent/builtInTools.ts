@@ -69,7 +69,11 @@ function handleRememberFact(store: MemoryStore, rawArgs: unknown): { content: st
       category: "term",
       confidence: 1.0,
       sourceEventIds: [],
-      origin: "owner",
+      // The tool runs inside the agent loop, where content can originate from
+      // untrusted context, so a term recorded here is NOT owner-confirmed
+      // (P1-12). It stays usable for correction but is never treated as an
+      // owner-authored term for prompt injection.
+      origin: "untrusted",
     });
     const aliasSummary = term.aliases.length > 0 ? term.aliases.join(", ") : "none";
     return {
@@ -85,7 +89,10 @@ function handleRememberFact(store: MemoryStore, rawArgs: unknown): { content: st
         content: "Error: remember_fact with category \"profile\" requires non-empty content.",
       };
     }
-    store.recordOwnerFact(args.content, "owner");
+    // Recorded as "untrusted" for the same reason as the term path above: a
+    // fact learned via the agent/context flow is not owner-confirmed and must
+    // not be injected into prompt context (P1-12).
+    store.recordOwnerFact(args.content, "untrusted");
     return { content: `Remembered: ${args.content}` };
   }
 
@@ -134,8 +141,8 @@ export function createBuiltInTools(deps: BuiltInToolsDeps): BuiltInToolSet {
           "Remember something the owner explicitly told you to remember. Use category \"term\" for a " +
           "name/alias correction (e.g. \"when I say PayPal I mean the company PayPal\" -> canonicalTerm " +
           "\"PayPal\", aliases [\"paypal\"]). Use category \"profile\" for a free-text fact about the owner " +
-          "(e.g. their name or a stated preference) -> content is that fact in plain words. This is a direct, " +
-          "explicit owner instruction: call it immediately and trust it fully, do not ask for confirmation first.",
+          "(e.g. their name or a stated preference) -> content is that fact in plain words. Use it when the " +
+          "owner directly asks you to remember something; you do not need to ask for confirmation first.",
         parameters: {
           type: "object",
           properties: {

@@ -145,6 +145,29 @@ export class MemoryStore {
     return this.db.query("SELECT * FROM owner_facts").all() as OwnerFact[];
   }
 
+  /**
+   * Owner facts of a single origin. Used by prompt-context injection, which
+   * must only surface facts the owner actually authored ("owner") and never
+   * ones planted through the agent/context flow ("untrusted"/"agent"/"system")
+   * -- see `buildOwnerFactsContext`. The management surface still uses
+   * `allOwnerFacts()` so a user can review (and delete) poisoned facts.
+   */
+  ownerFactsByOrigin(origin: EventOrigin): OwnerFact[] {
+    return this.db
+      .query("SELECT * FROM owner_facts WHERE origin = ?")
+      .all(origin) as OwnerFact[];
+  }
+
+  /**
+   * Removes a single owner fact by id (the delete counterpart to
+   * `recordOwnerFact`). Returns whether a row was actually removed, so the
+   * management endpoint can distinguish a real delete from a missing id.
+   */
+  deleteOwnerFact(id: number): boolean {
+    const result = this.db.run("DELETE FROM owner_facts WHERE id = ?", [id]);
+    return result.changes > 0;
+  }
+
   unconsolidatedEventCount(): number {
     const row = this.db
       .query("SELECT COUNT(*) as count FROM episodic_events WHERE consolidatedAt IS NULL")

@@ -36,9 +36,17 @@ export function findKnownTerms(store: MemoryStore, relevantText: string): Entity
  * recorded owner fact unconditionally: given the likely small number of
  * facts for a single user, a relevance-matching system for free text isn't
  * worth building for v1 — see the design discussion this was scoped from.
+ *
+ * Origin-gated (P1-12): ONLY facts the owner actually authored (origin
+ * "owner") are injected. Facts recorded through the agent/context flow
+ * (origin "untrusted"/"agent"/"system") may have originated from untrusted
+ * context — injecting them verbatim into every prompt is exactly the memory-
+ * poisoning path being closed — so they are never surfaced here. They remain
+ * visible on the management surface (`GET /memory/owner-facts`) so a user can
+ * find and delete a poisoned one.
  */
 export function buildOwnerFactsContext(store: MemoryStore): string {
-  const facts = store.allOwnerFacts();
+  const facts = store.ownerFactsByOrigin("owner");
   if (facts.length === 0) {
     return "";
   }

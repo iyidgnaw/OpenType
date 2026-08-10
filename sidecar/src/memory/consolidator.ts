@@ -306,6 +306,18 @@ export function upsertEntityTerm(
 }
 
 /**
+ * Module-level mutex serializing every `runConsolidation` call in this process
+ * (P1-14 (b)). Consolidation reads a "before" snapshot of `entity_terms`, then
+ * writes against it; two overlapping runs would each read the same empty
+ * snapshot and both INSERT the same term, double-writing it. Chaining each run
+ * behind the previous one forces the second to read the first's committed
+ * result and merge instead. The lock is ALWAYS released in `runConsolidation`'s
+ * `finally`, so an injected/real failure inside a run can never deadlock the
+ * runs queued behind it.
+ */
+let consolidationMutex: Promise<void> = Promise.resolve();
+
+/**
  * Runs one "dreaming" consolidation pass per spec §4.4. Fetches up to 200
  * most-recent unconsolidated events, asks `callLLM` for structured
  * candidates, applies the deterministic gate, snapshots `entity_terms`
@@ -318,8 +330,33 @@ export function upsertEntityTerm(
  * either — otherwise a failed attempt would reset the 12-hour trigger and
  * delay the retry the spec explicitly wants ("the next scheduled attempt
  * retries the same material").
+ *
+ * Serialized against overlapping calls via `consolidationMutex`, and its write
+ * phase is wrapped in a single DB transaction (P1-14) so a failure partway
+ * through leaves no partial rows.
  */
 export async function runConsolidation(
+  store: MemoryStore,
+  callLLM: CallLLM
+): Promise<ConsolidationResult> {
+  const previous = consolidationMutex;
+  let release!: () => void;
+  consolidationMutex = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  // Wait for any in-flight run to finish before reading our own "before"
+  // snapshot. `catch(() => {})` so a prior run's rejection doesn't poison the
+  // chain — the mutex only orders runs, it doesn't propagate their errors.
+  await previous.catch(() => {});
+
+  try {
+    return await runConsolidationInner(store, callLLM);
+  } finally {
+    release();
+  }
+}
+
+async function runConsolidationInner(
   store: MemoryStore,
   callLLM: CallLLM
 ): Promise<ConsolidationResult> {
@@ -365,72 +402,87 @@ export async function runConsolidation(
 
   const accepted = candidates.filter(passesGate);
 
-  // Snapshot BEFORE any change, per spec.
-  const snapshotRows = store.db.query("SELECT * FROM entity_terms").all();
-  const snapshotBeforeJSON = JSON.stringify(snapshotRows);
-
   const now = nextRanAt();
-  const summaryParts: string[] = [];
-  // Kept up to date as we go so a later accepted candidate in the same batch
-  // can merge into one inserted earlier in the same run.
-  const currentTerms = existingTermsBefore.slice();
 
-  for (const candidate of accepted) {
-    const { term, merged } = upsertEntityTerm(
-      store,
-      currentTerms,
-      {
-        canonicalTerm: candidate.canonicalTerm,
-        aliases: candidate.aliases,
-        category: candidate.category,
-        confidence: candidate.confidence,
-        sourceEventIds: candidate.supportingEventIds,
-      },
-      now
-    );
+  // The entire write phase runs inside one transaction (P1-14 (a)): the
+  // entity_terms upserts, the episodic_events consolidatedAt update, and the
+  // memory_consolidation_runs insert all commit together or not at all, so a
+  // failure partway through (e.g. the UPDATE) rolls back the earlier inserts
+  // rather than leaving partial rows behind.
+  const writePhase = store.db.transaction((): number => {
+    // Snapshot BEFORE any change, per spec.
+    const snapshotRows = store.db.query("SELECT * FROM entity_terms").all();
+    const snapshotBeforeJSON = JSON.stringify(snapshotRows);
 
-    const existingIndex = currentTerms.findIndex((t) => t.id === term.id);
-    if (existingIndex >= 0) {
-      currentTerms[existingIndex] = term;
-    } else {
-      currentTerms.push(term);
+    const summaryParts: string[] = [];
+    // Kept up to date as we go so a later accepted candidate in the same batch
+    // can merge into one inserted earlier in the same run.
+    const currentTerms = existingTermsBefore.slice();
+
+    for (const candidate of accepted) {
+      const { term, merged } = upsertEntityTerm(
+        store,
+        currentTerms,
+        {
+          canonicalTerm: candidate.canonicalTerm,
+          aliases: candidate.aliases,
+          category: candidate.category,
+          confidence: candidate.confidence,
+          sourceEventIds: candidate.supportingEventIds,
+          // A machine-derived candidate is not owner-confirmed (P1-12): record
+          // its provenance as "system" rather than the default "owner".
+          origin: "system",
+        },
+        now
+      );
+
+      const existingIndex = currentTerms.findIndex((t) => t.id === term.id);
+      if (existingIndex >= 0) {
+        currentTerms[existingIndex] = term;
+      } else {
+        currentTerms.push(term);
+      }
+
+      if (merged) {
+        summaryParts.push(`merged "${candidate.canonicalTerm}" into "${term.canonicalTerm}"`);
+      } else {
+        const aliasSummary = candidate.aliases.length > 0 ? candidate.aliases.join(", ") : "none";
+        summaryParts.push(`added "${candidate.canonicalTerm}" (aliases: ${aliasSummary})`);
+      }
     }
 
-    if (merged) {
-      summaryParts.push(`merged "${candidate.canonicalTerm}" into "${term.canonicalTerm}"`);
-    } else {
-      const aliasSummary = candidate.aliases.length > 0 ? candidate.aliases.join(", ") : "none";
-      summaryParts.push(`added "${candidate.canonicalTerm}" (aliases: ${aliasSummary})`);
+    // All fetched events were considered by this run, whether or not they ended
+    // up supporting an accepted candidate — "processed" per spec, not just the
+    // supporting subset. consolidatedAt is set to this run's own timestamp so
+    // rollbackRun can find exactly this run's events again.
+    if (events.length > 0) {
+      const ids = events.map((e) => e.id);
+      const placeholders = ids.map(() => "?").join(",");
+      store.db.run(
+        `UPDATE episodic_events SET consolidatedAt = ? WHERE id IN (${placeholders})`,
+        [now, ...ids]
+      );
     }
-  }
 
-  // All fetched events were considered by this run, whether or not they ended
-  // up supporting an accepted candidate — "processed" per spec, not just the
-  // supporting subset. consolidatedAt is set to this run's own timestamp so
-  // rollbackRun can find exactly this run's events again.
-  if (events.length > 0) {
-    const ids = events.map((e) => e.id);
-    const placeholders = ids.map(() => "?").join(",");
-    store.db.run(
-      `UPDATE episodic_events SET consolidatedAt = ? WHERE id IN (${placeholders})`,
-      [now, ...ids]
+    const summary =
+      summaryParts.length > 0
+        ? summaryParts.join("; ")
+        : `no candidates accepted (${candidates.length} proposed, ${events.length} events considered)`;
+
+    const runInsert = store.db.run(
+      `INSERT INTO memory_consolidation_runs
+        (ranAt, eventsConsidered, candidatesProposed, candidatesAccepted, summary, snapshotBeforeJSON, rolledBackAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [now, events.length, candidates.length, accepted.length, summary, snapshotBeforeJSON, null]
     );
-  }
 
-  const summary =
-    summaryParts.length > 0
-      ? summaryParts.join("; ")
-      : `no candidates accepted (${candidates.length} proposed, ${events.length} events considered)`;
+    return Number(runInsert.lastInsertRowid);
+  });
 
-  const runInsert = store.db.run(
-    `INSERT INTO memory_consolidation_runs
-      (ranAt, eventsConsidered, candidatesProposed, candidatesAccepted, summary, snapshotBeforeJSON, rolledBackAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [now, events.length, candidates.length, accepted.length, summary, snapshotBeforeJSON, null]
-  );
+  const ranRunId = writePhase();
 
   return {
-    ranRunId: Number(runInsert.lastInsertRowid),
+    ranRunId,
     eventsConsidered: events.length,
     candidatesProposed: candidates.length,
     candidatesAccepted: accepted.length,
@@ -466,28 +518,37 @@ export function rollbackRun(store: MemoryStore, runId: number): void {
 
   const snapshotRows = JSON.parse(run.snapshotBeforeJSON) as Array<Record<string, unknown>>;
 
-  store.db.run("DELETE FROM entity_terms");
-  for (const row of snapshotRows) {
-    store.db.run(
-      `INSERT INTO entity_terms
-        (id, canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        row.id,
-        row.canonicalTerm,
-        row.aliases,
-        row.category,
-        row.confidence,
-        row.origin,
-        row.sourceEventIds,
-        row.createdAt,
-        row.updatedAt,
-        row.supersedes,
-      ]
-    );
-  }
+  // The whole restore runs inside one transaction (P1-14 (c)): the DELETE, the
+  // per-row re-inserts, and the two run/event bookkeeping updates commit
+  // together or not at all. If the re-insert loop is interrupted partway,
+  // entity_terms is left UNCHANGED (still the live state) rather than
+  // half-deleted/half-restored, and the run is not marked rolledBackAt.
+  const doRollback = store.db.transaction(() => {
+    store.db.run("DELETE FROM entity_terms");
+    for (const row of snapshotRows) {
+      store.db.run(
+        `INSERT INTO entity_terms
+          (id, canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.id,
+          row.canonicalTerm,
+          row.aliases,
+          row.category,
+          row.confidence,
+          row.origin,
+          row.sourceEventIds,
+          row.createdAt,
+          row.updatedAt,
+          row.supersedes,
+        ]
+      );
+    }
 
-  const now = Date.now();
-  store.db.run("UPDATE memory_consolidation_runs SET rolledBackAt = ? WHERE id = ?", [now, runId]);
-  store.db.run("UPDATE episodic_events SET consolidatedAt = NULL WHERE consolidatedAt = ?", [run.ranAt]);
+    const now = Date.now();
+    store.db.run("UPDATE memory_consolidation_runs SET rolledBackAt = ? WHERE id = ?", [now, runId]);
+    store.db.run("UPDATE episodic_events SET consolidatedAt = NULL WHERE consolidatedAt = ?", [run.ranAt]);
+  });
+
+  doRollback();
 }

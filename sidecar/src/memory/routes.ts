@@ -35,5 +35,24 @@ export function buildMemoryRoutes(store: MemoryStore, callLLM: CallLLM): Route[]
         return Response.json({ result });
       },
     },
+    {
+      // Lists EVERY owner fact regardless of origin (owner/untrusted/agent/
+      // system) — the opposite requirement to prompt injection, which only
+      // surfaces "owner" facts. Exposing all origins here is what lets a user
+      // find a poisoned (non-owner) fact to delete it (P1-12).
+      method: "GET",
+      path: "/memory/owner-facts",
+      handler: () => Response.json({ ownerFacts: store.allOwnerFacts() }),
+    },
+    {
+      method: "DELETE",
+      path: "/memory/owner-facts/:id",
+      handler: (req) => {
+        const { pathname } = new URL(req.url);
+        const id = Number(pathname.split("/").pop());
+        store.deleteOwnerFact(id);
+        return Response.json({ deleted: true });
+      },
+    },
   ];
 }

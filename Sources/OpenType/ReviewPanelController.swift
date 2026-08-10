@@ -58,16 +58,22 @@ final class ReviewPanelController {
 
     var isOpen: Bool { panel?.isVisible ?? false }
 
-    private lazy var hostingView = NSHostingView(
-        rootView: ReviewPanelView(
-            presentation: presentation,
-            onTextViewReady: { [weak self] textView in
-                self?.textView = textView
-            },
-            onCommit: { [weak self] in self?.onCommit?() },
-            onCancel: { [weak self] in self?.onCancel?() }
+    /// Retained strongly (in addition to the panel's own `contentView`
+    /// reference) and rebuilt on every `show(...)` — see `show(...)` for why.
+    private var hostingView: NSHostingView<ReviewPanelView>?
+
+    private func makeHostingView() -> NSHostingView<ReviewPanelView> {
+        NSHostingView(
+            rootView: ReviewPanelView(
+                presentation: presentation,
+                onTextViewReady: { [weak self] textView in
+                    self?.textView = textView
+                },
+                onCommit: { [weak self] in self?.onCommit?() },
+                onCancel: { [weak self] in self?.onCancel?() }
+            )
         )
-    )
+    }
 
     func show(originalTranscript: String) {
         presentation.text = originalTranscript
@@ -75,6 +81,21 @@ final class ReviewPanelController {
         presentation.correctionHint = nil
 
         let panel = panel ?? makePanel()
+
+        // Rebuild the hosting view on every show. `hide()` nils the weak
+        // `textView` but leaves the cached panel intact; if we reused a single
+        // lazily-built hosting view, SwiftUI would run only `updateNSView` (a
+        // deliberate no-op) on re-show instead of `makeNSView`, so
+        // `onTextViewReady` would never re-fire and `textView` would stay nil
+        // for the whole second (and every subsequent) session — killing
+        // voice-correction and diverging `currentText()` from the visible,
+        // committed text (P0-3). A fresh hosting view forces `makeNSView` to
+        // run again, binding a live `NSTextView` seeded with the CURRENT
+        // `presentation.text` (just set to `originalTranscript` above).
+        let hostingView = makeHostingView()
+        self.hostingView = hostingView
+        panel.contentView = hostingView
+
         position(panel)
         panel.makeKeyAndOrderFront(nil)
         self.panel = panel
@@ -182,7 +203,8 @@ final class ReviewPanelController {
             .stationary
         ]
         panel.hidesOnDeactivate = false
-        panel.contentView = hostingView
+        // The content view is (re)assigned by `show(...)` on every session —
+        // see that method for why the hosting view must be rebuilt each time.
         return panel
     }
 

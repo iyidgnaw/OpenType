@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import type { LLMProviderType } from "./types";
 
@@ -85,8 +92,20 @@ export class ProviderConfigStore {
     if (!existsSync(this.path)) {
       return { ...EMPTY_FILE };
     }
+    let raw: string;
     try {
-      const raw = readFileSync(this.path, "utf8");
+      raw = readFileSync(this.path, "utf8");
+    } catch {
+      // Unreadable for a reason other than absence -- boot unconfigured
+      // rather than bricking the sidecar.
+      return { ...EMPTY_FILE };
+    }
+    // A genuinely empty (zero-length) file -- e.g. a crash-truncated write --
+    // is not corruption to preserve; just boot cleanly unconfigured.
+    if (raw.length === 0) {
+      return { ...EMPTY_FILE };
+    }
+    try {
       const parsed = JSON.parse(raw) as Partial<ProviderConfigFile>;
       return {
         llm: parsed.llm,
@@ -94,7 +113,24 @@ export class ProviderConfigStore {
         whisper: parsed.whisper,
         whisperConfigured: parsed.whisperConfigured === true,
       };
-    } catch {
+    } catch (err) {
+      // Corrupt (non-empty, unparseable) config. Throwing here would brick
+      // sidecar boot (the store is constructed in server.ts main() with no
+      // try/catch), including transcribe-only users who never configured a
+      // provider. Instead self-heal loudly: preserve the original bytes aside
+      // as evidence, log, and start cleanly unconfigured so onboarding can
+      // re-trigger.
+      const corruptPath = `${this.path}.corrupt-${Date.now()}`;
+      try {
+        renameSync(this.path, corruptPath);
+      } catch {
+        // If we can't rename it aside, still don't block boot.
+      }
+      console.error(
+        `[ProviderConfigStore] Corrupt provider config at ${this.path}; ` +
+          `preserved original bytes to ${corruptPath} and starting ` +
+          `unconfigured. Parse error: ${String(err)}`,
+      );
       return { ...EMPTY_FILE };
     }
   }
@@ -104,8 +140,53 @@ export class ProviderConfigStore {
     if (dir && dir !== "." && !existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    writeFileSync(this.path, JSON.stringify(this.file, null, 2), "utf8");
-    chmodSync(this.path, 0o600);
+    const data = JSON.stringify(this.file, null, 2);
+    // Atomic write: create a fresh temp file 0600 from the start (no
+    // world-readable window on the plaintext API key), then atomically rename
+    // it onto the destination so the config is only ever replaced whole and
+    // the destination path is never observably truncated. A leftover temp is
+    // cleaned up on failure.
+    const tmpPath = `${this.path}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      writeFileSync(tmpPath, data, { mode: 0o600 });
+      renameSync(tmpPath, this.path);
+    } catch (err) {
+      try {
+        if (existsSync(tmpPath)) {
+          rmSync(tmpPath, { force: true });
+        }
+      } catch {
+        // best-effort cleanup
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Validate + normalize a provider baseUrl. Rejects empty/malformed values
+   * and any non-http(s) scheme. Normalizes by stripping trailing slash(es) via
+   * plain string trimming -- deliberately NOT `new URL().toString()`, which
+   * re-appends a "/" to a root URL and would turn `https://api.deepseek.com/`
+   * back into `https://api.deepseek.com/` instead of the desired
+   * `https://api.deepseek.com`.
+   */
+  private normalizeBaseUrl(baseUrl: string): string {
+    if (typeof baseUrl !== "string" || baseUrl.trim().length === 0) {
+      throw new Error("baseUrl must be a non-empty http(s) URL");
+    }
+    const trimmed = baseUrl.trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      throw new Error(`baseUrl is not a valid URL: ${baseUrl}`);
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(
+        `baseUrl must use http or https, got: ${parsed.protocol}`,
+      );
+    }
+    return trimmed.replace(/\/+$/, "");
   }
 
   getStatus(): ProviderConfigStatus {
@@ -120,7 +201,11 @@ export class ProviderConfigStore {
   }
 
   setLLMConfig(config: StoredLLMConfig): void {
-    this.file = { ...this.file, llm: config, llmConfigured: true };
+    const normalized: StoredLLMConfig = {
+      ...config,
+      baseUrl: this.normalizeBaseUrl(config.baseUrl),
+    };
+    this.file = { ...this.file, llm: normalized, llmConfigured: true };
     this.persist();
   }
 
@@ -129,7 +214,13 @@ export class ProviderConfigStore {
   }
 
   setWhisperConfig(config: StoredWhisperConfig): void {
-    this.file = { ...this.file, whisper: config, whisperConfigured: true };
+    // Local mode needs no baseUrl; remote mode's baseUrl is validated +
+    // normalized the same way as the LLM config.
+    const normalized: StoredWhisperConfig =
+      config.mode === "remote" && config.baseUrl !== undefined
+        ? { ...config, baseUrl: this.normalizeBaseUrl(config.baseUrl) }
+        : { ...config };
+    this.file = { ...this.file, whisper: normalized, whisperConfigured: true };
     this.persist();
   }
 }

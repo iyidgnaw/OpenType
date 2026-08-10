@@ -609,18 +609,18 @@ private struct LastResultCard: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            if let notice = model.lastDeliveryNotice {
+                Text(notice)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack {
                 Button {
                     model.copyLastResult()
                 } label: {
                     Label("复制", systemImage: "doc.on.doc")
-                }
-                .controlSize(.small)
-
-                Button {
-                    model.undo()
-                } label: {
-                    Label("撤销写入", systemImage: "arrow.uturn.backward")
                 }
                 .controlSize(.small)
 
@@ -1061,6 +1061,12 @@ private struct SettingsView: View {
                         "完成后自动写入当前输入框",
                         isOn: $configuration.automaticallyInsert
                     )
+                    if configuration.automaticallyInsert {
+                        Toggle(
+                            "写入成功后保留原剪贴板内容",
+                            isOn: $configuration.retainClipboardAfterInsert
+                        )
+                    }
                     Toggle(
                         "保留本地输入历史",
                         isOn: $configuration.keepHistory

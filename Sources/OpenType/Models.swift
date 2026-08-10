@@ -355,14 +355,59 @@ enum OutputDeliveryPolicy {
         for mode: InputMode,
         automaticallyInsert: Bool
     ) -> OutputDeliveryStrategy {
-        automaticallyInsert ? .automaticInsert : .clipboard
+        guard automaticallyInsert else { return .clipboard }
+        switch mode {
+        case .ask:
+            // `ask` answers are delivered to the floating popup + clipboard.
+            // Auto-pasting a multi-line answer into whatever field happens to
+            // be focused (often a chat box) is a high-misfire action, so this
+            // mode never auto-inserts regardless of the setting.
+            return .clipboard
+        case .transcribe, .agent:
+            return .automaticInsert
+        }
     }
 
+    /// Whether the generated result should be copied to the clipboard.
+    ///
+    /// Clipboard availability is a product-level guarantee, so the default is
+    /// always `true`. The only case that skips the copy is when the user has
+    /// explicitly opted out of retaining the clipboard after a *successful*
+    /// insert (`retainClipboardAfterInsert == true`) — there the result is
+    /// already in the focused field and the user chose to keep their original
+    /// clipboard untouched. If the insert did not land, the clipboard copy is
+    /// still made so the result is never lost.
+    static func retainsClipboardCopy(
+        for mode: InputMode,
+        insertSucceeded: Bool,
+        retainClipboardAfterInsert: Bool
+    ) -> Bool {
+        !(retainClipboardAfterInsert && insertSucceeded)
+    }
+
+    /// Back-compatible entry point: with no opt-out configured, the clipboard
+    /// always retains the result. Equivalent to the multi-argument form with
+    /// `retainClipboardAfterInsert == false`.
     static func retainsClipboardCopy(for mode: InputMode) -> Bool {
-        // Clipboard availability is a product-level guarantee. Automatic
-        // insertion is an additional delivery action, not a replacement for
-        // keeping the generated result available to paste.
-        true
+        retainsClipboardCopy(
+            for: mode,
+            insertSucceeded: false,
+            retainClipboardAfterInsert: false
+        )
+    }
+
+    /// Whether auto-insert should proceed, given the app captured at recording
+    /// time versus the app frontmost at delivery time. If focus moved to a
+    /// different app after capture, the insert is downgraded to clipboard-only
+    /// so the result never lands in the wrong app. A `nil` captured id means the
+    /// captured identity is unknown, so the existing allow-insert behavior is
+    /// preserved.
+    static func shouldInsert(
+        capturedBundleId: String?,
+        frontmostBundleId: String?
+    ) -> Bool {
+        guard let capturedBundleId else { return true }
+        return capturedBundleId == frontmostBundleId
     }
 
 }

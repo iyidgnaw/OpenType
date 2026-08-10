@@ -32,6 +32,19 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(automaticallyInsert, forKey: Keys.automaticallyInsert) }
     }
 
+    /// When enabled, a *successful* auto-insert leaves the user's clipboard
+    /// untouched instead of overwriting it with the inserted result. Defaults to
+    /// `false` to preserve the always-copy guarantee; if the insert fails, the
+    /// result is still copied regardless of this setting.
+    @Published var retainClipboardAfterInsert: Bool {
+        didSet {
+            defaults.set(
+                retainClipboardAfterInsert,
+                forKey: Keys.retainClipboardAfterInsert
+            )
+        }
+    }
+
     @Published var keepHistory: Bool {
         didSet { defaults.set(keepHistory, forKey: Keys.keepHistory) }
     }
@@ -79,6 +92,9 @@ final class AppConfiguration: ObservableObject {
             rawValue: defaults.string(forKey: Keys.transcribeVariant) ?? ""
         ) ?? .direct
         automaticallyInsert = defaults.object(forKey: Keys.automaticallyInsert) as? Bool ?? true
+        retainClipboardAfterInsert = defaults.object(
+            forKey: Keys.retainClipboardAfterInsert
+        ) as? Bool ?? false
         keepHistory = defaults.object(forKey: Keys.keepHistory) as? Bool ?? true
         agentMemoryEnabled = defaults.object(forKey: Keys.agentMemoryEnabled) as? Bool ?? true
         automaticOwnerProfileUpdates = defaults.object(
@@ -94,6 +110,7 @@ final class AppConfiguration: ObservableObject {
         static let transcriptionLanguage = "transcriptionLanguage"
         static let transcribeVariant = "transcribeVariant"
         static let automaticallyInsert = "automaticallyInsert"
+        static let retainClipboardAfterInsert = "retainClipboardAfterInsert"
         static let keepHistory = "keepHistory"
         static let agentMemoryEnabled = "agentMemoryEnabled"
         static let automaticOwnerProfileUpdates = "automaticOwnerProfileUpdates"

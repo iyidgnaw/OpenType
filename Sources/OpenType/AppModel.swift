@@ -18,6 +18,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastResult = ""
     @Published private(set) var lastTranscript = ""
     @Published private(set) var lastApplication = ""
+    /// A brief, transient note about the most recent delivery when it deviated
+    /// from the user's expectation — e.g. an auto-insert that was downgraded to
+    /// clipboard-only because focus moved to a different app after capture.
+    /// `nil` when there is nothing noteworthy to surface.
+    @Published private(set) var lastDeliveryNotice: String?
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
     /// Backs the Settings "Memory" panel's manual "Consolidate now" button
@@ -171,10 +176,6 @@ final class AppModel: ObservableObject {
     var canTogglePractice: Bool {
         if isPracticeSession, state == .listening { return true }
         return !isBusy && !isStartingRecording
-    }
-
-    var canUndo: Bool {
-        !lastResult.isEmpty
     }
 
     init() {
@@ -583,14 +584,6 @@ final class AppModel: ObservableObject {
         lastApplication = entry.applicationName
         lastResultWasPractice = false
         contextBridge.copyToClipboard(entry.result)
-    }
-
-    func undo() {
-        do {
-            try contextBridge.undoLastChange()
-        } catch {
-            fail(error)
-        }
     }
 
     func quit() {
@@ -1524,6 +1517,7 @@ final class AppModel: ObservableObject {
             lastResult = result
             lastApplication = capturedContext.applicationName
             lastResultWasPractice = practice
+            lastDeliveryNotice = nil
 
             if configuration.agentMemoryEnabled, !practice {
                 agentMemory.record(
@@ -1557,6 +1551,7 @@ final class AppModel: ObservableObject {
             }
 
             var completionState: ProcessingState = .success
+            var insertSucceeded = false
             let deliveryStrategy = OutputDeliveryPolicy.strategy(
                 for: mode,
                 automaticallyInsert: configuration.automaticallyInsert
@@ -1566,17 +1561,40 @@ final class AppModel: ObservableObject {
                 // users can verify the whole voice pipeline before granting
                 // system-wide insertion access.
             } else if deliveryStrategy == .automaticInsert {
-                setState(.inserting)
-                do {
-                    try await contextBridge.insert(result)
-                } catch {
+                // Only insert if focus is still on the app captured at recording
+                // time; if the user switched apps mid-transcription, downgrade to
+                // clipboard-only so the result never lands in the wrong app.
+                let frontmostBundleId = NSWorkspace.shared
+                    .frontmostApplication?.bundleIdentifier
+                if OutputDeliveryPolicy.shouldInsert(
+                    capturedBundleId: capturedContext.bundleIdentifier,
+                    frontmostBundleId: frontmostBundleId
+                ) {
+                    setState(.inserting)
+                    do {
+                        try await contextBridge.insert(result)
+                        insertSucceeded = true
+                    } catch {
+                        completionState = .copied
+                    }
+                } else {
+                    // Focus changed after capture: keep it on the clipboard and
+                    // let the user know why it was not pasted for them.
                     completionState = .copied
+                    lastDeliveryNotice = OpenTypeL10n.text(
+                        "焦点已切换，结果已复制到剪贴板",
+                        english: "Focus changed, so the result was copied to the clipboard instead of inserted."
+                    )
                 }
             } else if !practice {
                 completionState = .copied
             }
 
-            if OutputDeliveryPolicy.retainsClipboardCopy(for: mode) {
+            if OutputDeliveryPolicy.retainsClipboardCopy(
+                for: mode,
+                insertSucceeded: insertSucceeded,
+                retainClipboardAfterInsert: configuration.retainClipboardAfterInsert
+            ) {
                 contextBridge.copyToClipboard(result)
             }
 

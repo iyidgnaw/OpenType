@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 export interface SidecarEnv {
   socketPath: string;
   deepSeekApiKey: string;
@@ -20,8 +22,15 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
   const deepSeekApiKey = source.DEEPSEEK_API_KEY ?? "";
   const deepSeekModel = source.DEEPSEEK_MODEL ?? "deepseek-v4-flash";
   const deepSeekBaseUrl = source.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com";
+  // Anchored to the sidecar module directory (src/ -> sidecar/) so the default
+  // resolves to the *same* absolute SQLite file regardless of the process cwd
+  // -- a cwd-relative default silently split the user's memory store in two
+  // depending on whether the sidecar was launched from the repo root or from
+  // `sidecar/`. The `OPENTYPE_SIDECAR_DB_PATH` override (set by the packaged
+  // app via `SidecarClient.swift`) still wins when present.
   const dbPath =
-    source.OPENTYPE_SIDECAR_DB_PATH ?? "sidecar/.data/opentype.sqlite3";
+    source.OPENTYPE_SIDECAR_DB_PATH ??
+    resolve(import.meta.dir, "..", ".data", "opentype.sqlite3");
   // Proof-of-context-usage log (see `oneshot/contextDebugLog.ts`): follows
   // the same env-var-override-with-dev-default convention as `dbPath`
   // above. `SidecarClient.swift` sets `OPENTYPE_CONTEXT_LOG_PATH` alongside

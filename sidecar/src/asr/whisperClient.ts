@@ -9,9 +9,18 @@
  *    child process or socket.
  */
 
+import { decideReadinessAction } from "../lifecycle";
+
 export interface SpawnedProcess {
   readonly pid?: number;
   kill(): void;
+  /**
+   * Register a handler invoked when the child exits. Optional so the real
+   * Bun-backed factory can wire it to `proc.exited` while fakes push into an
+   * array. When absent, `WhisperClient` simply can't observe exits (older
+   * behavior) -- present in production so runtime death triggers a respawn.
+   */
+  onExit?(cb: (code: number | null) => void): void;
 }
 
 /**
@@ -35,6 +44,13 @@ export interface WhisperClientOptions {
   readinessTimeoutMs?: number;
   /** Delay between readiness poll attempts. */
   pollIntervalMs?: number;
+  /**
+   * Cap on how many times a dead child is respawned before giving up. The
+   * count is over the lifetime of this client, not per unexpected exit, so a
+   * process that keeps crashing eventually stops being restarted rather than
+   * spin-looping forever. Defaults to `DEFAULT_MAX_RESPAWN_ATTEMPTS`.
+   */
+  maxRespawnAttempts?: number;
 }
 
 export class WhisperClientError extends Error {
@@ -46,54 +62,124 @@ export class WhisperClientError extends Error {
 
 const DEFAULT_READINESS_TIMEOUT_MS = 30_000;
 const DEFAULT_POLL_INTERVAL_MS = 200;
+const DEFAULT_MAX_RESPAWN_ATTEMPTS = 3;
 
 export class WhisperClient {
   private readonly socketPath: string;
   private readonly extraEnv: NodeJS.ProcessEnv;
   private readonly readinessTimeoutMs: number;
   private readonly pollIntervalMs: number;
+  private readonly maxRespawnAttempts: number;
   private readonly factories: WhisperClientFactories;
   private process: SpawnedProcess | null = null;
+  /** Set by `stop()` (or a readiness abort) so an ensuing exit never respawns. */
+  private stopped = false;
+  /** How many times a dead child has been respawned over this client's life. */
+  private respawnCount = 0;
 
   constructor(options: WhisperClientOptions, factories: WhisperClientFactories) {
     this.socketPath = options.socketPath;
     this.extraEnv = options.extraEnv ?? {};
     this.readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.maxRespawnAttempts = options.maxRespawnAttempts ?? DEFAULT_MAX_RESPAWN_ATTEMPTS;
     this.factories = factories;
   }
 
   /**
-   * Spawns the python whisper server (if not already running) and blocks
-   * until it answers `/health` healthily, or throws `WhisperClientError`
-   * after `readinessTimeoutMs`. On timeout, the spawned process is killed
-   * rather than left running unsupervised.
+   * Spawns the python whisper server and blocks until it answers `/health`
+   * healthily. Readiness is governed by `decideReadinessAction` (see
+   * `lifecycle.ts`): a still-alive process that hasn't gone healthy yet keeps
+   * being waited on -- even past `readinessTimeoutMs` -- rather than being
+   * killed, so a slow first-launch model download isn't aborted mid-flight.
+   * We only give up (kill + throw `WhisperClientError`) once the process is
+   * observed to be dead, or -- for a `SpawnedProcess` that can't report exit
+   * (`onExit` absent, e.g. legacy fakes) -- once the readiness timeout elapses,
+   * preserving the original timeout semantics for that case.
    */
   async start(): Promise<void> {
+    this.stopped = false;
+    this.respawnCount = 0;
+
+    const process = this.spawnAndTrack();
+    // Whether this process can tell us when it dies. Without an `onExit` hook
+    // we can't distinguish "still downloading" from "already dead", so we fall
+    // back to the original behavior: treat it as alive until the readiness
+    // timeout, then abort.
+    const canObserveExit = typeof process.onExit === "function";
+
+    const maxAttempts = Math.max(
+      1,
+      Math.ceil(this.readinessTimeoutMs / this.pollIntervalMs)
+    );
+
+    for (let attempt = 0; ; attempt++) {
+      const healthy = await this.factories.checkHealth(this.socketPath);
+      const timedOut = attempt + 1 >= maxAttempts;
+      const processAlive = canObserveExit ? this.process !== null : !timedOut;
+
+      const action = decideReadinessAction({ healthy, processAlive, timedOut });
+      if (action === "ready") {
+        return;
+      }
+      if (action === "abort") {
+        this.stop();
+        throw new WhisperClientError(
+          "The local MLX-Whisper server exited or timed out before becoming ready."
+        );
+      }
+      // "wait": still alive and not yet healthy -- keep polling. When the
+      // readiness timeout has elapsed but the process is genuinely alive
+      // (e.g. downloading the model on first launch) surface progress once
+      // rather than killing it.
+      if (timedOut && !this.warnedSlowStartup) {
+        this.warnedSlowStartup = true;
+        console.warn(
+          "local MLX-Whisper server is taking longer than expected to become ready " +
+            "(likely downloading the model on first launch); still waiting."
+        );
+      }
+      await this.factories.sleep(this.pollIntervalMs);
+    }
+  }
+
+  private warnedSlowStartup = false;
+
+  /**
+   * Spawns a fresh python process, records it as current, and -- if the
+   * spawned process supports it -- registers an exit hook so an unexpected
+   * runtime death triggers a bounded respawn (P1-5).
+   */
+  private spawnAndTrack(): SpawnedProcess {
     const env: NodeJS.ProcessEnv = {
       ...this.extraEnv,
       OPENTYPE_WHISPER_SOCKET: this.socketPath,
     };
     const process = this.factories.spawnProcess(env);
     this.process = process;
+    process.onExit?.(() => this.handleUnexpectedExit(process));
+    return process;
+  }
 
-    const maxAttempts = Math.max(1, Math.ceil(this.readinessTimeoutMs / this.pollIntervalMs));
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (await this.factories.checkHealth(this.socketPath)) {
-        return;
-      }
-      await this.factories.sleep(this.pollIntervalMs);
-    }
-
-    process.kill();
+  /**
+   * Called when a spawned child exits. Respawns (up to `maxRespawnAttempts`)
+   * only when the exit was unexpected -- an exit that follows an intentional
+   * `stop()` never respawns, keyed off the `stopped` flag rather than the exit
+   * code (a real `kill()` reports a signal/null, not a clean 0).
+   */
+  private handleUnexpectedExit(process: SpawnedProcess): void {
+    // A stale exit from a child we already replaced or killed -- ignore.
+    if (this.process !== process) return;
     this.process = null;
-    throw new WhisperClientError(
-      "Timed out waiting for the local MLX-Whisper server to become ready."
-    );
+    if (this.stopped) return;
+    if (this.respawnCount >= this.maxRespawnAttempts) return;
+    this.respawnCount += 1;
+    this.spawnAndTrack();
   }
 
   /** Kills the running python process, if any. Safe to call multiple times. */
   stop(): void {
+    this.stopped = true;
     this.process?.kill();
     this.process = null;
   }
@@ -172,6 +258,12 @@ export function defaultWhisperClientFactories(
       return {
         pid: proc.pid,
         kill: () => proc.kill(),
+        // Bun exposes the child's termination as the `exited` promise; bridge
+        // it to the `SpawnedProcess.onExit` hook `WhisperClient` uses to detect
+        // an unexpected death and respawn.
+        onExit: (cb) => {
+          proc.exited.then((code) => cb(code)).catch(() => cb(null));
+        },
       };
     },
     checkHealth: async (socketPath) => {

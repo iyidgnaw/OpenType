@@ -9,6 +9,7 @@ import { buildAsrRoutes } from "./asr/routes";
 import { createRemoteWhisperClient } from "./asr/remoteWhisperClient";
 import { defaultWhisperClientFactories, WhisperClient } from "./asr/whisperClient";
 import { loadEnv } from "./env";
+import { decideSocketStartup, shouldStartLocalWhisper } from "./lifecycle";
 import { openDatabase } from "./memory/db";
 import { MemoryStore } from "./memory/MemoryStore";
 import { buildMemoryRoutes } from "./memory/routes";
@@ -125,19 +126,42 @@ async function main() {
       scriptPath: env.whisperScriptPath,
     })
   );
-  const whisperReady = whisperClient
-    .start()
-    .then(() => {
-      console.log(`local MLX-Whisper server ready on unix:${env.whisperSocketPath}`);
-    })
-    .catch((err) => {
-      console.error("Failed to start local MLX-Whisper server; /asr/transcribe will fail.", err);
-      throw err;
-    });
-  // Second independent subscriber so a startup failure before any
-  // `/asr/transcribe` request arrives doesn't surface as a Bun "unhandled
-  // promise rejection" -- the real error still reaches request handlers,
-  // each of which `await whisperReady` on its own.
+  // P2: only spawn the local MLX-Whisper python process when local whisper is
+  // actually in play -- i.e. unless the user explicitly saved a remote-Whisper
+  // config (`whisperConfigured` + `mode: "remote"`, same explicit-save
+  // semantics `resolveTranscribe` below keys off). A remote-Whisper user
+  // otherwise pays for a python subprocess + model download they never use.
+  const whisperStatusAtBoot = providerConfigStore.getStatus();
+  const whisperConfigAtBoot = providerConfigStore.getWhisperConfig();
+  const startLocalWhisper = shouldStartLocalWhisper({
+    whisperConfigured: whisperStatusAtBoot.whisperConfigured,
+    mode: whisperConfigAtBoot?.mode,
+  });
+  let whisperReady: Promise<void>;
+  if (startLocalWhisper) {
+    whisperReady = whisperClient
+      .start()
+      .then(() => {
+        console.log(`local MLX-Whisper server ready on unix:${env.whisperSocketPath}`);
+      })
+      .catch((err) => {
+        console.error("Failed to start local MLX-Whisper server; /asr/transcribe will fail.", err);
+        throw err;
+      });
+  } else {
+    console.log(
+      "Remote Whisper is configured; skipping local MLX-Whisper startup."
+    );
+    // Should never be awaited (a remote-Whisper `resolveTranscribe` takes the
+    // remote branch), but give the local branch a clear error if it ever is.
+    whisperReady = Promise.reject(
+      new Error("Local MLX-Whisper is not running (remote Whisper is configured).")
+    );
+  }
+  // Second independent subscriber so a startup failure (or the skipped-local
+  // rejection above) before any `/asr/transcribe` request arrives doesn't
+  // surface as a Bun "unhandled promise rejection" -- the real error still
+  // reaches request handlers, each of which `await whisperReady` on its own.
   whisperReady.catch(() => {});
 
   // Config-aware transcribe resolver: local MLX-Whisper unless the user has
@@ -176,16 +200,69 @@ async function main() {
     providerConfigStore
   );
 
+  // P1-9 single-instance guard: an existing socket file is only safe to
+  // unlink + rebind if no live instance is currently serving it. Stomping a
+  // socket a healthy sibling instance owns would silently steal its clients;
+  // a leftover file from a crashed instance is fine to clear. `globalThis.fetch`
+  // (not the local `fetch` router bound above) probes liveness over the socket.
+  const startupDecision = await decideSocketStartup(env.socketPath, {
+    exists: (path) => existsSync(path),
+    isServed: async (path) => {
+      try {
+        const response = await globalThis.fetch("http://localhost/health", {
+          unix: path,
+          signal: AbortSignal.timeout(500),
+        } as RequestInit);
+        return response.ok;
+      } catch {
+        return false;
+      }
+    },
+  });
+  if (startupDecision === "refuse") {
+    console.error(
+      `Another opentype-sidecar instance is already serving unix:${env.socketPath}; refusing to start.`
+    );
+    process.exit(1);
+  }
+
   if (existsSync(env.socketPath)) {
     unlinkSync(env.socketPath);
   }
 
-  Bun.serve({
+  const server = Bun.serve({
     unix: env.socketPath,
     fetch,
   });
 
   console.log(`opentype-sidecar listening on unix:${env.socketPath}`);
+
+  // P1-7: on a termination signal, tear down the local whisper python child
+  // (otherwise it's orphaned and keeps holding its socket/model) and remove our
+  // own socket file before exiting, so a restart isn't blocked by a stale one.
+  const shutdown = (signal: NodeJS.Signals) => {
+    console.log(`Received ${signal}; shutting down opentype-sidecar.`);
+    try {
+      whisperClient.stop();
+    } catch {
+      // best-effort: never let cleanup failure block exit
+    }
+    try {
+      server.stop();
+    } catch {
+      // best-effort
+    }
+    try {
+      if (existsSync(env.socketPath)) {
+        unlinkSync(env.socketPath);
+      }
+    } catch {
+      // best-effort
+    }
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
 if (import.meta.main) {

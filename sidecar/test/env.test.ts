@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { loadEnv } from "../src/env";
 
 describe("loadEnv", () => {
@@ -8,7 +9,9 @@ describe("loadEnv", () => {
     expect(env.deepSeekModel).toBe("deepseek-v4-flash");
     expect(env.deepSeekBaseUrl).toBe("https://api.deepseek.com");
     expect(env.deepSeekApiKey).toBe("");
-    expect(env.dbPath).toBe("sidecar/.data/opentype.sqlite3");
+    expect(env.dbPath).toBe(
+      resolve(import.meta.dir, "..", ".data", "opentype.sqlite3")
+    );
     expect(env.contextLogPath).toBe("sidecar/.data/context-debug.log");
     expect(env.whisperSocketPath).toBe("sidecar/.data/whisper.sock");
   });

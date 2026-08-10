@@ -9,7 +9,7 @@
     scientific-computing native extensions (numpy/torch/mlx .so files, in
     turn loading further native libs via rpath) that get re-signed under
     this app's Developer ID as part of packaging, but a python venv's
-    dependency graph is large and easy to miss an entry in -- silently
+    dependency graph is large and easy to miss an entry in, silently
     breaking ASR only on a friend's machine, far harder to debug remotely
     than accepting this narrower, well-precedented relaxation for the
     interpreter binary specifically (not the main app or sidecar binary,

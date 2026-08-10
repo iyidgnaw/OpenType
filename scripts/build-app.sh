@@ -98,7 +98,22 @@ xattr -dr com.apple.quarantine "$app_dir" 2>/dev/null || true
 #    docs/onboarding/coding-agent-setup-prompt.md's release-build note, or
 #    just `xcrun notarytool store-credentials`.
 if [ "${OPENTYPE_NOTARIZE:-}" = "1" ]; then
-  notary_profile="${OPENTYPE_NOTARY_PROFILE:-OpenTypeNotary}"
+  # Two auth methods for notarytool: App Store Connect API key
+  # (OPENTYPE_NOTARY_KEY_PATH/_ID/_ISSUER_ID -- preferred, and the only one
+  # that worked around a "Team is not yet configured for notarization"
+  # (statusCode 7000) rejection seen with Apple-ID+app-specific-password
+  # auth during this app's own first notarization attempt) or the
+  # keychain-profile method (OPENTYPE_NOTARY_PROFILE, default OpenTypeNotary)
+  # set up via `xcrun notarytool store-credentials`.
+  notary_auth_args=()
+  if [ -n "${OPENTYPE_NOTARY_KEY_PATH:-}" ]; then
+    : ${OPENTYPE_NOTARY_KEY_ID:?OPENTYPE_NOTARY_KEY_PATH is set but OPENTYPE_NOTARY_KEY_ID is not}
+    : ${OPENTYPE_NOTARY_ISSUER_ID:?OPENTYPE_NOTARY_KEY_PATH is set but OPENTYPE_NOTARY_ISSUER_ID is not}
+    notary_auth_args=(--key "$OPENTYPE_NOTARY_KEY_PATH" --key-id "$OPENTYPE_NOTARY_KEY_ID" --issuer "$OPENTYPE_NOTARY_ISSUER_ID")
+  else
+    notary_profile="${OPENTYPE_NOTARY_PROFILE:-OpenTypeNotary}"
+    notary_auth_args=(--keychain-profile "$notary_profile")
+  fi
   identity=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed -E 's/.*"(.*)"/\1/')
   if [ -z "$identity" ]; then
     echo "error: OPENTYPE_NOTARIZE=1 but no 'Developer ID Application' certificate found in the login Keychain." >&2
@@ -135,7 +150,7 @@ if [ "${OPENTYPE_NOTARIZE:-}" = "1" ]; then
     --requirements '=designated => identifier "ai.rain.opentype"' \
     "$app_dir"
 
-  echo "submitting to Apple notary service (profile: $notary_profile)..."
+  echo "submitting to Apple notary service..."
   notarize_zip="$project_dir/dist/OpenType-notarize.zip"
   rm -f "$notarize_zip"
   ditto -c -k --keepParent "$app_dir" "$notarize_zip"
@@ -144,15 +159,15 @@ if [ "${OPENTYPE_NOTARIZE:-}" = "1" ]; then
     # blocking here on notarytool's own --wait polling loop -- Apple's
     # server-side processing can run long enough to exceed a single
     # command's execution window, so the caller is expected to poll
-    # `xcrun notarytool wait <id> --keychain-profile ...` externally and
-    # then re-run this script's stapling step itself (see the two-phase
-    # note in docs/onboarding/coding-agent-setup-prompt.md's release-build
-    # section, or just re-invoke with OPENTYPE_STAPLE_ONLY=1).
-    xcrun notarytool submit "$notarize_zip" --keychain-profile "$notary_profile"
+    # `xcrun notarytool wait <id> ...` externally and then re-run this
+    # script's stapling step itself (see the two-phase note in
+    # docs/onboarding/coding-agent-setup-prompt.md's release-build section,
+    # or just re-invoke with OPENTYPE_STAPLE_ONLY=1).
+    xcrun notarytool submit "$notarize_zip" "${notary_auth_args[@]}"
     rm -f "$notarize_zip"
     exit 0
   fi
-  xcrun notarytool submit "$notarize_zip" --keychain-profile "$notary_profile" --wait
+  xcrun notarytool submit "$notarize_zip" "${notary_auth_args[@]}" --wait
   rm -f "$notarize_zip"
 
   echo "stapling notarization ticket..."

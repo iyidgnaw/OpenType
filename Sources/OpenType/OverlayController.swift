@@ -9,6 +9,18 @@ private final class OverlayPresentation: ObservableObject {
     @Published var audioLevel = 0.0
 }
 
+/// How `OverlayController.show(...)` should treat the HUD panel for a given
+/// `ProcessingState`, factored out of the inline `switch` so the per-state
+/// timing decision is pure and unit-testable (see `OverlayHideBehaviorTests`).
+enum OverlayHideBehavior: Equatable {
+    /// Hide the panel right away (e.g. `.idle` — there is nothing to show).
+    case hideImmediately
+    /// Leave it up for `after` seconds, then hide (transient toast states).
+    case scheduleHide(after: TimeInterval)
+    /// Keep it on screen with no scheduled hide (active in-flight states).
+    case keepVisible
+}
+
 @MainActor
 final class OverlayController {
     private let compactSize = NSSize(width: 300, height: 60)
@@ -39,22 +51,39 @@ final class OverlayController {
         panel.orderFrontRegardless()
         self.panel = panel
 
+        switch Self.hideBehavior(for: state) {
+        case .hideImmediately:
+            hide()
+        case .scheduleHide(let seconds):
+            dismiss(after: seconds)
+        case .keepVisible:
+            break
+        }
+    }
+
+    /// Pure per-state timing decision behind `show(...)`. `.idle` hides
+    /// immediately (P1-18: the "ready" HUD must not stick), active in-flight
+    /// states stay visible, and the transient toast states keep the exact
+    /// durations `show(...)` historically used.
+    static func hideBehavior(for state: ProcessingState) -> OverlayHideBehavior {
         switch state {
+        case .idle:
+            return .hideImmediately
+        case .listening, .transcribing, .transforming, .inserting:
+            return .keepVisible
         case .modeChanged:
-            dismiss(after: 1.2)
+            return .scheduleHide(after: 1.2)
         case .success, .copied:
-            dismiss(after: 0.9)
+            return .scheduleHide(after: 0.9)
         case .dispatched:
             // Informational, not an error, but carries a second line of copy
             // ("已下发给 Agent") the user has to actually read, so it needs
             // longer on screen than a bare success toast.
-            dismiss(after: 1.6)
+            return .scheduleHide(after: 1.6)
         case .cancelled:
-            dismiss(after: 1.8)
+            return .scheduleHide(after: 1.8)
         case .failure:
-            dismiss(after: 2.4)
-        default:
-            break
+            return .scheduleHide(after: 2.4)
         }
     }
 

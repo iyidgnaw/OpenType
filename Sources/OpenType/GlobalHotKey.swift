@@ -2,11 +2,24 @@ import Carbon
 import CoreGraphics
 import Foundation
 
+/// What a `.keyDown` should mean while the event tap is watching for a stop
+/// key, factored out of `handleEventTap` so the commit-vs-cancel decision is
+/// pure and unit-testable (see `HotKeyKeyActionTests`).
+enum HotKeyKeyAction: Equatable {
+    /// Finish the in-flight recording and keep the captured audio.
+    case commit
+    /// Discard the in-flight recording (Esc while armed — P1-10).
+    case cancel
+    /// Not armed for stop-on-any-key; leave the keystroke alone.
+    case ignore
+}
+
 final class GlobalHotKey {
     var onPressed: (() -> Void)?
     var onReleased: (() -> Void)?
     var onToggle: (() -> Void)?
     var onStopRequested: (() -> Void)?
+    var onCancelRequested: (() -> Void)?
     var onCycleMode: (() -> Void)?
 
     private(set) var shortcutKeys = HotKeyPreset.controlShiftSpace.keys
@@ -202,13 +215,26 @@ final class GlobalHotKey {
             if isActiveChordEvent(keyCode: keyCode, flags: event.flags) {
                 return Unmanaged.passUnretained(event)
             }
-            if stopOnAnyKeyEnabled {
+            switch Self.keyAction(
+                keyCode: keyCode,
+                stopOnAnyKeyEnabled: stopOnAnyKeyEnabled
+            ) {
+            case .commit:
                 stopOnAnyKeyEnabled = false
                 suppressedKeyCodes.insert(keyCode)
                 DispatchQueue.main.async { [weak self] in
                     self?.onStopRequested?()
                 }
                 return nil
+            case .cancel:
+                stopOnAnyKeyEnabled = false
+                suppressedKeyCodes.insert(keyCode)
+                DispatchQueue.main.async { [weak self] in
+                    self?.onCancelRequested?()
+                }
+                return nil
+            case .ignore:
+                break
             }
             if !heldModifierKeyCodes.isEmpty {
                 modifierChordWasUsed = true
@@ -512,6 +538,19 @@ final class GlobalHotKey {
         isInstalled = false
         isUsingPreferred = false
         activePreset = nil
+    }
+
+    /// Pure decision behind `handleEventTap`'s stop-on-any-key branch. When
+    /// armed (`stopOnAnyKeyEnabled`), Esc discards the recording (P1-10) while
+    /// any other key commits it (today's stop-on-any-key behavior); when not
+    /// armed, keystrokes are left alone — Esc included, so the tap never steals
+    /// Esc outside an active recording.
+    static func keyAction(
+        keyCode: Int64,
+        stopOnAnyKeyEnabled: Bool
+    ) -> HotKeyKeyAction {
+        guard stopOnAnyKeyEnabled else { return .ignore }
+        return keyCode == Int64(kVK_Escape) ? .cancel : .commit
     }
 
     private func fourCharacterCode(_ value: String) -> OSType {

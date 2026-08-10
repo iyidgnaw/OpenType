@@ -118,6 +118,12 @@ final class AppModel: ObservableObject {
         bundleIdentifier: nil
     )
     private var processingTask: Task<Void, Never>?
+    /// The detached, non-blocking `/oneshot/ask` request (see `dispatchAskRun`).
+    /// Tracked separately from `processingTask` so an in-flight Ask answer does
+    /// not hold the recording pipeline busy, and so dismissing the Ask popup
+    /// (`dismissAskPanel`) can abort just this request without touching an
+    /// unrelated recording/processing task.
+    private var askTask: Task<Void, Never>?
     private var accessibilityPollTimer: Timer?
     private var activeMode: InputMode?
     private var didStart = false
@@ -270,6 +276,9 @@ final class AppModel: ObservableObject {
         }
         hotKey.onStopRequested = { [weak self] in
             self?.hotKeyReleased()
+        }
+        hotKey.onCancelRequested = { [weak self] in
+            self?.cancelActiveVoiceSession()
         }
         hotKey.onCycleMode = { [weak self] in
             self?.cycleMode()
@@ -435,10 +444,35 @@ final class AppModel: ObservableObject {
         isCorrectionRecording = false
         activeMode = nil
         shortcutBehavior = hotKey.behavior
+        hotKey.setRecordingActive(false)
         audioRecorder.cancel()
         liveSpeechTranscriber.stop()
         setState(.idle)
         overlay.hide()
+    }
+
+    /// Discards whatever voice activity is currently in flight, wired to the
+    /// hotkey's Esc-while-armed cancel (P1-10) and any overlay/processing
+    /// cancel control. During a recording this stops + deletes the partial
+    /// audio with no transcription; during processing it cancels the in-flight
+    /// `processingTask` (our curl transport propagates Task cancellation) and
+    /// resets to idle. Safe to call at any time — a no-op when nothing is
+    /// active. The `AudioRecorder.stop()` hand-off (currentURL cleared once a
+    /// recording ends) guarantees `audioRecorder.cancel()` here can never
+    /// delete a file that transcription is still reading.
+    func cancelActiveVoiceSession() {
+        let wasActive = state == .listening
+            || isStartingRecording
+            || isCorrectionRecording
+            || isBusy
+        guard wasActive else { return }
+
+        cancel()
+
+        let message = OpenTypeL10n.text("已取消", english: "Cancelled")
+        let cancelled = ProcessingState.cancelled(message)
+        setState(cancelled)
+        scheduleIdle(after: cancelled)
     }
 
     func selectMode(_ mode: InputMode) {
@@ -697,6 +731,12 @@ final class AppModel: ObservableObject {
     /// Explicit dismissal entry point for the Ask/Agent popup, in addition to
     /// the panel's own close button / Escape / click-outside handling.
     func dismissAskPanel() {
+        // Abort any in-flight Ask request so a late answer can't overwrite the
+        // clipboard or re-populate a popup the user just closed (P1-10 "ghost
+        // answer"). The SidecarClient transport propagates this cancellation
+        // down to the underlying curl process.
+        askTask?.cancel()
+        askTask = nil
         askPanelState = nil
     }
 
@@ -1445,33 +1485,26 @@ final class AppModel: ObservableObject {
                     result = transcript
                 }
             case .ask:
+                // Non-blocking dispatch, mirroring `.agent`/`dispatchAgentRun`
+                // below: show the popup in its "thinking" state immediately,
+                // then hand the `/oneshot/ask` call off to a detached task
+                // (`dispatchAskRun`) that is never awaited here, so a slow LLM
+                // answer can't hold the whole recording pipeline busy — the
+                // user can start a new recording while an answer is in flight.
+                // The answer is delivered to the popup + clipboard when it
+                // returns; dismissing the popup (`dismissAskPanel`) cancels the
+                // task so no "ghost answer" can arrive after the user moved on.
                 effectiveTextModel = sidecarTextModel
                 askPanelState = AskPanelState(kind: .ask, query: transcript, answer: nil)
-                do {
-                    // Continues the Q&A tab's focused thread when one is
-                    // open (`focusedAskConversationId`), otherwise starts a
-                    // fresh conversation -- see `openAskConversation(_:)`/
-                    // `startNewAskConversation()`.
-                    let response: AskResponseBody = try await sidecarClient.request(
-                        method: "POST",
-                        path: "/oneshot/ask",
-                        body: AskRequestBody(
-                            question: transcript,
-                            conversationId: focusedAskConversationId
-                        )
-                    )
-                    result = response.result
-                    askPanelState?.answer = result
-                    await refreshAskConversations()
-                    if focusedAskConversationId == response.conversationId {
-                        openAskConversation(response.conversationId)
-                    }
-                } catch {
-                    askPanelState = nil
-                    throw OpenTypeError.service(
-                        "Ask 请求失败：\(error.localizedDescription)"
-                    )
-                }
+                dispatchAskRun(
+                    transcript: transcript,
+                    context: capturedContext,
+                    practice: practice,
+                    requestID: auditRequestID,
+                    conversationId: focusedAskConversationId,
+                    model: sidecarTextModel
+                )
+                result = nil
             case .agent:
                 // Non-blocking dispatch (see `dispatchAgentRun` below): the
                 // `/agent/run` call runs as an independent, detached `Task`
@@ -1505,9 +1538,15 @@ final class AppModel: ObservableObject {
                 // `activeMode`/`isPracticeSession` reset exactly as any other
                 // completed dispatch would.
                 playFeedbackSound(.done)
-                let message = mode == .agent
-                    ? OpenTypeL10n.text("已下发给 Agent", english: "Dispatched to Agent")
-                    : OpenTypeL10n.text("待复核", english: "Ready to review")
+                let message: String
+                switch mode {
+                case .agent:
+                    message = OpenTypeL10n.text("已下发给 Agent", english: "Dispatched to Agent")
+                case .ask:
+                    message = OpenTypeL10n.text("正在思考…", english: "Thinking…")
+                default:
+                    message = OpenTypeL10n.text("待复核", english: "Ready to review")
+                }
                 let dispatchedState = ProcessingState.dispatched(message)
                 setState(dispatchedState)
                 scheduleIdle(after: dispatchedState)
@@ -1640,6 +1679,191 @@ final class AppModel: ObservableObject {
                     : (effectiveTextModel ?? sidecarTextModel)
             )
             fail(error)
+        }
+    }
+
+    /// Kicks off an Ask-mode question as an independent, detached unit of work
+    /// and returns immediately — the Ask-mode counterpart of `dispatchAgentRun`
+    /// (P1-11). The `/oneshot/ask` call is tracked in `askTask` (never awaited
+    /// by `process(audioURL:)`), so a slow answer can't hold the recording
+    /// pipeline busy and dismissing the popup can abort it cleanly.
+    private func dispatchAskRun(
+        transcript: String,
+        context: CapturedContext,
+        practice: Bool,
+        requestID: UUID,
+        conversationId: Int?,
+        model: String?
+    ) {
+        // Supersede any still-pending Ask request (e.g. the user asked again
+        // before the previous answer arrived) so only the latest one delivers.
+        askTask?.cancel()
+        askTask = Task { [weak self] in
+            await self?.runAskDispatch(
+                transcript: transcript,
+                context: context,
+                practice: practice,
+                requestID: requestID,
+                conversationId: conversationId,
+                model: model
+            )
+        }
+    }
+
+    /// The detached unit of work started by `dispatchAskRun`: issues the
+    /// `/oneshot/ask` call, then delivers the answer to the popup + clipboard
+    /// and records history/memory/audit — all independent of whatever `state`
+    /// the app has moved on to. A cancellation (popup dismissed, or superseded
+    /// by a newer Ask) drops silently without touching the clipboard, so a
+    /// late "ghost answer" can never overwrite what the user is doing now.
+    private func runAskDispatch(
+        transcript: String,
+        context: CapturedContext,
+        practice: Bool,
+        requestID: UUID,
+        conversationId: Int?,
+        model: String?
+    ) async {
+        // Only clear the shared slot if THIS task still owns it. A superseded or
+        // dismissed Ask is always cancelled (via `askTask?.cancel()`), so it must
+        // leave the slot alone — otherwise its cleanup would null out the live
+        // task, and `dismissAskPanel` could no longer cancel it, letting a late
+        // "ghost answer" clobber the clipboard after dismissal.
+        defer { if !Task.isCancelled { askTask = nil } }
+
+        do {
+            // Continues the Q&A tab's focused thread when one is open
+            // (`focusedAskConversationId`), otherwise starts a fresh
+            // conversation -- see `openAskConversation(_:)`/
+            // `startNewAskConversation()`.
+            let response: AskResponseBody = try await sidecarClient.request(
+                method: "POST",
+                path: "/oneshot/ask",
+                body: AskRequestBody(
+                    question: transcript,
+                    conversationId: conversationId
+                )
+            )
+            try Task.checkCancellation()
+            let result = response.result
+
+            // Only surface into the popup if it's still showing this same
+            // question awaiting an answer — the user may have dismissed it or
+            // moved on to another Ask in the meantime.
+            if var current = askPanelState,
+               current.kind == .ask,
+               current.query == transcript,
+               current.answer == nil {
+                current.answer = result
+                askPanelState = current
+            }
+            await refreshAskConversations()
+            if focusedAskConversationId == response.conversationId {
+                openAskConversation(response.conversationId)
+            }
+
+            try? auditStore.append(
+                ImmutableAuditEvent(
+                    requestId: requestID,
+                    status: .completed,
+                    mode: .ask,
+                    rawTranscript: transcript,
+                    effectiveInput: transcript,
+                    selectedContext: context.selectedText,
+                    result: result,
+                    provider: sidecarTextProvider,
+                    model: model,
+                    error: nil
+                )
+            )
+
+            lastResult = result
+            lastApplication = context.applicationName
+            lastResultWasPractice = practice
+            lastDeliveryNotice = nil
+
+            if configuration.agentMemoryEnabled, !practice {
+                agentMemory.record(
+                    MemoryEvent(
+                        mode: .ask,
+                        applicationName: context.applicationName,
+                        bundleIdentifier: context.bundleIdentifier,
+                        rawTranscript: transcript,
+                        effectiveInput: transcript,
+                        selectedContext: context.selectedText,
+                        result: result
+                    )
+                )
+                agentMemory.refreshOwnerProfileIfNeeded(
+                    enabled: configuration.automaticOwnerProfileUpdates
+                )
+            }
+            if configuration.keepHistory, !practice {
+                history.add(
+                    HistoryEntry(
+                        mode: .ask,
+                        applicationName: context.applicationName,
+                        transcript: transcript,
+                        result: result,
+                        contextPreview: context.selectedText.map {
+                            String($0.prefix(240))
+                        }
+                    )
+                )
+            }
+
+            // Ask answers are clipboard-only (never auto-inserted — see
+            // `OutputDeliveryPolicy.strategy(for: .ask, ...)`).
+            contextBridge.copyToClipboard(result)
+        } catch is CancellationError {
+            // Popup dismissed or superseded: leave the clipboard/app state
+            // untouched and record the abort for the audit trail.
+            try? auditStore.append(
+                ImmutableAuditEvent(
+                    requestId: requestID,
+                    status: .cancelled,
+                    mode: .ask,
+                    rawTranscript: transcript,
+                    effectiveInput: transcript,
+                    selectedContext: context.selectedText,
+                    result: nil,
+                    provider: sidecarTextProvider,
+                    model: model,
+                    error: OpenTypeL10n.text(
+                        "提问已取消",
+                        english: "Ask was cancelled"
+                    )
+                )
+            )
+        } catch {
+            let message = ErrorMessagePresenter.message(for: error)
+            // Surface the failure inside the popup (rather than clobbering the
+            // global overlay, which may now be showing an unrelated recording)
+            // so the user is never left staring at a "thinking…" spinner.
+            if var current = askPanelState,
+               current.kind == .ask,
+               current.query == transcript,
+               current.answer == nil {
+                current.answer = OpenTypeL10n.text(
+                    "提问失败：\(message)",
+                    english: "Ask failed: \(message)"
+                )
+                askPanelState = current
+            }
+            try? auditStore.append(
+                ImmutableAuditEvent(
+                    requestId: requestID,
+                    status: .failed,
+                    mode: .ask,
+                    rawTranscript: transcript,
+                    effectiveInput: transcript,
+                    selectedContext: context.selectedText,
+                    result: nil,
+                    provider: sidecarTextProvider,
+                    model: model,
+                    error: message
+                )
+            )
         }
     }
 

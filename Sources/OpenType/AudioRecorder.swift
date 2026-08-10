@@ -77,6 +77,13 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         let duration = recorder.currentTime
         recorder.stop()
         self.recorder = nil
+        // Hand ownership of the recorded file to the caller (the transcription
+        // path) and forget it here. A `cancel()` that races in *after* stop()
+        // — e.g. the user hits Esc while transcription is in flight — must not
+        // delete the file being read, so clear `currentURL` now that recording
+        // is over. Only an active recording (currentURL still set) is a valid
+        // delete target for cancel().
+        currentURL = nil
 
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = attributes?[.size] as? NSNumber
@@ -90,6 +97,10 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     func cancel() {
         recorder?.stop()
         recorder = nil
+        // Only deletes when a recording is still in progress (currentURL set).
+        // After stop() has handed the file off, currentURL is nil and this is
+        // a no-op — so cancelling during transcription cannot delete the
+        // in-flight audio file.
         if let currentURL {
             try? FileManager.default.removeItem(at: currentURL)
         }

@@ -733,14 +733,16 @@ enum ErrorMessagePresenter {
             }
         }
 
-        if let urlError = error as? URLError {
-            switch urlError.code {
-            case .notConnectedToInternet:
-                return "当前没有网络连接，联网后再试一次"
-            case .timedOut:
-                return "云端处理超时，请再试一次"
-            default:
-                return "网络连接不稳定，请再试一次"
+        if let sidecarError = error as? SidecarClientError {
+            switch sidecarError {
+            case .processFailedToStart:
+                return "本地服务未能启动，请重启应用后再试一次"
+            case .timedOutWaitingForReadiness:
+                return "本地服务启动超时，请重启应用后再试一次"
+            case .requestFailed:
+                return "无法连接到本地服务，请重启应用后再试一次"
+            case .responseDecodingFailed, .emptyResponse:
+                return "本地服务响应异常，请再试一次"
             }
         }
 
@@ -762,7 +764,7 @@ enum ErrorMessagePresenter {
         if normalized.contains("unauthorized")
             || normalized.contains("invalid api-key")
             || normalized.contains("invalid api key") {
-            return "DashScope 连接已失效，请检查 API key"
+            return "服务商连接已失效，请检查 API key 配置"
         }
         return detail
     }

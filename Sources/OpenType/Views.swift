@@ -1408,7 +1408,7 @@ private struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Text("实时字幕优先使用 Apple 本机识别，仅作为录音预览；最终识别始终在本机运行（MLX-Whisper），文字生成由本地 sidecar 转发给固定的 DeepSeek 模型，均不需要你手动配置或选择云端服务商。")
+                Text("实时字幕优先使用 Apple 本机识别，仅作为录音预览；最终识别与文字生成均由本地 sidecar 处理。默认使用本机 MLX-Whisper 与内置模型，无需额外配置即可使用；也可在上方「语音识别」「AI 模型」中改用自定义的服务商。")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

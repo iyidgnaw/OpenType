@@ -1,6 +1,7 @@
 import type { MemoryStore } from "../memory/MemoryStore";
 import type { ConversationStore } from "../memory/conversations";
 import type { Route } from "../router";
+import { ApiError } from "../router";
 import type { OneShotChatFn, OneShotChatMessage } from "./client";
 import { buildKnownTermsContext, findKnownTerms } from "./memoryContext";
 import { ASK_SYSTEM_PROMPT } from "./prompts";
@@ -51,6 +52,9 @@ async function handleAsk(
 ): Promise<Response> {
   const body = await readJsonBody<AskRequestBody>(req);
   const question = body.question ?? "";
+  if (String(question).trim() === "") {
+    throw new ApiError("question is required", 400);
+  }
   const matchedTerms = findKnownTerms(store, question);
   const ownerFactsCount = store.allOwnerFacts().length;
   logContextUsage(

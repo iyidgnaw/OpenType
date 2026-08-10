@@ -1,6 +1,7 @@
 import type { MemoryStore } from "../memory/MemoryStore";
 import type { ConversationStore } from "../memory/conversations";
 import type { Route } from "../router";
+import { ApiError } from "../router";
 import type { AgentChatFn } from "./loop";
 import { runAgentLoop } from "./loop";
 import type { McpToolSet } from "./mcpClient";
@@ -50,6 +51,9 @@ async function handleAgentRun(
 ): Promise<Response> {
   const body = await readJsonBody<AgentRunRequestBody>(req);
   const task = body.task ?? "";
+  if (String(task).trim() === "") {
+    throw new ApiError("task is required", 400);
+  }
   const context = body.context;
 
   // Agent mode's known-terms context lookup runs against the same input

@@ -10,7 +10,7 @@ OpenType 是一个本地优先的 macOS AI 语音输入工具，把自然口语�
 
 ## 当前交付状态
 
-经历过一次从零重写（旧的 5/6 模式系统已删除，改为下方的 3 模式设计），本机通过 `./scripts/build-app.sh` 构建为 `dist/OpenType.app`。当前是 ad-hoc 本地签名版本，不是 Developer ID 公证发行包，也还没有对外发行的 Release —— 目前只能 clone 仓库本地编译，见上方的新用户安装入口。Swift 单测与 sidecar 单测均全绿；production app 已本地构建并真实运行验证。
+经历过一次从零重写（旧的 5/6 模式系统已删除，改为下方的 3 模式设计），本机通过 `./scripts/build-app.sh` 构建为 `dist/OpenType.app`。默认是 ad-hoc 本地签名版本；`build-app.sh` 也支持一个可选的 Developer ID 签名 + 公证流程（`OPENTYPE_NOTARIZE=1`，需要 Developer ID 证书与 notarytool 凭证），但目前还没有对外发行的 Release —— 一般只能 clone 仓库本地编译，见上方的新用户安装入口。默认构建**不再打包开发者的 `sidecar/.env.local`/API Key**（需要显式 `--bundle-env` 才会打进去，仅供私有本地构建）。Swift 单测与 sidecar 单测均全绿；production app 已本地构建并真实运行验证。
 
 ## 当前功能
 
@@ -23,7 +23,7 @@ OpenType 是一个本地优先的 macOS AI 语音输入工具，把自然口语�
 - LLM Provider 可配置，支持 Anthropic（Messages API）和 OpenAI 兼容协议（覆盖 DeepSeek、OpenAI 本身及自建兼容服务）：填入 URL 和 API Key 后可 Test Connection，成功后拉取模型列表供选择，而不是盲填模型名
 - **首次启动设置引导**：如果语音识别和 LLM 都还没配置过，打开主窗口会自动进入设置向导，走完上面两步才会进入正常界面；之后随时可以在设置里重新配置
 - **Q&A 和 Agent 各有独立 tab**：可以打开某一次问答/任务的历史会话，再次用同一模式说话即视为对该会话的追问/续接，而不是每次都从头开始——真正的多轮上下文延续，不是简单拼接
-- 可定制全局快捷键：左 `Option` 长按、双击 `Ctrl+Option+Shift`，或新增的 `fn` 长按
+- 可定制全局快捷键：左 `Option` 长按、`fn` 长按、双击 `Ctrl`/`Option`/`Shift`，以及 `⌃⇧Space` 等组合键方案（各自独立，不是三键同时双击）
 - 原生菜单栏入口：点击菜单栏图标只会展开紧凑的模式切换 popover；主窗口需要单独打开，打开后会出现 Dock 图标并可以 `Cmd+Tab` 切换，关闭主窗口后 Dock 图标消失、回到纯菜单栏模式。菜单栏 popover 和主窗口都有明确的“退出 OpenType”按钮
 - 本地长期记忆：sidecar 侧维护一份实体词典（术语、别名、常见指代）+ 一份自由文本的“owner facts”，都可以直接对 Agent 说“记住……”来写入，也支持手动触发一次整理（“dreaming”/consolidation）；在设置的只读“记忆”面板里可以查看，但不能在界面里手动编辑
 - 所有模式的结果都会复制到剪贴板；是否额外自动写入当前输入框由设置里的开关决定，写入失败时结果依然保留在剪贴板
@@ -50,9 +50,9 @@ open dist/OpenType.app
 ## 隐私
 
 - 最终音频默认只在本机由 MLX-Whisper 处理，不发送到任何服务器；如果在设置里把语音识别改成远程模式，音频才会发送到用户自己配置的远程识别地址。处理结束后删除本地临时音频文件。
-- 识别出的文字只在 `ask`/`agent` 两种模式下会发送给用户自己配置的 LLM Provider；`transcribe` 模式完全不经过任何 LLM，识别到什么就是什么。
+- 识别出的文字只在 `ask`/`agent` 两种模式下会发送给用户自己配置的 LLM Provider；`transcribe` 模式完全不经过任何 LLM，识别到什么就是什么。发送给模型的上下文里，除了本次输入，还包含**你亲口让 Agent「记住」的全部 owner facts（"关于我" 类事实）**——是全部注入，不是按相关性筛选（只排除非 owner 来源的不可信事实）。此外 sidecar 会把每次 `ask`/`agent` 的输入文本（截断约 200 字）追加到本机一个 `context-debug.log`；它不随「重置输入历史」清除。
 - 实时字幕预览用的是 Apple 系统自带的本机语音识别，只作为录音时的临时预览，松开后仍会用上面配置的正式语音识别服务重新识别一次作为最终结果。
 - LLM Provider 的 API Key 等配置保存在本机 sidecar 子进程的数据目录下，以 `chmod 600`（仅当前系统账户可读写）的明文 JSON 文件保存 —— 不写入代码仓库、日志或历史，接口回显时也只显示掩码后的 Key；这不是硬件隔离的 Keychain，信任边界等同于本机账户本身，细节见 [当前系统状态文档](docs/superpowers/specs/2026-08-09-current-system-state.md) 第 10 节。
-- 输入历史、Q&A/Agent 对话记录、审计日志等均保存在本机 `~/Library/Application Support/OpenType/`：`memory.sqlite3`（Swift 侧的任务历史与“已学到的偏好”）和 `opentype.sqlite3`（sidecar 侧的实体词典、owner facts 与 Q&A/Agent 会话记录）是两套独立的数据库；历史可以在设置的二级数据管理中重置。
+- 输入历史、Q&A/Agent 对话记录、审计日志等均保存在本机 `~/Library/Application Support/OpenType/`：`memory.sqlite3`（Swift 侧的任务历史与“已学到的偏好”）和 `opentype.sqlite3`（sidecar 侧的实体词典、owner facts 与 Q&A/Agent 会话记录）是两套独立的数据库，另有 `context-debug.log`（上面提到的 ask/agent 输入调试日志）；历史可以在设置的二级数据管理中重置（`context-debug.log` 不在重置范围内）。
 - 每一次识别、每一次修正（Review 转写模式下的语音纠错）、以及最终完成或取消，都会追加写入本机一份不可修改的 `audit-events.v1.jsonl`，不受历史重置影响。
 - Agent 模式的结果只复制到剪贴板并生成草稿，永远不会自动回车、发布或对外执行；是否额外写入当前输入框由“自动写入”开关单独控制。

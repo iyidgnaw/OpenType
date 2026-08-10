@@ -59,14 +59,29 @@ you're debugging packaging specifically.
   MCP tools, and local Whisper process, then starts `Bun.serve`.
 - `src/router.ts` — tiny method+path router used by `buildApp`.
 - `src/oneshot/` — `/oneshot/ask` (the "Ask" mode's system prompt, one-shot
-  DeepSeek call, and light memory-term context injection).
+  LLM call via the resolved provider — DeepSeek by default, or the
+  user-configured provider — and light memory-context injection). Memory
+  context is assembled by `memoryContext.ts` (`buildKnownTermsContext`:
+  entity terms mentioned in the input, plus **all** owner-origin owner_facts
+  unconditionally — see the memory note below) and its usage is logged to a
+  local file by `contextDebugLog.ts` (see `OPENTYPE_CONTEXT_LOG_PATH`).
 - `src/agent/` — `/agent/run` (the Agent mode's tool-calling loop —
-  `loop.ts` — and MCP client — `mcpClient.ts`).
+  `loop.ts` — and MCP client — `mcpClient.ts`). `builtInTools.ts` supplies
+  two **always-available** built-in tools (`remember_fact`,
+  `consolidate_memory_now`); `toolSets.ts` merges them with any connected MCP
+  tools, so Agent mode can always call at least those two even with no MCP
+  server configured.
 - `src/asr/` — `/asr/transcribe`; proxies to the persistent local
   MLX-Whisper python process (`whisper/serve.py`) over its own Unix socket.
-- `src/memory/` — the entity-dictionary `MemoryStore` (SQLite-backed),
-  periodic consolidation (`consolidator.ts`), the read-only
-  `/memory/terms` / `/memory/consolidation-runs` endpoints, and
+- `src/memory/` — the entity-dictionary + owner-facts `MemoryStore`
+  (SQLite-backed), consolidation (`consolidator.ts`), and the memory HTTP
+  routes: read-only `GET /memory/terms` / `GET /memory/consolidation-runs`,
+  the write endpoint `POST /memory/consolidate-now` (runs consolidation
+  immediately, same code path as the `consolidate_memory_now` agent tool),
+  and owner-facts management `GET /memory/owner-facts` /
+  `DELETE /memory/owner-facts/:id`. Note: `shouldConsolidate` (the ≥12h
+  auto-consolidation gate) has **no caller** — consolidation is
+  manual-only (this route + the agent tool). Also
   `conversations.ts`/`conversationRoutes.ts` — a separate `conversations`/
   `conversation_messages` table pair (same SQLite file, different concern:
   turn-by-turn chat history, not a fact/term store) backing the macOS Q&A/

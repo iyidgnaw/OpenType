@@ -4,6 +4,19 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
+# Argument parsing. --bundle-env is an explicit opt-in to fold the developer's
+# local sidecar/.env.local (which holds real secrets like DEEPSEEK_API_KEY)
+# into the built .app. It is OFF by default so a routine build never leaks
+# credentials into a distributable bundle. Unknown args are left untouched for
+# any future handling; notarization is still driven by the OPENTYPE_NOTARIZE
+# env var, not a flag.
+bundle_env=0
+for arg in "$@"; do
+  case "$arg" in
+    --bundle-env) bundle_env=1 ;;
+  esac
+done
+
 if ! command -v bun >/dev/null 2>&1; then
   echo "error: bun not found on PATH. Install bun (https://bun.sh) to compile the sidecar binary." >&2
   exit 1
@@ -65,8 +78,20 @@ ditto "$project_dir/sidecar/whisper" "$resources_dir/whisper"
 # into the child process's environment before launching the bundled binary.
 # This file is local-only (sidecar/.env.local is gitignored) - it never
 # touches source control, only this local build output.
-if [ -f "$project_dir/sidecar/.env.local" ]; then
-  cp "$project_dir/sidecar/.env.local" "$resources_dir/sidecar.env"
+#
+# SECURITY: bundling is gated behind an explicit --bundle-env opt-in. By
+# default we skip it, so a routine build never bakes the developer's real
+# DEEPSEEK_API_KEY (or any other secret in .env.local) into a distributable
+# .app. Only pass --bundle-env for a private, non-distributed local build.
+if [ "$bundle_env" = "1" ]; then
+  if [ -f "$project_dir/sidecar/.env.local" ]; then
+    echo "warning: --bundle-env set -- bundling sidecar/.env.local (contains secrets like DEEPSEEK_API_KEY) into the .app. DO NOT distribute this build." >&2
+    cp "$project_dir/sidecar/.env.local" "$resources_dir/sidecar.env"
+  else
+    echo "note: --bundle-env set but sidecar/.env.local not found -- nothing to bundle." >&2
+  fi
+else
+  echo "note: skipping sidecar/.env.local bundling (default). Pass --bundle-env to include it in a private local build." >&2
 fi
 
 # Files received through WeChat can leave a quarantine attribute on the

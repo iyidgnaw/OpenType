@@ -4,6 +4,15 @@ import UserNotifications
 
 @MainActor
 final class AppModel: ObservableObject {
+    /// Pure merge seam for a list refresh: `incoming == nil` signals a *failed*
+    /// fetch (keep whatever is already on screen), while `incoming == some`
+    /// signals a *successful* fetch whose result — even a genuinely empty array —
+    /// is authoritative and replaces `previous`. This is what stops a transient
+    /// sidecar hiccup from flashing an already-populated list to empty.
+    nonisolated static func mergedRefresh<T>(previous: [T], incoming: [T]?) -> [T] {
+        incoming ?? previous
+    }
+
     @Published private(set) var state: ProcessingState = .idle
     @Published private(set) var shortcutStatus = "正在注册…"
     /// The sidecar child process's lifecycle state, the single source of truth
@@ -33,6 +42,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastDeliveryNotice: String?
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
+    /// Set when an append to the immutable audit trail throws. The audit log is
+    /// the app's local "source of truth"; a failed write must not be silent, so
+    /// this surfaces a small warning in the Home / menubar status area. It stays
+    /// set until something explicitly clears it (a subsequent successful append).
+    @Published private(set) var auditWriteFailed = false
     /// Backs the Settings "Memory" panel's manual "Consolidate now" button
     /// (`MemoryPanelView`) — a brief, in-place success/failure indicator, not
     /// a persistent log (that's what `memoryConsolidationRuns` is for).
@@ -128,6 +142,21 @@ final class AppModel: ObservableObject {
     let history: HistoryStore
     let agentMemory: AgentMemoryStore
     private let auditStore = ImmutableAuditStore()
+
+    /// Central append point for the immutable audit trail. The audit log is the
+    /// app's local source of truth, so a failed write must be visible rather than
+    /// silently swallowed by `try?`: on failure it flips `auditWriteFailed`, which
+    /// the Home / menubar status area surfaces as a small warning. A subsequent
+    /// successful append clears the flag.
+    private func recordAuditEvent(_ event: ImmutableAuditEvent) {
+        do {
+            try auditStore.append(event)
+            if auditWriteFailed { auditWriteFailed = false }
+        } catch {
+            auditWriteFailed = true
+            print("OpenType: failed to append audit event: \(error.localizedDescription)")
+        }
+    }
 
     private let sidecarClient = SidecarClient()
     private let audioRecorder = AudioRecorder()
@@ -805,28 +834,40 @@ final class AppModel: ObservableObject {
 
     /// Refreshes the Q&A tab's conversation list (`GET /conversations?kind=ask`).
     func refreshAskConversations() async {
-        await refreshConversations(kind: "ask") { [weak self] in self?.askConversations = $0 }
+        await refreshConversations(
+            kind: "ask",
+            current: { [weak self] in self?.askConversations ?? [] },
+            assign: { [weak self] in self?.askConversations = $0 }
+        )
     }
 
     /// Refreshes the Agent tab's conversation list (`GET /conversations?kind=agent`).
     func refreshAgentConversations() async {
-        await refreshConversations(kind: "agent") { [weak self] in self?.agentConversations = $0 }
+        await refreshConversations(
+            kind: "agent",
+            current: { [weak self] in self?.agentConversations ?? [] },
+            assign: { [weak self] in self?.agentConversations = $0 }
+        )
     }
 
     private struct ConversationsListResponseBody: Decodable { let conversations: [ConversationSummary] }
 
     private func refreshConversations(
         kind: String,
-        assign: @escaping ([ConversationSummary]) -> Void
+        current: () -> [ConversationSummary],
+        assign: ([ConversationSummary]) -> Void
     ) async {
+        let previous = current()
         do {
             let response: ConversationsListResponseBody = try await sidecarClient.request(
                 method: "GET",
                 path: "/conversations?kind=\(kind)"
             )
-            assign(response.conversations)
+            // Successful decode is authoritative, even a real empty [].
+            assign(AppModel.mergedRefresh(previous: previous, incoming: response.conversations))
         } catch {
-            assign([])
+            // Failed fetch: keep whatever is on screen rather than clobber to [].
+            assign(AppModel.mergedRefresh(previous: previous, incoming: nil))
             print("OpenType: failed to refresh \(kind) conversations from sidecar: \(error.localizedDescription)")
         }
     }
@@ -1007,7 +1048,7 @@ final class AppModel: ObservableObject {
             reviewPanel.endCorrecting()
 
             let eventId = UUID()
-            try? auditStore.append(
+            recordAuditEvent(
                 ImmutableAuditEvent(
                     id: eventId,
                     requestId: session.requestId,
@@ -1085,7 +1126,7 @@ final class AppModel: ObservableObject {
                 )
             }
 
-            try? self.auditStore.append(
+            self.recordAuditEvent(
                 ImmutableAuditEvent(
                     requestId: session.requestId,
                     status: .completed,
@@ -1125,7 +1166,7 @@ final class AppModel: ObservableObject {
             "已取消，未写入任何内容",
             english: "Cancelled — nothing was inserted"
         )
-        try? auditStore.append(
+        recordAuditEvent(
             ImmutableAuditEvent(
                 requestId: session.requestId,
                 status: .cancelled,
@@ -1277,25 +1318,27 @@ final class AppModel: ObservableObject {
     /// (not started yet, transient failure) just yields an empty list plus a
     /// logged message rather than throwing.
     func refreshMemoryPanel() async {
+        let previousTerms = memoryTerms
         do {
             let response: MemoryTermsResponseBody = try await sidecarClient.request(
                 method: "GET",
                 path: "/memory/terms"
             )
-            memoryTerms = response.terms
+            memoryTerms = AppModel.mergedRefresh(previous: previousTerms, incoming: response.terms)
         } catch {
-            memoryTerms = []
+            memoryTerms = AppModel.mergedRefresh(previous: previousTerms, incoming: nil)
             print("OpenType: failed to refresh memory terms from sidecar: \(error.localizedDescription)")
         }
 
+        let previousRuns = memoryConsolidationRuns
         do {
             let response: MemoryConsolidationRunsResponseBody = try await sidecarClient.request(
                 method: "GET",
                 path: "/memory/consolidation-runs"
             )
-            memoryConsolidationRuns = response.runs
+            memoryConsolidationRuns = AppModel.mergedRefresh(previous: previousRuns, incoming: response.runs)
         } catch {
-            memoryConsolidationRuns = []
+            memoryConsolidationRuns = AppModel.mergedRefresh(previous: previousRuns, incoming: nil)
             print("OpenType: failed to refresh memory consolidation runs from sidecar: \(error.localizedDescription)")
         }
     }
@@ -1554,7 +1597,7 @@ final class AppModel: ObservableObject {
             model: String? = nil
         ) -> UUID {
             let eventId = UUID()
-            try? auditStore.append(
+            recordAuditEvent(
                 ImmutableAuditEvent(
                     id: eventId,
                     requestId: auditRequestID,
@@ -1916,7 +1959,7 @@ final class AppModel: ObservableObject {
                 openAskConversation(response.conversationId)
             }
 
-            try? auditStore.append(
+            recordAuditEvent(
                 ImmutableAuditEvent(
                     requestId: requestID,
                     status: .completed,
@@ -1972,7 +2015,7 @@ final class AppModel: ObservableObject {
         } catch is CancellationError {
             // Popup dismissed or superseded: leave the clipboard/app state
             // untouched and record the abort for the audit trail.
-            try? auditStore.append(
+            recordAuditEvent(
                 ImmutableAuditEvent(
                     requestId: requestID,
                     status: .cancelled,
@@ -2004,7 +2047,7 @@ final class AppModel: ObservableObject {
                 )
                 askPanelState = current
             }
-            try? auditStore.append(
+            recordAuditEvent(
                 ImmutableAuditEvent(
                     requestId: requestID,
                     status: .failed,
@@ -2105,7 +2148,7 @@ final class AppModel: ObservableObject {
                 openAgentConversation(response.conversationId)
             }
 
-            try? auditStore.append(
+            recordAuditEvent(
                 ImmutableAuditEvent(
                     requestId: requestID,
                     status: .completed,
@@ -2163,7 +2206,7 @@ final class AppModel: ObservableObject {
             }
             runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
 
-            try? auditStore.append(
+            recordAuditEvent(
                 ImmutableAuditEvent(
                     requestId: requestID,
                     status: .failed,

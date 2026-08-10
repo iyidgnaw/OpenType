@@ -74,7 +74,7 @@ struct RootView: View {
                     case .home:
                         HomeView(model: model, configuration: model.configuration)
                     case .history:
-                        HistoryView(model: model)
+                        HistoryView(model: model, history: model.history)
                     case .qa:
                         QAConversationsView(model: model)
                     case .agent:
@@ -214,6 +214,10 @@ private struct HomeView: View {
                     SidecarAttentionCard(model: model)
                 }
 
+                if model.auditWriteFailed {
+                    AuditWriteFailedCard()
+                }
+
                 if !model.setupReady {
                     SetupCard(model: model)
                 }
@@ -274,6 +278,32 @@ private struct SidecarAttentionCard: View {
         }
         .padding(13)
         .openTypeSurface(cornerRadius: 15)
+    }
+}
+
+/// Small Home-tab warning shown when an append to the immutable audit trail
+/// failed. The audit log is the app's local source of truth, so a write failure
+/// must be visible rather than silently swallowed. Minimal by design — a single
+/// static notice, cleared automatically on the next successful audit append.
+private struct AuditWriteFailedCard: View {
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.orange)
+
+            Text(OpenTypeL10n.text(
+                "审计记录写入失败，历史可能不完整",
+                english: "Audit log write failed — history may be incomplete"
+            ))
+            .font(.system(size: 11))
+            .foregroundStyle(OpenTypeTheme.subtleText)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
+        .padding(11)
+        .openTypeSurface(cornerRadius: 13)
     }
 }
 
@@ -675,6 +705,10 @@ private struct LastResultCard: View {
 
 private struct HistoryView: View {
     @ObservedObject var model: AppModel
+    /// `HistoryStore` is its own `ObservableObject`; observing it (not just
+    /// `model`) is what makes `entries` changes re-render this view — `model`
+    /// never republishes when the store's `@Published entries` mutates.
+    @ObservedObject var history: HistoryStore
 
     var body: some View {
         VStack(spacing: 0) {

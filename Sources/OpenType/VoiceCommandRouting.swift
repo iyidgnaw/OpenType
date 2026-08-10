@@ -26,10 +26,15 @@ enum VoiceModeRouter {
         for route in routes {
             for prefix in route.prefixes {
                 guard lowered.hasPrefix(prefix) else { continue }
-                let boundaryIndex = lowered.index(lowered.startIndex, offsetBy: prefix.count)
-                guard boundaryIndex < lowered.endIndex else { continue }
+                // Derive the boundary index against `trimmed` (the string we
+                // actually subscript), not `lowered`: reusing a `String.Index`
+                // computed on one string to subscript another is only safe while
+                // the two share identical layout, which case-folding a future
+                // non-ASCII prefix could silently break.
+                let boundaryIndex = trimmed.index(trimmed.startIndex, offsetBy: prefix.count)
+                guard boundaryIndex < trimmed.endIndex else { continue }
 
-                let boundary = lowered[boundaryIndex]
+                let boundary = trimmed[boundaryIndex]
                 guard boundary.isVoiceCommandBoundary else { continue }
 
                 let remainder = trimmed[boundaryIndex...]

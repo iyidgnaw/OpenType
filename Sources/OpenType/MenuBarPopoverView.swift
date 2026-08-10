@@ -114,10 +114,31 @@ struct MenuBarPopoverView: View {
             .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
 
-            Label(model.sidecarStatus, systemImage: "bolt.horizontal.circle")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if model.sidecarNeedsAttention {
+                HStack(spacing: 6) {
+                    Label(model.sidecarStatusText, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        model.restartSidecarManually()
+                    } label: {
+                        Text(OpenTypeL10n.text("重启服务", english: "Restart service"))
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Color.accentColor)
+                }
+            } else {
+                Label(model.sidecarStatusText, systemImage: "bolt.horizontal.circle")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
 
             if model.runningAgentRunCount > 0 {
                 Label(

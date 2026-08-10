@@ -210,6 +210,10 @@ private struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if model.sidecarNeedsAttention {
+                    SidecarAttentionCard(model: model)
+                }
+
                 if !model.setupReady {
                     SetupCard(model: model)
                 }
@@ -233,6 +237,43 @@ private struct HomeView: View {
             .padding(.vertical, 14)
         }
         .scrollIndicators(.hidden)
+    }
+}
+
+/// Home-tab banner shown when the sidecar has crashed / can't restart, with a
+/// manual "restart service" button (P1-4). Mirrors the menubar popover's error
+/// affordance so the failure is visible wherever the user is looking.
+private struct SidecarAttentionCard: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.orange)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(OpenTypeL10n.text("语音服务异常", english: "Voice service problem"))
+                    .font(.system(size: 13, weight: .semibold))
+                Text(model.sidecarStatusText)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(OpenTypeTheme.subtleText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+
+            Button {
+                model.restartSidecarManually()
+            } label: {
+                Text(OpenTypeL10n.text("重启服务", english: "Restart service"))
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(13)
+        .openTypeSurface(cornerRadius: 15)
     }
 }
 

@@ -165,10 +165,61 @@ private final class CurlProcessControl: @unchecked Sendable {
 /// `@MainActor final class` convention for stateful collaborators
 /// (`AudioRecorder`, `AppModel`) since this type owns mutable process state
 /// that should only ever be touched from one place at a time.
+/// Thread-safe one-shot flag distinguishing an INTENTIONAL sidecar stop (app
+/// quit / explicit `stop()` / a failed-startup teardown) from an UNEXPECTED
+/// crash. A fresh instance is created per `start()` and handed to that run's
+/// `terminationHandler`, which fires on an arbitrary background thread — so it
+/// can't touch the `@MainActor` `SidecarClient` directly. `@unchecked
+/// Sendable` because access is serialized by an `NSLock`.
+private final class TerminationIntentFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var intentional = false
+
+    func markIntentional() {
+        lock.lock(); defer { lock.unlock() }
+        intentional = true
+    }
+
+    var isIntentional: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return intentional
+    }
+}
+
 @MainActor
 final class SidecarClient {
     private let socketURL: URL
     private var process: Process?
+
+    /// The intent flag for the currently-running child, so `stop()` can mark an
+    /// intentional teardown before terminating it. Replaced on every `start()`.
+    private var terminationIntent = TerminationIntentFlag()
+
+    /// Invoked (on the main actor) when the sidecar child dies UNEXPECTEDLY —
+    /// i.e. not via `stop()` / app quit / a failed-startup teardown. `AppModel`
+    /// wires this to its bounded auto-restart loop (P1-4). A crash used to only
+    /// write a debug log, leaving `sidecarStatus` stuck reading "ready" forever
+    /// while every subsequent request failed against a dead process.
+    var onUnexpectedTermination: (() -> Void)?
+
+    /// Derives the dev-mode sidecar source directory from this file's own
+    /// location — `<repo>/Sources/OpenType/SidecarClient.swift` → `<repo>/sidecar`
+    /// (up 3 path components, then `/sidecar`). Replaces a hardcoded,
+    /// user-specific absolute fallback path so a checkout in any location works.
+    /// Overridden ahead of this by the `OPENTYPE_SIDECAR_DEV_PATH` env var; only
+    /// consulted in dev-mode (`bun run`) launches, never for the bundled binary.
+    ///
+    /// - Parameter sourceFilePath: Overridable for testing; defaults to the
+    ///   compile-time location of this source file.
+    nonisolated static func defaultDevSidecarDirectory(
+        sourceFilePath: String = #filePath
+    ) -> String {
+        var url = URL(fileURLWithPath: sourceFilePath)
+        url.deleteLastPathComponent() // SidecarClient.swift → Sources/OpenType
+        url.deleteLastPathComponent() // → Sources
+        url.deleteLastPathComponent() // → repo root
+        return url.appendingPathComponent("sidecar", isDirectory: true).path
+    }
 
     /// - Parameter socketURL: Override for testing. Defaults to
     ///   `~/Library/Application Support/OpenType/sidecar.sock`, following the
@@ -197,21 +248,55 @@ final class SidecarClient {
         process?.terminate()
     }
 
-    /// Appends a timestamped line to a fixed debug log file so sidecar
-    /// startup can be diagnosed from a launched (non-Terminal) app instance,
-    /// where stdout isn't visible. Temporary diagnostic aid.
+    /// Hard cap (bytes) on the sidecar debug log; it's truncated once it grows
+    /// past this so a long-lived app instance streaming stdout/stderr into it
+    /// can't grow it without bound (P2).
+    nonisolated private static let debugLogMaxBytes = 1_000_000
+
+    /// Location of the sidecar debug log, under the app's Application Support
+    /// directory (same convention as the socket/db paths) rather than a fixed,
+    /// world-readable `/tmp` path (P2): the sidecar's stdout/stderr can contain
+    /// locally-sensitive content and shouldn't be readable by every user on the
+    /// machine. Returns `nil` if Application Support can't be resolved.
+    nonisolated private static func debugLogURL() -> URL? {
+        guard let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        let directory = support.appendingPathComponent("OpenType", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return directory.appendingPathComponent("sidecar-client-debug.log")
+    }
+
+    /// Appends a timestamped line to the sidecar debug log so startup can be
+    /// diagnosed from a launched (non-Terminal) app instance, where stdout
+    /// isn't visible. Kept under Application Support (not `/tmp`) and truncated
+    /// once it exceeds `debugLogMaxBytes`, so it stays a bounded, user-private
+    /// diagnostic aid rather than an unbounded world-readable file (P2).
     nonisolated private static func debugLog(_ message: String) {
-        let path = "/tmp/opentype-sidecar-client-debug.log"
+        guard let url = debugLogURL() else { return }
+        let path = url.path
         let line = "\(Date()) \(message)\n"
-        if let data = line.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: path),
-               let handle = FileHandle(forWritingAtPath: path) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try? handle.close()
-            } else {
-                try? data.write(to: URL(fileURLWithPath: path))
-            }
+        guard let data = line.data(using: .utf8) else { return }
+        let fileManager = FileManager.default
+
+        // Rotate by truncating once the log passes its size cap.
+        if let attributes = try? fileManager.attributesOfItem(atPath: path),
+           let size = attributes[.size] as? Int,
+           size > debugLogMaxBytes {
+            try? fileManager.removeItem(atPath: path)
+        }
+
+        if fileManager.fileExists(atPath: path),
+           let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
         }
     }
 
@@ -224,6 +309,12 @@ final class SidecarClient {
         // Remove any stale socket left behind by a previous run so readiness
         // polling below can't be fooled by a dead file.
         try? FileManager.default.removeItem(at: socketURL)
+
+        // Fresh intent flag for this run; `stop()` (and the failed-startup
+        // teardown below) mark it so the terminationHandler can tell an
+        // intentional shutdown from an unexpected crash.
+        let terminationIntent = TerminationIntentFlag()
+        self.terminationIntent = terminationIntent
 
         let process = Process()
         var environment = ProcessInfo.processInfo.environment
@@ -294,7 +385,7 @@ final class SidecarClient {
             process.arguments = ["bun", "run", "src/server.ts"]
             let devPath = ProcessInfo.processInfo
                 .environment["OPENTYPE_SIDECAR_DEV_PATH"]
-                ?? "/Users/diywang/hackathon/OpenType/sidecar"
+                ?? Self.defaultDevSidecarDirectory()
             process.currentDirectoryURL = URL(
                 fileURLWithPath: devPath,
                 isDirectory: true
@@ -336,12 +427,21 @@ final class SidecarClient {
             }
         }
 
-        process.terminationHandler = { finished in
+        process.terminationHandler = { [weak self] finished in
             // Pipes are already being drained by the readability handlers
             // above; tear them down and just record the exit here.
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
             Self.debugLog("terminated status=\(finished.terminationStatus) reason=\(finished.terminationReason.rawValue)")
+            // An INTENTIONAL stop (app quit / explicit stop() / a failed-startup
+            // teardown) is expected — do nothing. An UNEXPECTED crash after a
+            // healthy start must notify AppModel so it can move to a visible
+            // non-ready state and attempt a bounded auto-restart (P1-4), instead
+            // of leaving the status stuck reading "ready" against a dead process.
+            if terminationIntent.isIntentional { return }
+            Task { @MainActor in
+                self?.onUnexpectedTermination?()
+            }
         }
 
         do {
@@ -360,6 +460,10 @@ final class SidecarClient {
             Self.debugLog("waitUntilReady() succeeded")
         } catch {
             Self.debugLog("waitUntilReady() threw: \(error) isRunning=\(process.isRunning)")
+            // This teardown is intentional (start() is about to throw and the
+            // caller handles it) — don't let the terminationHandler mistake it
+            // for a crash and kick off an auto-restart.
+            terminationIntent.markIntentional()
             process.terminate()
             self.process = nil
             throw error
@@ -396,6 +500,9 @@ final class SidecarClient {
     /// best-effort fallback for any other teardown path.
     func stop() {
         guard let process else { return }
+        // Mark this as an intentional shutdown so the terminationHandler doesn't
+        // treat the exit as a crash and trigger an auto-restart.
+        terminationIntent.markIntentional()
         if process.isRunning {
             process.terminate()
             process.waitUntilExit()

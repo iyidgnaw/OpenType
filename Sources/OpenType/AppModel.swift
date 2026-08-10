@@ -6,7 +6,15 @@ import UserNotifications
 final class AppModel: ObservableObject {
     @Published private(set) var state: ProcessingState = .idle
     @Published private(set) var shortcutStatus = "正在注册…"
-    @Published private(set) var sidecarStatus = "正在启动…"
+    /// The sidecar child process's lifecycle state, the single source of truth
+    /// the displayed `sidecarStatusText` derives from. Was previously a bare
+    /// `String` set exactly once at startup — so a crash left it stuck reading
+    /// "ready" forever (P1-4); now it moves to `.degraded`/`.failed` on
+    /// unexpected termination and drives the UI's error/restart affordance.
+    @Published private(set) var sidecarStatus: SidecarStatus = .starting
+    /// Extra detail for a `.failed` status (e.g. a startup error description),
+    /// folded into `sidecarStatusText`. `nil` when there's nothing to add.
+    @Published private(set) var sidecarErrorDetail: String?
     @Published private(set) var shortcutKeys = HotKeyPreset.controlShiftSpace.keys
     @Published private(set) var shortcutBehavior: HotKeyBehavior = .holdToTalk
     @Published private(set) var shortcutReady = false
@@ -159,6 +167,22 @@ final class AppModel: ObservableObject {
     private var runningAgentTasks: [UUID: Task<Void, Never>] = [:]
     private let agentNotificationDelegate = AgentNotificationDelegate()
 
+    /// Consecutive unexpected-sidecar-termination count driving the bounded
+    /// auto-restart backoff (`SidecarSupervisor.restartDecision`). Reset to 0 on
+    /// a successful restart and on a manual restart.
+    private var sidecarFailureCount = 0
+    /// The pending delayed auto-restart, if one is scheduled. Cancelled when a
+    /// newer restart (auto or manual) supersedes it.
+    private var sidecarRestartTask: Task<Void, Never>?
+
+    /// True while an `attemptSidecarRestart()` is mid-flight. `sidecarClient.start()`
+    /// is not cancellation-aware, so cancelling `sidecarRestartTask` cannot stop a
+    /// start already in progress. This guard serializes the auto and manual restart
+    /// paths so a manual "restart service" tap during an in-flight auto-restart can't
+    /// spawn a second overlapping `start()` (which would orphan a sidecar process
+    /// whose armed terminationHandler could then fire a spurious restart).
+    private var isRestartingSidecar = false
+
     /// Set by `OpenTypeAppDelegate` once the main app window controller
     /// exists (Part A). Lets both the menubar popover's gear button and
     /// `focusAgentRun(_:)` (a tapped Agent-completion notification) open the
@@ -168,6 +192,43 @@ final class AppModel: ObservableObject {
 
     var accessibilityGranted: Bool {
         contextBridge.accessibilityGranted
+    }
+
+    /// Human-readable, localized rendering of `sidecarStatus` for the UI.
+    var sidecarStatusText: String {
+        switch sidecarStatus {
+        case .starting:
+            return OpenTypeL10n.text("正在启动…", english: "Starting…")
+        case .ready:
+            return OpenTypeL10n.text("Sidecar 已就绪", english: "Sidecar ready")
+        case .degraded:
+            return OpenTypeL10n.text(
+                "Sidecar 已断开，正在自动重启…",
+                english: "Sidecar disconnected — restarting…"
+            )
+        case .failed:
+            if let detail = sidecarErrorDetail {
+                return OpenTypeL10n.text(
+                    "Sidecar 启动失败：\(detail)",
+                    english: "Sidecar failed to start: \(detail)"
+                )
+            }
+            return OpenTypeL10n.text(
+                "Sidecar 已停止，请手动重启",
+                english: "Sidecar stopped — restart needed"
+            )
+        }
+    }
+
+    /// True when the sidecar is in a non-ready state the UI should surface with
+    /// a manual "restart service" affordance (auto-restarting or given up).
+    var sidecarNeedsAttention: Bool {
+        switch sidecarStatus {
+        case .degraded, .failed:
+            return true
+        case .starting, .ready:
+            return false
+        }
     }
 
     var setupReady: Bool {
@@ -209,6 +270,9 @@ final class AppModel: ObservableObject {
         agentNotificationDelegate.onAgentRunTapped = { [weak self] runID in
             self?.focusAgentRun(runID)
         }
+        sidecarClient.onUnexpectedTermination = { [weak self] in
+            self?.handleSidecarUnexpectedTermination()
+        }
         UNUserNotificationCenter.current().delegate = agentNotificationDelegate
         UNUserNotificationCenter.current().requestAuthorization(
             options: [.alert, .sound]
@@ -225,10 +289,8 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 try await self.sidecarClient.start()
-                self.sidecarStatus = OpenTypeL10n.text(
-                    "Sidecar 已就绪",
-                    english: "Sidecar ready"
-                )
+                self.sidecarErrorDetail = nil
+                self.sidecarStatus = .ready
                 await self.refreshProviderConfigStatus()
                 // First-run setup wizard trigger (spec: "if the user hasn't
                 // configured Whisper or LLM yet, opening the app should
@@ -245,10 +307,8 @@ final class AppModel: ObservableObject {
                     self.onOpenMainWindowRequested?()
                 }
             } catch {
-                self.sidecarStatus = OpenTypeL10n.text(
-                    "Sidecar 启动失败：\(error.localizedDescription)",
-                    english: "Sidecar failed to start: \(error.localizedDescription)"
-                )
+                self.sidecarErrorDetail = error.localizedDescription
+                self.sidecarStatus = .failed
             }
         }
     }
@@ -256,7 +316,82 @@ final class AppModel: ObservableObject {
     /// Stops the sidecar child process. Called from the app delegate's
     /// `applicationWillTerminate` so the sidecar doesn't outlive the app.
     func stopSidecar() {
+        // Cancel any pending auto-restart so an intentional quit isn't chased by
+        // a resurrection attempt.
+        sidecarRestartTask?.cancel()
+        sidecarRestartTask = nil
         sidecarClient.stop()
+    }
+
+    /// Called (on the main actor) by `SidecarClient` when the sidecar dies
+    /// unexpectedly — moves the status to a visible non-ready state and kicks
+    /// off the bounded auto-restart loop (P1-4). The intentional-stop path in
+    /// `SidecarClient.stop()`/failed-startup teardown never reaches here.
+    private func handleSidecarUnexpectedTermination() {
+        sidecarStatus = SidecarSupervisor.status(for: .unexpectedTermination)
+        scheduleSidecarRestart()
+    }
+
+    /// Increments the consecutive-failure counter and, per
+    /// `SidecarSupervisor.restartDecision`, either schedules a delayed restart
+    /// (bounded backoff) or gives up and surfaces the terminal failure state
+    /// for a manual restart.
+    private func scheduleSidecarRestart() {
+        sidecarFailureCount += 1
+        let decision = SidecarSupervisor.restartDecision(
+            consecutiveFailureCount: sidecarFailureCount
+        )
+        switch decision {
+        case .giveUp:
+            sidecarErrorDetail = nil
+            sidecarStatus = SidecarSupervisor.status(for: .gaveUp)
+        case .restart(let afterSeconds):
+            sidecarStatus = SidecarSupervisor.status(for: .unexpectedTermination)
+            sidecarRestartTask?.cancel()
+            sidecarRestartTask = Task { [weak self] in
+                try? await Task.sleep(
+                    nanoseconds: UInt64(max(0, afterSeconds) * 1_000_000_000)
+                )
+                if Task.isCancelled { return }
+                await self?.attemptSidecarRestart()
+            }
+        }
+    }
+
+    /// Attempts to (re)start the sidecar. On success, resets the failure
+    /// counter and returns to `.ready`; on failure, feeds back into
+    /// `scheduleSidecarRestart()` for the next backoff step / eventual give-up.
+    private func attemptSidecarRestart() async {
+        // Coalesce overlapping restarts: if one is already in flight, let it be
+        // the authoritative attempt (the caller has already reset the failure
+        // counter / status if it wanted to). Prevents a double `start()`.
+        guard !isRestartingSidecar else { return }
+        isRestartingSidecar = true
+        defer { isRestartingSidecar = false }
+        do {
+            try await sidecarClient.start()
+            sidecarFailureCount = 0
+            sidecarErrorDetail = nil
+            sidecarStatus = SidecarSupervisor.status(for: .restartSucceeded)
+            await refreshProviderConfigStatus()
+        } catch {
+            sidecarErrorDetail = error.localizedDescription
+            scheduleSidecarRestart()
+        }
+    }
+
+    /// User-triggered "restart service" action (Home view / menubar popover):
+    /// resets the failure counter so the bounded backoff starts fresh, then
+    /// attempts a restart immediately.
+    func restartSidecarManually() {
+        sidecarRestartTask?.cancel()
+        sidecarRestartTask = nil
+        sidecarFailureCount = 0
+        sidecarErrorDetail = nil
+        sidecarStatus = .starting
+        sidecarRestartTask = Task { [weak self] in
+            await self?.attemptSidecarRestart()
+        }
     }
 
     func start() {

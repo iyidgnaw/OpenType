@@ -89,6 +89,76 @@ private struct AnyEncodableBody: Encodable {
     }
 }
 
+/// Wall-clock ceiling (seconds) handed to `curl --max-time` for every request,
+/// so a wedged Unix socket can't pin a request forever (P0-2). Finite but
+/// generous enough for a long agent/tool-calling run. File-scope (rather than a
+/// `SidecarClient` static) so the `nonisolated` `curlInvocation` seam can read
+/// it without crossing the class's `@MainActor` isolation.
+private let sidecarRequestTimeoutSeconds = 300
+
+/// A minimal thread-safe `Data` accumulator so a background pipe-drain can
+/// hand its bytes back to whichever context reads them once the drain
+/// finishes. `@unchecked Sendable` because access is serialized by an
+/// `NSLock` rather than by the type system.
+private final class DataBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func append(_ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        storage.append(data)
+    }
+
+    var value: Data {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
+}
+
+/// Thread-safe custody of an in-flight `curl` child process so a Swift Task's
+/// cancellation handler — which can fire from any thread at any time — can
+/// terminate it, while guaranteeing the request's continuation is resumed
+/// exactly once no matter which racing path (normal exit, spawn failure, or
+/// cancellation-driven termination) reaches it first. `@unchecked Sendable`
+/// because all mutable state is guarded by `lock`.
+private final class CurlProcessControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var resumed = false
+
+    func setProcess(_ newProcess: Process) {
+        lock.lock(); defer { lock.unlock() }
+        process = newProcess
+    }
+
+    /// Returns `true` for the first caller only. Gates the single legal
+    /// `continuation.resume(...)`; every later caller gets `false` and must
+    /// not resume again.
+    func claimResume() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if resumed { return false }
+        resumed = true
+        return true
+    }
+
+    /// The child's exit status. Only valid once the process has actually
+    /// exited (i.e. from the termination path); returns `-1` if no process was
+    /// ever recorded.
+    func terminationStatus() -> Int32 {
+        lock.lock(); let process = self.process; lock.unlock()
+        guard let process else { return -1 }
+        return process.terminationStatus
+    }
+
+    /// Best-effort SIGTERM to the child if it's still running. Safe to call
+    /// from a task-cancellation handler on any thread.
+    func terminate() {
+        lock.lock(); let process = self.process; lock.unlock()
+        guard let process, process.isRunning else { return }
+        process.terminate()
+    }
+}
+
 /// Launches the local TypeScript/Bun sidecar as a child process and talks to
 /// it over a Unix domain socket (via `curl`, since `URLSession` cannot speak
 /// to Unix sockets directly). Mirrors the rest of this codebase's
@@ -237,16 +307,41 @@ final class SidecarClient {
         let stdoutPipe = Pipe()
         process.standardOutput = stdoutPipe
 
+        // Drain the sidecar's stdout/stderr CONTINUOUSLY on background readers
+        // rather than once inside `terminationHandler` (P1-6). This is a
+        // long-lived child: once it writes more than the OS pipe buffer
+        // (~64 KB) over its lifetime, a pipe read deferred to termination
+        // would block the sidecar itself the moment its buffer fills, and it
+        // never terminates during normal operation. Streaming each chunk to
+        // the debug log as it arrives preserves (and improves on) the previous
+        // startup-diagnostics behavior.
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let text = String(data: chunk, encoding: .utf8), !text.isEmpty {
+                Self.debugLog("sidecar stdout: \(text)")
+            }
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let text = String(data: chunk, encoding: .utf8), !text.isEmpty {
+                Self.debugLog("sidecar stderr: \(text)")
+            }
+        }
+
         process.terminationHandler = { finished in
-            let stderrText = String(
-                data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
-                encoding: .utf8
-            ) ?? ""
-            let stdoutText = String(
-                data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
-                encoding: .utf8
-            ) ?? ""
-            Self.debugLog("terminated status=\(finished.terminationStatus) reason=\(finished.terminationReason.rawValue) stdout=\(stdoutText) stderr=\(stderrText)")
+            // Pipes are already being drained by the readability handlers
+            // above; tear them down and just record the exit here.
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            Self.debugLog("terminated status=\(finished.terminationStatus) reason=\(finished.terminationReason.rawValue)")
         }
 
         do {
@@ -296,10 +391,9 @@ final class SidecarClient {
     }
 
     /// Terminates the child process, if running, and clears our reference to
-    /// it. Callers (or an app-quit hook, if one is wired up later) should
-    /// invoke this on shutdown; there is currently no `applicationWillTerminate`
-    /// hook in `OpenTypeApp.swift` to attach to, so `deinit` above provides a
-    /// best-effort fallback.
+    /// it. `OpenTypeApp.swift`'s `applicationWillTerminate(_:)` invokes this on
+    /// app quit (via `AppModel.stopSidecar()`); `deinit` above provides a
+    /// best-effort fallback for any other teardown path.
     func stop() {
         guard let process else { return }
         if process.isRunning {
@@ -381,6 +475,55 @@ final class SidecarClient {
         return (String(output[output.startIndex..<lastNewline]), status)
     }
 
+    /// Builds the `curl` argument list (and any stdin payload) for one
+    /// request, as a pure function so the argv construction can be unit tested
+    /// without spawning a process — mirroring the `nonisolated static`
+    /// `splitBodyAndStatus` / `decodeResponse` seams.
+    ///
+    /// The request body is delivered over **stdin** (`-d @-`), never as an
+    /// argv element: a real recording's base64 audio payload can exceed Darwin
+    /// ARG_MAX (~1 MB), which fails the spawn with `E2BIG`, and putting a body
+    /// (or the API key it may carry) on argv also leaks it to every `ps`
+    /// observer for the lifetime of the process (P0-1 / P1-13). A finite
+    /// `--max-time` is always included so a wedged socket can't hang the
+    /// request forever (P0-2).
+    ///
+    /// - Returns: the curl `arguments` (body-free) and the `stdinBody` to feed
+    ///   the process's standard input (`nil` when there is no request body).
+    nonisolated static func curlInvocation(
+        socketPath: String,
+        method: String,
+        path: String,
+        bodyData: Data?
+    ) -> (arguments: [String], stdinBody: Data?) {
+        var arguments = [
+            "--unix-socket", socketPath,
+            "-sS",
+            "--max-time", String(sidecarRequestTimeoutSeconds),
+            "-w", "\n%{http_code}",
+            "-X", method
+        ]
+        if let bodyData {
+            arguments += [
+                "-H", "Content-Type: application/json",
+                // Suppress curl's automatic `Expect: 100-continue`. Against a
+                // local Unix-socket sidecar it only costs a round trip — curl
+                // stalls ~1s waiting for a `100 Continue` the sidecar never
+                // sends before releasing the body — and sending the request
+                // headers and body together is what a simple HTTP reader
+                // expects anyway.
+                "-H", "Expect:",
+                // Stream the request body from stdin (`@-`); see the method
+                // doc for why it must never ride on argv.
+                "-d", "@-"
+            ]
+            arguments.append("http://localhost\(path)")
+            return (arguments, bodyData)
+        }
+        arguments.append("http://localhost\(path)")
+        return (arguments, nil)
+    }
+
     /// Runs `curl` against the Unix socket and returns raw stdout text (the
     /// response body followed by a newline and the HTTP status code, per
     /// `-w '\n%{http_code}'` — see `splitBodyAndStatus`). Separated from
@@ -391,55 +534,121 @@ final class SidecarClient {
         path: String,
         bodyData: Data?
     ) async throws -> String {
-        var arguments = [
-            "--unix-socket", socketURL.path,
-            "-sS",
-            "-w", "\n%{http_code}",
-            "-X", method
-        ]
-        if let bodyData, let bodyString = String(data: bodyData, encoding: .utf8) {
-            arguments += ["-d", bodyString, "-H", "Content-Type: application/json"]
-        }
-        arguments.append("http://localhost\(path)")
+        let invocation = Self.curlInvocation(
+            socketPath: socketURL.path,
+            method: method,
+            path: path,
+            bodyData: bodyData
+        )
+        let control = CurlProcessControl()
 
-        return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            process.arguments = arguments
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+                process.arguments = invocation.arguments
 
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
+                let stdoutPipe = Pipe()
+                let stderrPipe = Pipe()
+                process.standardOutput = stdoutPipe
+                process.standardError = stderrPipe
 
-            process.terminationHandler = { finishedProcess in
-                let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let stdoutString = String(data: stdoutData, encoding: .utf8) ?? ""
-                let stderrString = String(data: stderrData, encoding: .utf8) ?? ""
-
-                if finishedProcess.terminationStatus != 0 {
-                    continuation.resume(
-                        throwing: SidecarClientError.requestFailed(
-                            exitCode: finishedProcess.terminationStatus,
-                            stderr: stderrString
-                        )
-                    )
-                    return
+                let stdinPipe: Pipe? = invocation.stdinBody != nil ? Pipe() : nil
+                if let stdinPipe {
+                    process.standardInput = stdinPipe
                 }
-                continuation.resume(returning: stdoutString)
-            }
 
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(
-                    throwing: SidecarClientError.requestFailed(
-                        exitCode: -1,
-                        stderr: error.localizedDescription
-                    )
+                // Drain stdout AND stderr on independent background queues so a
+                // response larger than the OS pipe buffer (~64 KB) can't block
+                // curl mid-write and wedge the request forever (P0-2). Reading
+                // only inside `terminationHandler` deadlocks in exactly that
+                // case: curl blocks writing to a full stdout pipe, never
+                // exits, and the handler never fires.
+                let ioQueue = DispatchQueue(
+                    label: "ai.rain.opentype.curl-io",
+                    attributes: .concurrent
                 )
+                let group = DispatchGroup()
+                let stdoutBox = DataBox()
+                let stderrBox = DataBox()
+
+                group.enter()
+                ioQueue.async {
+                    stdoutBox.append(
+                        stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                    )
+                    group.leave()
+                }
+                group.enter()
+                ioQueue.async {
+                    stderrBox.append(
+                        stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                    )
+                    group.leave()
+                }
+
+                group.enter()
+                process.terminationHandler = { _ in
+                    group.leave()
+                }
+
+                // Resume once both drains have hit EOF and the process has
+                // exited — the DispatchGroup gives a happens-before edge, so
+                // the boxes are safe to read here without further locking.
+                group.notify(queue: ioQueue) {
+                    guard control.claimResume() else { return }
+                    let stdoutString = String(data: stdoutBox.value, encoding: .utf8) ?? ""
+                    let stderrString = String(data: stderrBox.value, encoding: .utf8) ?? ""
+                    let status = control.terminationStatus()
+                    if status != 0 {
+                        continuation.resume(
+                            throwing: SidecarClientError.requestFailed(
+                                exitCode: status,
+                                stderr: stderrString
+                            )
+                        )
+                    } else {
+                        continuation.resume(returning: stdoutString)
+                    }
+                }
+
+                control.setProcess(process)
+
+                do {
+                    try process.run()
+                    if let stdinPipe, let body = invocation.stdinBody {
+                        // Feed the body over stdin from a background queue so a
+                        // large payload filling the stdin pipe buffer can't
+                        // block before curl starts reading it.
+                        let writeHandle = stdinPipe.fileHandleForWriting
+                        ioQueue.async {
+                            try? writeHandle.write(contentsOf: body)
+                            try? writeHandle.close()
+                        }
+                    }
+                } catch {
+                    // The child never launched, so its termination handler will
+                    // never fire and the drain reads would block forever on
+                    // pipes whose write ends the parent still holds. Close them
+                    // so the readers hit EOF and unwind, then resume the error.
+                    try? stdoutPipe.fileHandleForWriting.close()
+                    try? stderrPipe.fileHandleForWriting.close()
+                    try? stdinPipe?.fileHandleForWriting.close()
+                    if control.claimResume() {
+                        continuation.resume(
+                            throwing: SidecarClientError.requestFailed(
+                                exitCode: -1,
+                                stderr: error.localizedDescription
+                            )
+                        )
+                    }
+                }
             }
+        } onCancel: {
+            // A cancelled Swift Task promptly SIGTERMs the curl child; it then
+            // exits, the group completes, and the continuation resumes with a
+            // non-zero status (throwing) instead of hanging forever (P0-2).
+            control.terminate()
         }
     }
 

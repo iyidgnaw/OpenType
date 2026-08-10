@@ -139,6 +139,19 @@ if [ "${OPENTYPE_NOTARIZE:-}" = "1" ]; then
   notarize_zip="$project_dir/dist/OpenType-notarize.zip"
   rm -f "$notarize_zip"
   ditto -c -k --keepParent "$app_dir" "$notarize_zip"
+  if [ "${OPENTYPE_NOTARIZE_NO_WAIT:-}" = "1" ]; then
+    # Submit and return immediately with a submission ID, instead of
+    # blocking here on notarytool's own --wait polling loop -- Apple's
+    # server-side processing can run long enough to exceed a single
+    # command's execution window, so the caller is expected to poll
+    # `xcrun notarytool wait <id> --keychain-profile ...` externally and
+    # then re-run this script's stapling step itself (see the two-phase
+    # note in docs/onboarding/coding-agent-setup-prompt.md's release-build
+    # section, or just re-invoke with OPENTYPE_STAPLE_ONLY=1).
+    xcrun notarytool submit "$notarize_zip" --keychain-profile "$notary_profile"
+    rm -f "$notarize_zip"
+    exit 0
+  fi
   xcrun notarytool submit "$notarize_zip" --keychain-profile "$notary_profile" --wait
   rm -f "$notarize_zip"
 

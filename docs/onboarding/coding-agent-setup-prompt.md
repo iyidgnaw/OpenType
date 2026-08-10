@@ -33,7 +33,7 @@ update the fenced prompt below to match.
 ## The repo is currently private
 
 The clone step below will fail for anyone not already added as a GitHub
-collaborator on `Clawborn/OpenType`. Whoever hands this prompt out needs to
+collaborator on `iyidgnaw/OpenType`. Whoever hands this prompt out needs to
 grant access first.
 
 ---
@@ -53,7 +53,7 @@ Confirm/install before proceeding:
 
 ## 2. Clone and orient
 
-Clone git@github.com:Clawborn/OpenType.git (use the https form if I don't have SSH keys set up: https://github.com/Clawborn/OpenType.git). Then read CLAUDE.md at the repo root in full before doing anything else — it's the authoritative build/architecture reference and takes precedence over anything below if they disagree.
+Clone git@github.com:iyidgnaw/OpenType.git (use the https form if I don't have SSH keys set up: https://github.com/iyidgnaw/OpenType.git). Then read CLAUDE.md at the repo root in full before doing anything else — it's the authoritative build/architecture reference and takes precedence over anything below if they disagree.
 
 ## 3. Ask me two questions before setting anything up
 

@@ -1,3 +1,40 @@
+/**
+ * Tests for `POST /oneshot/ask`.
+ *
+ * ## Ask-mode web loop contract (B2 open-file + ask-web design §2,
+ * docs/superpowers/specs/2026-08-13-b2-open-file-and-ask-web-design.md) --
+ * the injection contract stage 3 must implement:
+ *
+ * Ask switches from a single chat call to `runAgentLoop` with a web-only
+ * toolset. `buildOneShotRoutes` gains a FIFTH, optional parameter, appended
+ * after the existing four so every pre-existing 4-arg call site keeps
+ * working unchanged (least-invasive, and consistent with `buildAgentRoutes`
+ * receiving its ToolSet positionally):
+ *
+ *   buildOneShotRoutes(store, conversations, chat, contextLogWriter,
+ *                      tools?: ToolSet)
+ *
+ * - `tools` is the same server-level ToolSet `buildAgentRoutes` receives
+ *   (already merged and `withApproval(yolo)`-wrapped in server.ts). The ask
+ *   handler narrows it itself via
+ *   `filterToolSet(tools, ["opentype__web_search", "opentype__web_fetch"])`
+ *   -- so Ask = web only is a property of the ask route, not of the wiring.
+ * - When `tools` is omitted (legacy call sites -- the older tests in this
+ *   file), ask runs the loop with an empty toolset: no tool descriptors are
+ *   offered, so a plain-answer chat behaves exactly as before.
+ * - Prior turns are still replayed as real message history (loop
+ *   `priorMessages`, between system and the new question), NOT the
+ *   agent-route-style squashed summary.
+ * - The ask-specific iteration cap is 6 (spec §2: an answer should need at
+ *   most a few searches).
+ * - The response wire shape is UNCHANGED: `{ result, conversationId }`, the
+ *   as-built field names asserted by every pre-existing test below and read
+ *   by the Swift client (the design doc's §2 "Response contract" says the
+ *   same after its 2026-08-13 correction from an earlier `answer` draft).
+ * - No pre-existing test here asserted "chat called exactly once with no
+ *   tools", so none needed updating for the new contract; everything above
+ *   the "ask-mode web loop" describe is untouched.
+ */
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../../src/memory/db";
 import { MemoryStore } from "../../src/memory/MemoryStore";
@@ -6,6 +43,7 @@ import type { OneShotChatFn, OneShotChatMessage } from "../../src/oneshot/client
 import { buildOneShotRoutes } from "../../src/oneshot/routes";
 import { createRouter } from "../../src/router";
 import type { ContextUsageLogWriter } from "../../src/oneshot/contextDebugLog";
+import type { ToolSet } from "../../src/agent/toolSets";
 
 function makeStore(): MemoryStore {
   return new MemoryStore(openDatabase(":memory:"));
@@ -222,6 +260,177 @@ describe("POST /oneshot/ask", () => {
       const body = (await response.json()) as { conversationId: number };
       expect(body.conversationId).not.toBe(999_999);
       expect(conversations.getConversation(body.conversationId)).not.toBeNull();
+    });
+  });
+
+  // See the file-header comment for the full injection contract these pin.
+  describe("ask-mode web loop (B2 open-file + ask-web design §2)", () => {
+    const WEB_SEARCH = "opentype__web_search";
+    const WEB_FETCH = "opentype__web_fetch";
+
+    function toolDescriptor(name: string): unknown {
+      return { type: "function", function: { name } };
+    }
+
+    /**
+     * Stands in for the server's merged, approval-wrapped ToolSet. It
+     * deliberately contains a NON-web decoy tool (bash) ahead of the two web
+     * tools, so asserting "chat sees exactly [web_search, web_fetch]" proves
+     * the ask route narrows the set itself rather than passing it through.
+     * `callTool` records invocations and serves canned content -- no real
+     * network, no real processes.
+     */
+    function fakeMergedToolSet(onCall?: (name: string, args: unknown) => string): {
+      tools: ToolSet;
+      invocations: Array<{ name: string; args: unknown }>;
+    } {
+      const invocations: Array<{ name: string; args: unknown }> = [];
+      const tools: ToolSet = {
+        openAiTools: [
+          toolDescriptor("opentype__bash"),
+          toolDescriptor(WEB_SEARCH),
+          toolDescriptor(WEB_FETCH),
+        ],
+        callTool: async (name, args) => {
+          invocations.push({ name, args });
+          return { content: onCall ? onCall(name, args) : `fake ${name} result` };
+        },
+      };
+      return { tools, invocations };
+    }
+
+    test("chat is offered exactly the two web tool descriptors, filtered from the injected set", async () => {
+      let capturedTools: unknown[] | undefined;
+      const chat: OneShotChatFn = async (_messages, options) => {
+        capturedTools = options?.tools;
+        return { content: "no tools needed for this one" };
+      };
+      const { tools } = fakeMergedToolSet();
+      const router = createRouter(
+        buildOneShotRoutes(makeStore(), makeConversations(), chat, captureContextLog().writer, tools)
+      );
+
+      const response = await router(post({ question: "who won the 2026 world cup?" }));
+
+      expect(response.status).toBe(200);
+      const names = (capturedTools ?? []).map(
+        (t) => (t as { function: { name: string } }).function.name
+      );
+      expect(names).toEqual([WEB_SEARCH, WEB_FETCH]);
+    });
+
+    test("executes a requested web_search via the injected toolset and returns the model's final text", async () => {
+      let chatCalls = 0;
+      const perCallMessages: OneShotChatMessage[][] = [];
+      const chat: OneShotChatFn = async (messages) => {
+        perCallMessages.push([...messages]);
+        chatCalls += 1;
+        if (chatCalls === 1) {
+          return {
+            content: null,
+            toolCalls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: WEB_SEARCH, arguments: '{"query":"2026 world cup winner"}' },
+              },
+            ],
+          };
+        }
+        return { content: "According to the sources, Atlantis won." };
+      };
+      const { tools, invocations } = fakeMergedToolSet(
+        () => "1. Atlantis wins the final\n   https://example.com/final"
+      );
+      const router = createRouter(
+        buildOneShotRoutes(makeStore(), makeConversations(), chat, captureContextLog().writer, tools)
+      );
+
+      const response = await router(post({ question: "who won the 2026 world cup?" }));
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { result: string; conversationId: number };
+      // Response shape unchanged: same `result` + `conversationId` fields,
+      // now carrying the loop's final answer.
+      expect(body.result).toBe("According to the sources, Atlantis won.");
+      expect(typeof body.conversationId).toBe("number");
+      expect(chatCalls).toBe(2);
+      expect(invocations).toEqual([
+        { name: WEB_SEARCH, args: { query: "2026 world cup winner" } },
+      ]);
+
+      // The tool's result is fed back as a tool-role message on the second
+      // chat call, per OpenAI tool-calling conventions.
+      const secondCall = perCallMessages[1] ?? [];
+      const toolMessage = secondCall.find((m) => m.role === "tool");
+      expect(toolMessage?.content).toContain("Atlantis wins the final");
+    });
+
+    test("replays prior turns as real chat history between system and the new question", async () => {
+      // Guard, green before and after the rework: the loop's `priorMessages`
+      // must preserve today's message-array replay semantics exactly --
+      // system first, the stored turns unmodified and in order, the new
+      // question last.
+      const conversations = makeConversations();
+      const existingId = conversations.createConversation("ask", "who is the CEO of Acme?");
+      conversations.appendMessage(existingId, "user", "who is the CEO of Acme?");
+      conversations.appendMessage(existingId, "assistant", "Jane Doe is the CEO of Acme.");
+
+      let capturedMessages: OneShotChatMessage[] | undefined;
+      const chat: OneShotChatFn = async (messages) => {
+        capturedMessages = messages;
+        return { content: "She has been CEO since 2019." };
+      };
+      const { tools } = fakeMergedToolSet();
+      const router = createRouter(
+        buildOneShotRoutes(makeStore(), conversations, chat, captureContextLog().writer, tools)
+      );
+
+      await router(post({ question: "since when?", conversationId: existingId }));
+
+      expect(capturedMessages).toHaveLength(4);
+      expect(capturedMessages![0]?.role).toBe("system");
+      expect(capturedMessages![1]).toMatchObject({
+        role: "user",
+        content: "who is the CEO of Acme?",
+      });
+      expect(capturedMessages![2]).toMatchObject({
+        role: "assistant",
+        content: "Jane Doe is the CEO of Acme.",
+      });
+      expect(capturedMessages![3]?.role).toBe("user");
+      expect(capturedMessages![3]?.content).toContain("since when?");
+    });
+
+    test("terminates after the ask-specific cap of 6 iterations when the model keeps requesting tools", async () => {
+      let chatCalls = 0;
+      const chat: OneShotChatFn = async () => {
+        chatCalls += 1;
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: `call_${chatCalls}`,
+              type: "function",
+              function: { name: WEB_SEARCH, arguments: "{}" },
+            },
+          ],
+        };
+      };
+      const { tools, invocations } = fakeMergedToolSet(() => "yet more results");
+      const router = createRouter(
+        buildOneShotRoutes(makeStore(), makeConversations(), chat, captureContextLog().writer, tools)
+      );
+
+      const response = await router(post({ question: "an endless research question" }));
+
+      // No hang, a well-formed response, and exactly 6 model calls (spec §2:
+      // the ask cap is 6, not the agent loop's default 10).
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { result: string; conversationId: number };
+      expect(chatCalls).toBe(6);
+      expect(invocations).toHaveLength(6);
+      expect(typeof body.result).toBe("string");
     });
   });
 });

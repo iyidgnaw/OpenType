@@ -48,3 +48,30 @@ export function mergeToolSets(...sets: ToolSet[]): ToolSet {
 
   return { openAiTools, callTool };
 }
+
+/**
+ * Narrows a tool set to an allowlist of tool names (open-file + ask-web
+ * design, docs/superpowers/specs/2026-08-13-b2-open-file-and-ask-web-design.md
+ * §2 -- how `/oneshot/ask` gets its web-only toolset out of the full merged
+ * set). `openAiTools` keeps the source's own descriptor objects, unmodified
+ * and in source order; `callTool` delegates kept names to the source set and
+ * throws the same "Unknown tool" error `mergeToolSets` uses for everything
+ * else -- a filtered-out call never reaches the source set, so filtering an
+ * approval-wrapped set keeps the gate for what remains.
+ */
+export function filterToolSet(set: ToolSet, names: string[]): ToolSet {
+  const allowed = new Set(names);
+  const openAiTools = set.openAiTools.filter((tool) => {
+    const name = (tool as { function?: { name?: unknown } } | undefined)?.function?.name;
+    return typeof name === "string" && allowed.has(name);
+  });
+
+  async function callTool(name: string, args: unknown): Promise<{ content: string }> {
+    if (!allowed.has(name)) {
+      throw new Error(`Unknown tool: ${name}`);
+    }
+    return set.callTool(name, args);
+  }
+
+  return { openAiTools, callTool };
+}

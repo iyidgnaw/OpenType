@@ -39,7 +39,10 @@ import { buildTranscribeRoutes } from "./transcribe/routes";
  * are configured (`agent/mcpClient.ts`) -- wrapped in the approval seam
  * (`agent/approval.ts`) so every tool call flows through one gate. See
  * `main()` below for the assembly. `buildApp` itself doesn't care which is
- * which, it just needs one combined `ToolSet`.
+ * which, it just needs one combined `ToolSet`. The agent routes get the full
+ * set; the one-shot routes get the same set and `/oneshot/ask` narrows it
+ * down to the two web tools itself (Ask = LLM + web only, see
+ * `oneshot/routes.ts`).
  */
 export function buildApp(
   store: MemoryStore,
@@ -57,7 +60,7 @@ export function buildApp(
       path: "/health",
       handler: () => Response.json({ status: "ok" }),
     },
-    ...buildOneShotRoutes(store, conversations, chat, contextLogWriter),
+    ...buildOneShotRoutes(store, conversations, chat, contextLogWriter, tools),
     ...buildMemoryRoutes(store, callLLM),
     ...buildAgentRoutes(store, conversations, chat, tools, contextLogWriter),
     ...buildConversationRoutes(conversations),

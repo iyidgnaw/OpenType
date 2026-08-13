@@ -6,8 +6,9 @@ import type { ToolSet } from "./toolSets";
 /**
  * Product-owned "hands and feet" for the Agent runtime (B2 core tools v2,
  * docs/superpowers/specs/2026-08-13-b2-agent-core-tools-v2-design.md §3):
- * shell, Python, file read/list/search, and internet (search + fetch), the
- * baseline toolset general coding agents converge on. Built-in like
+ * shell, Python, file read/list/search, internet (search + fetch), and
+ * opening a file with the system default app -- the baseline toolset general
+ * coding agents converge on. Built-in like
  * `builtInTools.ts` (namespaced `opentype__`, merged via `mergeToolSets`),
  * not MCP -- and gated, like everything else, only by the approval seam in
  * `approval.ts` (YOLO by default; the v1 "no-side-effect tools only" policy
@@ -16,7 +17,11 @@ import type { ToolSet } from "./toolSets";
  * Deps are injectable so tests never depend on the real home directory or
  * the real network: `homeDir` stands in for `~` in every path default and
  * `~`-expansion, `fetchFn` replaces global `fetch` for the two web tools,
- * `execTimeoutMs` overrides the ~60s process timeout.
+ * `execTimeoutMs` overrides the ~60s process timeout, and `openRunner`
+ * (open-file + ask-web design,
+ * docs/superpowers/specs/2026-08-13-b2-open-file-and-ask-web-design.md §1)
+ * stands in for launching `/usr/bin/open <path>` so open_file tests never
+ * actually open an app window.
  *
  * Every *expected* failure (bad path, non-2xx response, nonzero exit,
  * timeout) resolves as `{ content: "Error: ..." }` per the `builtInTools.ts`
@@ -27,6 +32,8 @@ export interface CoreToolsDeps {
   homeDir?: string;
   fetchFn?: typeof fetch;
   execTimeoutMs?: number;
+  /** Launches the system opener for an (already `~`-expanded) absolute path. */
+  openRunner?: (path: string) => Promise<{ exitCode: number }>;
 }
 
 const BASH_TOOL_NAME = "opentype__bash";
@@ -36,6 +43,7 @@ const LIST_DIR_TOOL_NAME = "opentype__list_dir";
 const GREP_TOOL_NAME = "opentype__grep";
 const WEB_SEARCH_TOOL_NAME = "opentype__web_search";
 const WEB_FETCH_TOOL_NAME = "opentype__web_fetch";
+const OPEN_FILE_TOOL_NAME = "opentype__open_file";
 
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
 
@@ -210,6 +218,14 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
   const homeDir = deps.homeDir ?? os.homedir();
   const fetchFn = deps.fetchFn ?? fetch;
   const execTimeoutMs = deps.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
+  // Default open runner execs the real macOS opener; tests inject a fake so
+  // no app window ever appears during a run.
+  const openRunner =
+    deps.openRunner ??
+    (async (targetPath: string): Promise<{ exitCode: number }> => {
+      const outcome = await runProcess(["/usr/bin/open", targetPath], homeDir, execTimeoutMs);
+      return { exitCode: outcome.exitCode };
+    });
 
   function resolveCwd(rawCwd: unknown): string {
     if (typeof rawCwd === "string" && rawCwd.trim().length > 0) {
@@ -354,6 +370,31 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: clampAtSource(text) };
   }
 
+  /**
+   * Opens a file with the macOS system default application (open-file +
+   * ask-web design §1): Preview for PDFs/images, QuickTime for audio/video,
+   * Word/Pages for documents. A deliberate UI side effect the agent may take
+   * directly under the YOLO posture -- opening the preview IS the requested
+   * outcome. Existence is verified before the runner is ever invoked.
+   */
+  async function handleOpenFile(rawArgs: unknown): Promise<{ content: string }> {
+    const args = (rawArgs ?? {}) as { path?: unknown };
+    if (typeof args.path !== "string" || args.path.trim().length === 0) {
+      return { content: 'Error: open_file requires a non-empty "path" string.' };
+    }
+    const filePath = expandTilde(args.path, homeDir);
+    if (!fs.existsSync(filePath)) {
+      return { content: `Error: no file exists at ${filePath}.` };
+    }
+    const { exitCode } = await openRunner(filePath);
+    if (exitCode !== 0) {
+      return {
+        content: `Error: failed to open ${filePath} (opener finished with exit code ${exitCode}).`,
+      };
+    }
+    return { content: `Opened ${filePath} with its default application.` };
+  }
+
   const handlers = new Map<string, (rawArgs: unknown) => Promise<{ content: string }>>([
     [BASH_TOOL_NAME, handleBash],
     [PYTHON_TOOL_NAME, handlePython],
@@ -362,6 +403,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     [GREP_TOOL_NAME, handleGrep],
     [WEB_SEARCH_TOOL_NAME, handleWebSearch],
     [WEB_FETCH_TOOL_NAME, handleWebFetch],
+    [OPEN_FILE_TOOL_NAME, handleOpenFile],
   ]);
 
   const openAiTools: unknown[] = [
@@ -496,6 +538,24 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
             url: { type: "string", description: "The URL to fetch." },
           },
           required: ["url"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: OPEN_FILE_TOOL_NAME,
+        description:
+          "Open a file on screen with the user's macOS default application (Preview for PDFs and " +
+          "images, QuickTime for audio/video, Word/Pages for documents). Use this when the user asks " +
+          "to open, preview, play, or look at a file -- opening it for them is the action itself, " +
+          "not just reporting the path. ~ is expanded.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Path of the file to open; ~ is expanded." },
+          },
+          required: ["path"],
         },
       },
     },

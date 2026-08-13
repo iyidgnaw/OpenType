@@ -34,10 +34,28 @@ export type AgentProgressEvent =
   | { type: "done"; detail: string }
   | { type: "error"; detail: string };
 
+/**
+ * The three optional fields below (`systemPrompt`, `priorMessages`,
+ * `maxIterations`) generalize this loop for `/oneshot/ask`'s web-only reuse
+ * (open-file + ask-web design,
+ * docs/superpowers/specs/2026-08-13-b2-open-file-and-ask-web-design.md §2).
+ * Each defaults to the loop's original behavior exactly: the agent system
+ * prompt, no replayed history, the 10-iteration cap.
+ */
 export interface RunAgentLoopInput {
   task: string;
   context?: string;
   knownTerms?: string;
+  /** System message content; defaults to `AGENT_SYSTEM_PROMPT`. */
+  systemPrompt?: string;
+  /**
+   * Prior conversation turns, replayed verbatim (same objects, same order)
+   * between the system message and the final user message -- real
+   * message-array replay, not a squashed summary.
+   */
+  priorMessages?: AgentChatMessage[];
+  /** Loop iteration cap; defaults to `MAX_ITERATIONS` (10). */
+  maxIterations?: number;
 }
 
 export interface RunAgentLoopDeps {
@@ -105,7 +123,8 @@ function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   }
 
   return [
-    { role: "system", content: AGENT_SYSTEM_PROMPT },
+    { role: "system", content: input.systemPrompt ?? AGENT_SYSTEM_PROMPT },
+    ...(input.priorMessages ?? []),
     { role: "user", content: userContentParts.join("\n") },
   ];
 }
@@ -123,6 +142,7 @@ export async function runAgentLoop(
   deps: RunAgentLoopDeps
 ): Promise<RunAgentLoopResult> {
   const { chat, tools, onProgress } = deps;
+  const maxIterations = input.maxIterations ?? MAX_ITERATIONS;
   const messages = buildInitialMessages(input);
   const steps: AgentProgressEvent[] = [];
 
@@ -133,8 +153,8 @@ export async function runAgentLoop(
 
   let lastContent: string | null = null;
 
-  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-    emit({ type: "thinking", detail: `Thinking (step ${iteration + 1}/${MAX_ITERATIONS})...` });
+  for (let iteration = 0; iteration < maxIterations; iteration++) {
+    emit({ type: "thinking", detail: `Thinking (step ${iteration + 1}/${maxIterations})...` });
 
     const response = await chat(messages, { tools: tools.openAiTools });
     lastContent = response.content ?? lastContent;

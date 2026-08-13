@@ -7,7 +7,13 @@
  * - `homeDir` is a `fs.mkdtempSync` temp dir standing in for `~`,
  * - `fetchFn` is a canned fake (a fetch that throws is injected for tests
  *   that must not hit the network at all),
- * - `execTimeoutMs` overrides the default ~60s exec timeout.
+ * - `execTimeoutMs` overrides the default ~60s exec timeout,
+ * - `openRunner` (B2 open-file + ask-web design,
+ *   docs/superpowers/specs/2026-08-13-b2-open-file-and-ask-web-design.md §1)
+ *   is an optional `(path: string) => Promise<{ exitCode: number }>` that
+ *   stands in for launching `/usr/bin/open <path>`, so open_file tests
+ *   assert the expanded path handed to the runner and never actually open
+ *   an app window. The default (no injection) runs the real /usr/bin/open.
  * Process-execution tests use the real `/bin/bash` and `python3` with
  * trivial commands (both exist on this macOS dev machine).
  *
@@ -84,7 +90,11 @@ function toolNames(set: ToolSet): string[] {
 }
 
 describe("createCoreTools tool inventory", () => {
-  test("exposes exactly the seven namespaced core tools, all type 'function'", () => {
+  // Contract extension (B2 open-file + ask-web design §1): the inventory
+  // grows from seven to exactly eight -- `opentype__open_file` joins the set.
+  // This test previously hardcoded the seven-name list, so the list itself
+  // legitimately changes here; every other assertion is untouched.
+  test("exposes exactly the eight namespaced core tools, all type 'function'", () => {
     const tools = createCoreTools({ homeDir: makeTempHome(), fetchFn: blockedFetch() });
 
     for (const tool of tools.openAiTools) {
@@ -99,6 +109,7 @@ describe("createCoreTools tool inventory", () => {
         "opentype__grep",
         "opentype__web_search",
         "opentype__web_fetch",
+        "opentype__open_file",
       ].sort()
     );
   });
@@ -335,6 +346,99 @@ describe("opentype__grep", () => {
 
     expect(typeof result.content).toBe("string");
     expect(result.content).toMatch(/no match/i);
+  });
+});
+
+/**
+ * B2 open-file + ask-web design §1: opens a file with the macOS system
+ * default app (Preview/Word/QuickTime...) -- a UI side effect the agent may
+ * take directly under the YOLO posture. Contract choices these tests pin:
+ * - the injected `openRunner` receives the fully `~`-expanded absolute path
+ *   (the real default runner would exec `/usr/bin/open <path>`),
+ * - existence is verified BEFORE the runner: a missing path resolves as
+ *   `Error: ...` content and the runner is never invoked,
+ * - success content names the opened path (so the model can report what
+ *   happened) and does not start with "Error",
+ * - a runner reporting a nonzero exit resolves as `Error: ...` content
+ *   carrying the exit code (matching the exec tools' /exit code:?\s*N/i
+ *   convention), never a throw.
+ */
+describe("opentype__open_file", () => {
+  function recordingOpenRunner(exitCode = 0): {
+    openRunner: (path: string) => Promise<{ exitCode: number }>;
+    calls: string[];
+  } {
+    const calls: string[] = [];
+    return {
+      openRunner: async (openedPath: string) => {
+        calls.push(openedPath);
+        return { exitCode };
+      },
+      calls,
+    };
+  }
+
+  test("opens an existing file: the runner gets the absolute path once, content reports success", async () => {
+    const home = makeTempHome();
+    const filePath = path.join(home, "report.pdf");
+    fs.writeFileSync(filePath, "%PDF-fake");
+    const { openRunner, calls } = recordingOpenRunner(0);
+    const tools = createCoreTools({ homeDir: home, fetchFn: blockedFetch(), openRunner });
+
+    const result = await tools.callTool("opentype__open_file", { path: filePath });
+
+    expect(calls).toEqual([filePath]);
+    expect(result.content).not.toMatch(/^Error/);
+    // Success content names what was opened, so the model can tell the user.
+    expect(result.content).toContain(filePath);
+  });
+
+  test("a ~-prefixed path expands against the injected home before reaching the runner", async () => {
+    const home = makeTempHome();
+    fs.writeFileSync(path.join(home, "song.mp3"), "ID3-fake");
+    const { openRunner, calls } = recordingOpenRunner(0);
+    const tools = createCoreTools({ homeDir: home, fetchFn: blockedFetch(), openRunner });
+
+    const result = await tools.callTool("opentype__open_file", { path: "~/song.mp3" });
+
+    expect(calls).toEqual([path.join(home, "song.mp3")]);
+    expect(result.content).not.toMatch(/^Error/);
+  });
+
+  test("a nonexistent path resolves with Error content and never invokes the runner", async () => {
+    const home = makeTempHome();
+    const { openRunner, calls } = recordingOpenRunner(0);
+    const tools = createCoreTools({ homeDir: home, fetchFn: blockedFetch(), openRunner });
+
+    const result = await tools.callTool("opentype__open_file", {
+      path: path.join(home, "does-not-exist.docx"),
+    });
+
+    expect(result.content).toMatch(/^Error/);
+    expect(calls).toEqual([]);
+  });
+
+  test("a runner reporting a nonzero exit resolves with Error content naming the exit code, no throw", async () => {
+    const home = makeTempHome();
+    fs.writeFileSync(path.join(home, "broken.bin"), "x");
+    const { openRunner, calls } = recordingOpenRunner(1);
+    const tools = createCoreTools({ homeDir: home, fetchFn: blockedFetch(), openRunner });
+
+    const result = await tools.callTool("opentype__open_file", { path: "~/broken.bin" });
+
+    expect(calls).toHaveLength(1);
+    expect(result.content).toMatch(/^Error/);
+    expect(result.content).toMatch(/exit code:?\s*1/i);
+  });
+
+  test('a missing "path" arg resolves with Error content, runner untouched', async () => {
+    const { openRunner, calls } = recordingOpenRunner(0);
+    const tools = createCoreTools({ homeDir: makeTempHome(), fetchFn: blockedFetch(), openRunner });
+
+    const result = await tools.callTool("opentype__open_file", {});
+
+    expect(result.content).toMatch(/^Error/);
+    expect(calls).toEqual([]);
   });
 });
 

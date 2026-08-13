@@ -1,3 +1,6 @@
+import type { AgentChatFn } from "../agent/loop";
+import { runAgentLoop } from "../agent/loop";
+import { filterToolSet, type ToolSet } from "../agent/toolSets";
 import type { MemoryStore } from "../memory/MemoryStore";
 import type { ConversationStore } from "../memory/conversations";
 import type { Route } from "../router";
@@ -15,6 +18,26 @@ interface AskRequestBody {
   question?: string;
   conversationId?: number;
 }
+
+/**
+ * Ask = LLM + web only (open-file + ask-web design,
+ * docs/superpowers/specs/2026-08-13-b2-open-file-and-ask-web-design.md §2):
+ * the handler itself narrows whatever ToolSet it is given down to exactly
+ * these two names, so the web-only property belongs to the ask route, not to
+ * the server wiring.
+ */
+const ASK_TOOL_NAMES = ["opentype__web_search", "opentype__web_fetch"];
+
+/** Spec §2: an answer should need at most a few searches, not the agent's 10. */
+const ASK_MAX_ITERATIONS = 6;
+
+/** For legacy 4-arg call sites with no ToolSet: no descriptors are offered, so a plain-answer chat behaves as before. */
+const EMPTY_TOOL_SET: ToolSet = {
+  openAiTools: [],
+  callTool: async (name) => {
+    throw new Error(`Unknown tool: ${name}`);
+  },
+};
 
 /**
  * Resolves the conversation a turn belongs to: continues `conversationId` if
@@ -48,7 +71,8 @@ async function handleAsk(
   store: MemoryStore,
   conversations: ConversationStore,
   chat: OneShotChatFn,
-  contextLogWriter: ContextUsageLogWriter
+  contextLogWriter: ContextUsageLogWriter,
+  tools?: ToolSet
 ): Promise<Response> {
   const body = await readJsonBody<AskRequestBody>(req);
   const question = body.question ?? "";
@@ -62,7 +86,6 @@ async function handleAsk(
     contextLogWriter
   );
   const knownTerms = buildKnownTermsContext(store, question);
-  const userContent = knownTerms ? `${question}\n\n${knownTerms}` : question;
 
   const { conversationId, priorMessages } = resolveConversation(
     conversations,
@@ -74,33 +97,53 @@ async function handleAsk(
 
   // No fidelity validation here by design — Ask is the one mode allowed to
   // answer rather than preserve/transform. Prior turns are replayed as real
-  // chat history (not just squashed into one message) so a follow-up like
-  // "since when?" resolves against the actual conversation, not a fresh
-  // one-shot call every time.
-  const messages: OneShotChatMessage[] = [
-    { role: "system", content: ASK_SYSTEM_PROMPT },
-    ...priorMessages,
-    { role: "user", content: userContent },
-  ];
-  const chatResult = await chat(messages);
-  const result = (chatResult.content ?? "").trim();
+  // chat history via the loop's `priorMessages` (not squashed into one
+  // message) so a follow-up like "since when?" resolves against the actual
+  // conversation, not a fresh one-shot call every time. Since the ask-web
+  // design, the single chat call became a short `runAgentLoop` over the
+  // web-only toolset above — same `{ result, conversationId }` wire shape,
+  // but the model may search/fetch the web before its final text.
+  const webTools = filterToolSet(tools ?? EMPTY_TOOL_SET, ASK_TOOL_NAMES);
+  // `chat` keeps the narrower one-shot message shape in its declared type
+  // for the pre-existing call sites; production wiring already passes
+  // server.ts's `AgentChatFn` (see buildApp's doc comment there), and the
+  // assertion follows that same structural-compatibility direction.
+  const loopResult = await runAgentLoop(
+    {
+      task: question,
+      knownTerms,
+      systemPrompt: ASK_SYSTEM_PROMPT,
+      priorMessages,
+      maxIterations: ASK_MAX_ITERATIONS,
+    },
+    { chat: chat as AgentChatFn, tools: webTools }
+  );
+  const result = loopResult.result.trim();
 
   conversations.appendMessage(conversationId, "assistant", result);
 
   return Response.json({ result, conversationId });
 }
 
+/**
+ * `tools` (optional, appended last so pre-existing 4-arg call sites keep
+ * working) is the same server-level merged, approval-wrapped ToolSet
+ * `buildAgentRoutes` receives; the ask handler narrows it to the web-only
+ * subset itself. Omitted, ask runs its loop with an empty toolset and
+ * behaves like the pre-web single-answer chat.
+ */
 export function buildOneShotRoutes(
   store: MemoryStore,
   conversations: ConversationStore,
   chat: OneShotChatFn,
-  contextLogWriter: ContextUsageLogWriter
+  contextLogWriter: ContextUsageLogWriter,
+  tools?: ToolSet
 ): Route[] {
   return [
     {
       method: "POST",
       path: "/oneshot/ask",
-      handler: (req) => handleAsk(req, store, conversations, chat, contextLogWriter),
+      handler: (req) => handleAsk(req, store, conversations, chat, contextLogWriter, tools),
     },
   ];
 }

@@ -46,6 +46,18 @@ export interface RunAgentLoopInput {
   task: string;
   context?: string;
   knownTerms?: string;
+  /**
+   * Trusted, harness-supplied runtime facts -- currently the wall-clock
+   * anchor from `context/timeContext.ts` (T4).
+   *
+   * Deliberately NOT folded into `context`: the agent system prompt tells the
+   * model to treat CONTEXT as UNTRUSTED data and never act on instructions
+   * inside it, which is exactly wrong for a fact the harness itself asserts
+   * and wants the model to rely on. Kept separate from `knownTerms` for the
+   * same explicit-over-implicit reason -- one field, one source, one entry in
+   * `docs/model-context-inventory.md`.
+   */
+  runtimeContext?: string;
   /** System message content; defaults to `AGENT_SYSTEM_PROMPT`. */
   systemPrompt?: string;
   /**
@@ -126,6 +138,9 @@ function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   }
   if (input.knownTerms) {
     userContentParts.push("", input.knownTerms);
+  }
+  if (input.runtimeContext) {
+    userContentParts.push("", input.runtimeContext);
   }
 
   return [

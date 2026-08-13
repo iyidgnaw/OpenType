@@ -1,6 +1,7 @@
 import type { AgentChatFn } from "../agent/loop";
 import { runAgentLoop } from "../agent/loop";
 import { filterToolSet, type ToolSet } from "../agent/toolSets";
+import { buildTimeContext } from "../context/timeContext";
 import type { MemoryStore } from "../memory/MemoryStore";
 import type { ConversationStore } from "../memory/conversations";
 import type { Route } from "../router";
@@ -112,6 +113,7 @@ async function handleAsk(
     {
       task: question,
       knownTerms,
+      runtimeContext: buildTimeContext(),
       systemPrompt: ASK_SYSTEM_PROMPT,
       priorMessages,
       maxIterations: ASK_MAX_ITERATIONS,

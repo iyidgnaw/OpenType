@@ -8,6 +8,7 @@ import type { McpToolSet } from "./mcpClient";
 import type { AgentProgressRegistry } from "./progressRegistry";
 import { createAgentProgressRegistry } from "./progressRegistry";
 import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext";
+import { buildTimeContext } from "../context/timeContext";
 import { logContextUsage, type ContextUsageLogWriter } from "../oneshot/contextDebugLog";
 import { resolveConversation } from "../oneshot/routes";
 import type { OneShotChatMessage } from "../oneshot/client";
@@ -112,7 +113,7 @@ async function handleAgentRun(
   let loopResult;
   try {
     loopResult = await runAgentLoop(
-      { task, context: combinedContext, knownTerms },
+      { task, context: combinedContext, knownTerms, runtimeContext: buildTimeContext() },
       {
         chat,
         tools,

@@ -90,7 +90,7 @@ export function createOpenAICompatibleClient(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(requestBody),
-      signal: requestTimeoutSignal(timeoutMs),
+      signal: requestTimeoutSignal(timeoutMs, options?.signal),
     });
 
     const parsedBody = await parseJsonBody(response);

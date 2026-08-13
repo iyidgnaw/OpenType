@@ -13,6 +13,10 @@ struct AgentRunRecord: Identifiable, Equatable {
         case running
         case completed(String)
         case failed(String)
+        /// The user stopped the run (T1). Distinct from `.failed` on purpose:
+        /// the user acting on their own run is not the run going wrong, and
+        /// reporting their own stop back to them as a failure is a lie.
+        case cancelled(String)
 
         var isRunning: Bool {
             if case .running = self { return true }

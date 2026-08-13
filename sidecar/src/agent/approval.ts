@@ -38,14 +38,14 @@ export const yoloApprovalPolicy: ApprovalPolicy = {
 export function withApproval(tools: ToolSet, policy: ApprovalPolicy): ToolSet {
   return {
     openAiTools: tools.openAiTools,
-    callTool: async (name, args) => {
+    callTool: async (name, args, signal) => {
       const decision = await policy.approve(name, args);
       if (!decision.allowed) {
         return {
           content: `Tool call to ${name} was denied by the approval policy: ${decision.reason}`,
         };
       }
-      return tools.callTool(name, args);
+      return tools.callTool(name, args, signal);
     },
   };
 }

@@ -559,6 +559,25 @@ final class SidecarClient {
         return try await request(method: "GET", path: "/agent/progress/\(encoded)")
     }
 
+    /// The sidecar's answer to `POST /agent/cancel/:runId`.
+    struct AgentCancelResponse: Decodable {
+        /// `false` for an unknown or already-settled id — not an error, just
+        /// nothing to cancel (the sidecar's documented semantics).
+        let cancelled: Bool
+    }
+
+    /// Asks the sidecar to stop an in-flight Agent run (T1). The run itself
+    /// reports its own terminal state: the blocked `/agent/run` call answers
+    /// 499, and `AppModel.runAgentDispatch` turns that into `.cancelled`. This
+    /// call only delivers the signal, so a lost response cannot leave the
+    /// record disagreeing with the run.
+    func cancelAgentRun(runId: String) async throws -> AgentCancelResponse {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        let encoded = runId.addingPercentEncoding(withAllowedCharacters: allowed) ?? runId
+        return try await request(method: "POST", path: "/agent/cancel/\(encoded)")
+    }
+
     /// Generic request helper: shells out to `curl --unix-socket`, then
     /// decodes stdout as JSON into `Response`. More endpoints beyond
     /// `/health` will be added to the sidecar later; this method doesn't

@@ -2,6 +2,7 @@ import { AGENT_SYSTEM_PROMPT } from "../oneshot/prompts";
 import type { McpToolSet } from "./mcpClient";
 import { spillOrClamp } from "./spill";
 import type { RepeatGuard } from "./repeatGuard";
+import { AgentCancelledError } from "./cancellation";
 
 /**
  * Agent-loop message shape. Deliberately not reusing `OneShotChatFn` from
@@ -26,7 +27,7 @@ export interface AgentChatResult {
 
 export type AgentChatFn = (
   messages: AgentChatMessage[],
-  options?: { tools?: unknown[] }
+  options?: { tools?: unknown[]; signal?: AbortSignal }
 ) => Promise<AgentChatResult>;
 
 export type AgentProgressEvent =
@@ -92,6 +93,16 @@ export interface RunAgentLoopDeps {
    * never leak between runs. Omitted, the loop behaves exactly as before.
    */
   repeatGuard?: RepeatGuard;
+  /**
+   * Cancellation for the whole run (T1): checked before every model call and
+   * after every tool call, and handed to each tool so an in-flight subprocess
+   * or fetch is actually abandoned rather than merely ignored on return.
+   *
+   * Aborting rejects with the signal's reason, so a caller can tell a user
+   * cancellation from a budget expiry. Omitted, the loop runs exactly as
+   * before.
+   */
+  signal?: AbortSignal;
 }
 
 export interface RunAgentLoopResult {
@@ -116,6 +127,19 @@ const MAX_TOOL_RESULT_CHARS = 20_000;
  * this module's public helper first and is imported as such.
  */
 export { clampToolResult } from "./spill";
+
+/**
+ * Reject with the signal's own reason so the cause (`user` vs `budget`)
+ * survives; a bare `AbortError` would lose the distinction the caller needs
+ * to report the run honestly.
+ */
+function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new AgentCancelledError("user");
+  }
+}
 
 interface OpenAiToolCall {
   id: string;
@@ -173,7 +197,7 @@ export async function runAgentLoop(
   input: RunAgentLoopInput,
   deps: RunAgentLoopDeps
 ): Promise<RunAgentLoopResult> {
-  const { chat, tools, onProgress, spill, repeatGuard } = deps;
+  const { chat, tools, onProgress, spill, repeatGuard, signal } = deps;
   const maxIterations = input.maxIterations ?? MAX_ITERATIONS;
   const messages = buildInitialMessages(input);
   const steps: AgentProgressEvent[] = [];
@@ -186,9 +210,12 @@ export async function runAgentLoop(
   let lastContent: string | null = null;
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    // Checked BEFORE the model call, so an abort that lands between steps
+    // costs nothing: no request is issued and no tokens are spent.
+    throwIfCancelled(signal);
     emit({ type: "thinking", detail: `Thinking (step ${iteration + 1}/${maxIterations})...` });
 
-    const response = await chat(messages, { tools: tools.openAiTools });
+    const response = await chat(messages, { tools: tools.openAiTools, signal });
     lastContent = response.content ?? lastContent;
 
     const toolCalls = (response.toolCalls ?? []).filter(isOpenAiToolCall);
@@ -215,10 +242,16 @@ export async function runAgentLoop(
         const parsedArgs = toolCall.function.arguments
           ? JSON.parse(toolCall.function.arguments)
           : {};
-        const toolResult = await tools.callTool(toolCall.function.name, parsedArgs);
+        const toolResult = await tools.callTool(toolCall.function.name, parsedArgs, signal);
         toolResultContent = toolResult.content;
         emit({ type: "tool_result", detail: toolResultContent });
       } catch (err) {
+        // A cancellation is not a tool failure to report back to the model:
+        // it ends the run. Rethrowing here also stops the remaining calls in
+        // this batch from being issued.
+        if (err instanceof AgentCancelledError) {
+          throw err;
+        }
         toolResultContent = `Error calling tool ${toolCall.function.name}: ${
           err instanceof Error ? err.message : String(err)
         }`;

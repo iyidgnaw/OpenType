@@ -11,6 +11,12 @@ import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext
 import { buildTimeContext } from "../context/timeContext";
 import { saveSpill } from "./spill";
 import { createRepeatGuard } from "./repeatGuard";
+import {
+  AgentCancelledError,
+  createCancellationRegistry,
+  runBudgetSignal,
+  type CancellationRegistry,
+} from "./cancellation";
 import { logContextUsage, type ContextUsageLogWriter } from "../oneshot/contextDebugLog";
 import { resolveConversation } from "../oneshot/routes";
 import type { OneShotChatMessage } from "../oneshot/client";
@@ -66,6 +72,7 @@ async function handleAgentRun(
   tools: McpToolSet,
   contextLogWriter: ContextUsageLogWriter,
   progressRegistry: AgentProgressRegistry,
+  cancellations: CancellationRegistry,
   spillRoot?: string
 ): Promise<Response> {
   const body = await readJsonBody<AgentRunRequestBody>(req);
@@ -113,6 +120,10 @@ async function handleAgentRun(
   if (runId) {
     progressRegistry.register(runId);
   }
+  // Only a run the client identified can be cancelled: without a runId there
+  // is nothing for `POST /agent/cancel/:runId` to address. The budget still
+  // applies either way, so an unidentified run cannot block forever.
+  const signal = runBudgetSignal(runId ? cancellations.register(runId) : undefined);
   let loopResult;
   try {
     loopResult = await runAgentLoop(
@@ -130,16 +141,35 @@ async function handleAgentRun(
           : undefined,
         // One guard per run: chains must never leak between runs (T3).
         repeatGuard: createRepeatGuard(),
+        signal,
       }
     );
   } catch (error) {
+    if (error instanceof AgentCancelledError) {
+      // A cancelled run is not a failed one. It gets its own terminal status,
+      // its own status code, and -- deliberately -- NO episodic memory event:
+      // an abandoned run is not a task the user completed, so recording it
+      // would teach the memory layer from work that never happened. The user
+      // message already appended to the conversation stays, because it did
+      // happen.
+      if (runId) {
+        progressRegistry.finish(runId, "cancelled");
+        cancellations.release(runId);
+      }
+      // 499 is the discriminator Swift keys on. No extra `code` field: the
+      // router renders only `{ error: message }`, so one would be dead
+      // weight that reads as machine-readable without being reachable.
+      throw new ApiError(error.message, 499);
+    }
     if (runId) {
       progressRegistry.finish(runId, "failed");
+      cancellations.release(runId);
     }
     throw error;
   }
   if (runId) {
     progressRegistry.finish(runId, "done");
+    cancellations.release(runId);
   }
 
   conversations.appendMessage(conversationId, "assistant", loopResult.result);
@@ -161,6 +191,17 @@ async function handleAgentRun(
   });
 
   return Response.json({ result: loopResult.result, steps: loopResult.steps, conversationId });
+}
+
+/**
+ * Cancels one in-flight run. An unknown id is not an error -- it is
+ * "nothing to cancel" -- so it answers 200 with `{ cancelled: false }`,
+ * matching the precedent `GET /agent/progress/:runId` set for unknown ids.
+ */
+function handleAgentCancel(req: Request, cancellations: CancellationRegistry): Response {
+  const pathname = new URL(req.url).pathname;
+  const runId = decodeURIComponent(pathname.slice(pathname.lastIndexOf("/") + 1));
+  return Response.json({ cancelled: cancellations.cancel(runId) });
 }
 
 /**
@@ -191,6 +232,7 @@ export function buildAgentRoutes(
   spillRoot?: string
 ): Route[] {
   const progressRegistry = createAgentProgressRegistry();
+  const cancellations = createCancellationRegistry();
   return [
     {
       method: "POST",
@@ -204,6 +246,7 @@ export function buildAgentRoutes(
           tools,
           contextLogWriter,
           progressRegistry,
+          cancellations,
           spillRoot
         ),
     },
@@ -211,6 +254,11 @@ export function buildAgentRoutes(
       method: "GET",
       path: "/agent/progress/:runId",
       handler: (req) => handleAgentProgress(req, progressRegistry),
+    },
+    {
+      method: "POST",
+      path: "/agent/cancel/:runId",
+      handler: (req) => handleAgentCancel(req, cancellations),
     },
   ];
 }

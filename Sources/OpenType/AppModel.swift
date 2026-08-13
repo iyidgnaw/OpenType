@@ -333,6 +333,15 @@ final class AppModel: ObservableObject {
         self.overlay.onOpenMainWindow = { [weak self] in
             self?.openMainWindowFromVoiceSurface()
         }
+        // The surface's 停止 stops the run it is showing, and nothing else:
+        // the panel stays until the run settles into its cancelled state, so
+        // the user sees their stop take effect rather than the window simply
+        // vanishing.
+        self.overlay.onStopAgentRun = { [weak self] in
+            guard let state = self?.agentPanelState,
+                  let runID = UUID(uuidString: state.runId) else { return }
+            self?.cancelAgentRun(runID)
+        }
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
         microphonePermission = audioRecorder.permissionStatus
@@ -2444,25 +2453,32 @@ final class AppModel: ObservableObject {
 
             contextBridge.copyToClipboard(response.result)
         } catch {
-            let message = ErrorMessagePresenter.message(for: error)
+            // The sidecar answers a cancelled run with 499 (T1). That is the
+            // ONE terminal state that is not a failure: the user stopped it
+            // on purpose, so it gets its own status, its own audit event, and
+            // no "task failed" notification.
+            let wasCancelled = Self.isCancellationStatus(error)
+            let message = wasCancelled
+                ? OpenTypeL10n.text("已停止", english: "Stopped")
+                : ErrorMessagePresenter.message(for: error)
             agentRuns = AgentRunHistory.updating(id: runID, in: agentRuns) { record in
-                record.status = .failed(message)
+                record.status = wasCancelled ? .cancelled(message) : .failed(message)
                 record.completedAt = Date()
             }
             runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
 
-            // Settle the surface's agent state with the failure (if it's still
-            // showing this run); the error text doubles as the result area's
-            // content. The poller stops on its next tick.
+            // Settle the surface's agent state (if it's still showing this
+            // run); the message doubles as the result area's content. The
+            // poller stops on its next tick.
             updateAgentPanel(runId: runID.uuidString) { state in
-                state.phase = .failed
+                state.phase = wasCancelled ? .cancelled : .failed
                 state.result = message
             }
 
             recordAuditEvent(
                 ImmutableAuditEvent(
                     requestId: requestID,
-                    status: .failed,
+                    status: wasCancelled ? .cancelled : .failed,
                     mode: .agent,
                     rawTranscript: transcript,
                     effectiveInput: transcript,
@@ -2480,6 +2496,29 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Whether a `/agent/run` failure is really the sidecar reporting that the
+    /// run was cancelled. The sidecar answers 499 with `{ error }`, which does
+    /// not decode as the expected response, so it surfaces as a decoding
+    /// failure carrying the status — the status is the discriminator.
+    nonisolated static func isCancellationStatus(_ error: Error) -> Bool {
+        if case SidecarClientError.responseDecodingFailed(let status, _, _) = error {
+            return status == 499
+        }
+        return false
+    }
+
+    /// Stops one in-flight Agent run (T1). Fire-and-forget by design: the
+    /// blocked `/agent/run` task observes the 499 and owns the terminal state,
+    /// so a lost or failed cancel response cannot leave the record claiming an
+    /// outcome the run did not reach.
+    func cancelAgentRun(_ id: UUID) {
+        guard agentRuns.first(where: { $0.id == id })?.status.isRunning == true else { return }
+        Task { [weak self] in
+            guard let client = self?.sidecarClient else { return }
+            _ = try? await client.cancelAgentRun(runId: id.uuidString)
+        }
+    }
+
     /// Fires the "Agent finished" `UNUserNotification` for a just-completed
     /// or just-failed run. Tapping it routes through
     /// `AgentNotificationDelegate.onAgentRunTapped` -> `focusAgentRun(_:)`.
@@ -2492,7 +2531,9 @@ final class AppModel: ObservableObject {
         case .failed(let message):
             content.title = OpenTypeL10n.text("Agent 任务失败", english: "Agent task failed")
             content.body = String(message.prefix(140))
-        case .running:
+        case .running, .cancelled:
+            // A run the user stopped themselves needs no notification: they
+            // were looking at it when they stopped it.
             return
         }
         content.sound = .default

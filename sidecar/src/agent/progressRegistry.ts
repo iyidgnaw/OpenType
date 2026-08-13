@@ -21,7 +21,7 @@ import type { AgentProgressEvent } from "./loop";
  *   oldest-finished first. Runs still `"running"` are never evicted.
  */
 
-export type AgentProgressRunStatus = "running" | "done" | "failed";
+export type AgentProgressRunStatus = "running" | "done" | "failed" | "cancelled";
 export type AgentProgressStatus = AgentProgressRunStatus | "unknown";
 
 export interface AgentProgressEventSnapshot {
@@ -43,11 +43,15 @@ export interface AgentProgressRegistry {
    */
   append(runId: string, event: AgentProgressEvent): void;
   /**
-   * Flips a registered run's status to `"done"`/`"failed"`, keeping its
-   * events, and makes it eligible for finished-run eviction. Safe no-op for
+   * Flips a registered run's status to a terminal one, keeping its events, and
+   * makes it eligible for finished-run eviction. Safe no-op for
    * unknown/evicted ids.
+   *
+   * `"cancelled"` is distinct from `"failed"` on purpose (T1): the user
+   * stopping a run is not the run going wrong, and showing it as a failure
+   * would misreport their own action back to them.
    */
-  finish(runId: string, status: "done" | "failed"): void;
+  finish(runId: string, status: "done" | "failed" | "cancelled"): void;
   /** Snapshot for display; unknown ids read as `{ status: "unknown", events: [] }`. */
   get(runId: string): AgentProgressSnapshot;
 }
@@ -96,7 +100,7 @@ export function createAgentProgressRegistry(): AgentProgressRegistry {
       }
     },
 
-    finish(runId: string, status: "done" | "failed"): void {
+    finish(runId: string, status: "done" | "failed" | "cancelled"): void {
       const entry = runs.get(runId);
       if (!entry) {
         return;

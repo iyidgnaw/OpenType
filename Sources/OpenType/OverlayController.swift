@@ -82,13 +82,16 @@ final class OverlayController {
     var onCopyResult: ((String) -> Void)?
     /// The 打开主窗口 button.
     var onOpenMainWindow: (() -> Void)?
+    /// The 停止 control shown while a stoppable agent run is on screen (T1).
+    var onStopAgentRun: (() -> Void)?
 
     private lazy var hostingView = NSHostingView(
         rootView: OverlayView(
             presentation: presentation,
             onClose: { [weak self] in self?.onRequestDismiss?() },
             onCopy: { [weak self] text in self?.onCopyResult?(text) },
-            onOpenMainWindow: { [weak self] in self?.onOpenMainWindow?() }
+            onOpenMainWindow: { [weak self] in self?.onOpenMainWindow?() },
+            onStop: { [weak self] in self?.onStopAgentRun?() }
         )
     )
 
@@ -424,6 +427,7 @@ private struct OverlayView: View {
     let onClose: () -> Void
     let onCopy: (String) -> Void
     let onOpenMainWindow: () -> Void
+    let onStop: () -> Void
 
     var body: some View {
         Group {
@@ -453,7 +457,8 @@ private struct OverlayView: View {
                     // is still working), so `presentation.mode` would be able
                     // to label an Agent run "听写".
                     modeTitle: (detail.kind == .agent ? InputMode.agent : .ask).title,
-                    ticker: detail.currentStep
+                    ticker: detail.currentStep,
+                    onStop: presentation.surface.stoppableAgentRun ? onStop : nil
                 )
             case .result(let card):
                 VoiceSurfaceCard(
@@ -594,6 +599,11 @@ private struct WorkingPill: View {
     let headline: String
     let modeTitle: String
     let ticker: String?
+    /// Non-nil only while the surface is showing a stoppable agent run
+    /// (`VoiceSurfaceState.stoppableAgentRun`). Separate from the card's
+    /// 关闭: closing the panel and stopping the run are different intentions,
+    /// and dismissal deliberately never cancels an agent run.
+    var onStop: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -611,6 +621,12 @@ private struct WorkingPill: View {
                     .background(Color.primary.opacity(0.055), in: Capsule())
 
                 Spacer(minLength: 4)
+
+                if let onStop {
+                    Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
             }
 
             Text(ticker ?? OpenTypeL10n.text("请稍候…", english: "One moment…"))

@@ -192,6 +192,9 @@ struct AgentProgressPanelState: Equatable {
         case running
         case succeeded
         case failed
+        /// The user stopped the run (T1). Kept apart from `.failed` so the
+        /// card can say "stopped" rather than accusing the run of breaking.
+        case cancelled
     }
 
     /// The client-generated run id sent in the `/agent/run` body — the key
@@ -349,7 +352,9 @@ enum VoiceSurfaceState: Equatable {
                     )
                 case .succeeded:
                     return .result(card)
-                case .failed:
+                case .failed, .cancelled:
+                    // Both render the same card shape; the body text carries
+                    // the difference, so the surface needs no fourth case.
                     return .failed(card)
                 }
             }
@@ -373,6 +378,23 @@ enum VoiceSurfaceState: Equatable {
         case .result, .failed:
             return true
         case .hidden, .listening, .processing, .working:
+            return false
+        }
+    }
+
+    /// The run this surface can stop, when it is showing a stoppable one
+    /// (T1). Deliberately NOT folded into `dismissalEffect`: closing the
+    /// panel and stopping the run are different intentions, and the documented
+    /// rule that dismissing an agent run never cancels it stays intact.
+    ///
+    /// Only `.working` for an agent qualifies. An ask has no run id to address
+    /// and is already cancelled by dismissal; a finished card has nothing left
+    /// to stop.
+    var stoppableAgentRun: Bool {
+        switch self {
+        case .working(let detail):
+            return detail.kind == .agent
+        case .hidden, .listening, .processing, .result, .failed:
             return false
         }
     }

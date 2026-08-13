@@ -10,6 +10,7 @@ import { createAgentProgressRegistry } from "./progressRegistry";
 import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext";
 import { buildTimeContext } from "../context/timeContext";
 import { saveSpill } from "./spill";
+import { createRepeatGuard } from "./repeatGuard";
 import { logContextUsage, type ContextUsageLogWriter } from "../oneshot/contextDebugLog";
 import { resolveConversation } from "../oneshot/routes";
 import type { OneShotChatMessage } from "../oneshot/client";
@@ -127,6 +128,8 @@ async function handleAgentRun(
         spill: spillRoot
           ? (text, toolName) => saveSpill(text, { toolName, runId }, spillRoot)
           : undefined,
+        // One guard per run: chains must never leak between runs (T3).
+        repeatGuard: createRepeatGuard(),
       }
     );
   } catch (error) {

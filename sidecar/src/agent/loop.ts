@@ -1,6 +1,7 @@
 import { AGENT_SYSTEM_PROMPT } from "../oneshot/prompts";
 import type { McpToolSet } from "./mcpClient";
 import { spillOrClamp } from "./spill";
+import type { RepeatGuard } from "./repeatGuard";
 
 /**
  * Agent-loop message shape. Deliberately not reusing `OneShotChatFn` from
@@ -86,6 +87,11 @@ export interface RunAgentLoopDeps {
    * locator".
    */
   spill?: (text: string, toolName: string) => Promise<string | null>;
+  /**
+   * Advisory repeat-call breaker (T3). One instance per run -- a chain must
+   * never leak between runs. Omitted, the loop behaves exactly as before.
+   */
+  repeatGuard?: RepeatGuard;
 }
 
 export interface RunAgentLoopResult {
@@ -167,7 +173,7 @@ export async function runAgentLoop(
   input: RunAgentLoopInput,
   deps: RunAgentLoopDeps
 ): Promise<RunAgentLoopResult> {
-  const { chat, tools, onProgress, spill } = deps;
+  const { chat, tools, onProgress, spill, repeatGuard } = deps;
   const maxIterations = input.maxIterations ?? MAX_ITERATIONS;
   const messages = buildInitialMessages(input);
   const steps: AgentProgressEvent[] = [];
@@ -230,6 +236,22 @@ export async function runAgentLoop(
             : undefined,
         }),
       });
+
+      // The reminder rides as its own user message AFTER the tool result,
+      // never as a replacement for that result's content: the result stays
+      // the tool's own output so the step log and any audit of it remain
+      // faithful. Observation happens for every call including denied ones --
+      // a model hammering a call the approval policy keeps refusing is
+      // exactly the loop worth breaking, and a denial arrives here as an
+      // ordinary result string.
+      const reminder = repeatGuard?.observe(
+        toolCall.function.name,
+        toolCall.function.arguments ?? ""
+      );
+      if (reminder) {
+        emit({ type: "thinking", detail: reminder });
+        messages.push({ role: "user", content: reminder });
+      }
     }
   }
 

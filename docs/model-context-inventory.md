@@ -264,6 +264,35 @@ Use opentype__read_file or opentype__grep on <path> to read the rest.
 
 ---
 
+### 3.7 重复调用劝告（`src/agent/repeatGuard.ts`，仅 agent）
+
+**模型看到什么**：连续以**完全相同的参数**调用同一工具达到阈值（默认第 3、5、8 次）时，
+在该次工具结果**之后**追加一条独立的 user 消息。第一档是一句泛化轻推：
+
+```
+You are repeating the exact same tool call with identical arguments. Carefully analyze the
+previous result before calling again: if the task is not complete, try a different approach
+or different arguments instead of repeating the call.
+```
+
+之后各档是详细版，点名工具、连续次数和规范化后的参数（预览上限 500 字符，
+超出以 `… (+N more chars, truncated)` 收尾）。
+
+**它不替换工具结果的 content**——`tool` 消息保持工具自己的原始输出，
+劝告是一条独立消息。这样步骤日志和任何对它的审计都保持忠实。
+
+**Token 成本**：不触发时**零成本**。首档约 55 token；后续各档约 `120 + 参数预览` token。
+过了最高阈值后**转为静默**（提醒只在精确命中的次数上发出），所以一个不听劝的模型
+不会被无限唠叨。
+
+**KV Cache**：append-only，位于可复用前缀之后，不使已有缓存失效。
+
+**边界**：纯内存、每个 run 一条链、只劝不拦。被审批拒绝的调用**照样计数**
+（模型反复撞同一个拒绝正是最该打断的循环）；记忆类工具对链**透明**
+（既不计数也不重置，否则一次记账调用就能把死循环洗白）。
+
+---
+
 ## 4. **不**到达模型的东西（漂移记录）
 
 写这份清单的直接产出：以下机制在文档或直觉上"应该在注入"，但**代码里并没有**。

@@ -13,6 +13,13 @@ import { saveSpill } from "./spill";
 import { createRepeatGuard } from "./repeatGuard";
 import { createRunLog, type RunLog } from "./runLog";
 import {
+  createAskUserBroker,
+  createAskUserTool,
+  type AskUserAnswer,
+  type AskUserBroker,
+} from "./askUser";
+import { mergeToolSets } from "./toolSets";
+import {
   AgentCancelledError,
   createCancellationRegistry,
   runBudgetSignal,
@@ -38,6 +45,14 @@ interface AgentRunRequestBody {
 async function readJsonBody<T>(req: Request): Promise<T> {
   return (await req.json()) as T;
 }
+
+/**
+ * How long a question waits for a human before the agent gives up. The
+ * backstop against a question outliving the user's attention: the voice
+ * surface is transient, so a user who starts speaking again never sees the
+ * pending question at all (spec §13.4).
+ */
+const ASK_USER_TIMEOUT_MS = 120_000;
 
 /**
  * Renders prior conversation turns as a short "previous task / previous
@@ -74,6 +89,7 @@ async function handleAgentRun(
   contextLogWriter: ContextUsageLogWriter,
   progressRegistry: AgentProgressRegistry,
   cancellations: CancellationRegistry,
+  askUser: AskUserBroker,
   spillRoot?: string,
   runLog?: RunLog
 ): Promise<Response> {
@@ -132,7 +148,13 @@ async function handleAgentRun(
       { task, context: combinedContext, knownTerms, runtimeContext: buildTimeContext() },
       {
         chat,
-        tools,
+        // ask_user is built per run because it must address THIS run's
+        // surface; merged in here rather than living in the shared set for
+        // that reason (T5).
+        tools: mergeToolSets(
+          tools,
+          createAskUserTool(askUser, { runId, timeoutMs: ASK_USER_TIMEOUT_MS })
+        ),
         // One producer, two consumers (T7): the durable log keeps the full
         // record, the display registry keeps its bounded view of it. The log
         // append is fire-and-forget -- it never rejects, and awaiting it here
@@ -204,6 +226,22 @@ async function handleAgentRun(
   return Response.json({ result: loopResult.result, steps: loopResult.steps, conversationId });
 }
 
+/** Serves the question one run is currently waiting on, for the UI to render. */
+function handleAgentQuestion(req: Request, askUser: AskUserBroker): Response {
+  const pathname = new URL(req.url).pathname;
+  const runId = decodeURIComponent(pathname.slice(pathname.lastIndexOf("/") + 1));
+  return Response.json(askUser.pending(runId) ?? { runId, questions: [] });
+}
+
+/** Delivers the user's answer back to the waiting run. */
+async function handleAgentAnswer(req: Request, askUser: AskUserBroker): Promise<Response> {
+  const pathname = new URL(req.url).pathname;
+  const runId = decodeURIComponent(pathname.slice(pathname.lastIndexOf("/") + 1));
+  const body = await readJsonBody<AskUserAnswer>(req);
+  askUser.answer(runId, { answers: Array.isArray(body?.answers) ? body.answers : [] });
+  return Response.json({ delivered: true });
+}
+
 /**
  * Cancels one in-flight run. An unknown id is not an error -- it is
  * "nothing to cancel" -- so it answers 200 with `{ cancelled: false }`,
@@ -246,6 +284,7 @@ export function buildAgentRoutes(
   const progressRegistry = createAgentProgressRegistry();
   const cancellations = createCancellationRegistry();
   const runLog = runLogRoot ? createRunLog(runLogRoot) : undefined;
+  const askUser = createAskUserBroker();
   return [
     {
       method: "POST",
@@ -260,6 +299,7 @@ export function buildAgentRoutes(
           contextLogWriter,
           progressRegistry,
           cancellations,
+          askUser,
           spillRoot,
           runLog
         ),
@@ -273,6 +313,16 @@ export function buildAgentRoutes(
       method: "POST",
       path: "/agent/cancel/:runId",
       handler: (req) => handleAgentCancel(req, cancellations),
+    },
+    {
+      method: "GET",
+      path: "/agent/question/:runId",
+      handler: (req) => handleAgentQuestion(req, askUser),
+    },
+    {
+      method: "POST",
+      path: "/agent/answer/:runId",
+      handler: (req) => handleAgentAnswer(req, askUser),
     },
   ];
 }

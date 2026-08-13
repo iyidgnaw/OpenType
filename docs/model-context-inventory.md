@@ -11,7 +11,7 @@
 > 这不是可选的收尾工作——正是因为过去没有这条规则，
 > 才出现了 §4 里记录的那批"文档声称存在但代码里没有"的注入点。
 
-核对于 `7a749f4`（2026-08-14）。
+核对于 `50a7d0c`（2026-08-14），含 dsh 借鉴计划 T1–T9 全部改动。
 
 ---
 
@@ -216,8 +216,10 @@ Time zone could not be determined; ask the user to confirm before acting on a re
 由 `ToolSet.openAiTools` 决定，随请求作为 `tools` 参数发出。
 
 - **ask**：`filterToolSet(..., ["opentype__web_search", "opentype__web_fetch"])` ⇒ 恒定两个；
-- **agent**：`mergeToolSets(核心工具, 内置记忆工具, ...MCP)` 后经 `withApproval` 包装 ⇒
-  **随用户配置的 MCP server 变化**；
+- **agent**：`mergeToolSets(核心工具, 内置记忆工具, ...MCP)` 后经 `withApproval` 包装，
+  再并入**按 run 构造**的 `opentype__ask_user`（T5）⇒ **随用户配置的 MCP server 变化**。
+  `ask_user` 即使在没有 UI 通道的 run 里也保持可见（此时立即拒绝），
+  这样工具目录不会在请求之间改变形状，可复用前缀保持稳定；
 - **correct**：不带工具。
 
 **Token 成本**：每次迭代重发。核心工具 8 个 + 记忆工具 2 个是固定底噪；
@@ -290,6 +292,26 @@ or different arguments instead of repeating the call.
 **边界**：纯内存、每个 run 一条链、只劝不拦。被审批拒绝的调用**照样计数**
 （模型反复撞同一个拒绝正是最该打断的循环）；记忆类工具对链**透明**
 （既不计数也不重置，否则一次记账调用就能把死循环洗白）。
+
+---
+
+### 3.8 反问的答案（`src/agent/askUser.ts`，仅 agent）
+
+**模型看到什么**：用户回答后，`opentype__ask_user` 的工具结果形如
+
+```
+The user answered:
+Which file did you mean?
+  b.pdf
+```
+
+未回答的问题渲染为 `(skipped)`；无 UI 通道、超时、被取消各有明确的错误文案，
+**绝不静默悬挂**。
+
+**Token 成本**：只在模型主动发问时产生，约 `问题数 × 30` token。
+工具 schema 本身是固定底噪（见 §3.5）。
+
+**KV Cache**：append-only。
 
 ---
 

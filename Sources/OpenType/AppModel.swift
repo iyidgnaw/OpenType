@@ -337,6 +337,20 @@ final class AppModel: ObservableObject {
         // the panel stays until the run settles into its cancelled state, so
         // the user sees their stop take effect rather than the window simply
         // vanishing.
+        // Answering clears the card optimistically: the run resumes the moment
+        // the sidecar has the answer, and leaving the question on screen while
+        // it does would invite a second, unwanted answer.
+        self.overlay.onAnswerAgentQuestion = { [weak self] runId, answer in
+            guard let self else { return }
+            self.updateAgentPanel(runId: runId) { state in state.question = nil }
+            Task { [weak self] in
+                guard let self else { return }
+                try? await self.sidecarClient.answerAgentQuestion(
+                    runId: runId,
+                    answers: [answer]
+                )
+            }
+        }
         self.overlay.onStopAgentRun = { [weak self] in
             guard let state = self?.agentPanelState,
                   let runID = UUID(uuidString: state.runId) else { return }
@@ -710,7 +724,7 @@ final class AppModel: ObservableObject {
         switch currentVoiceSurfaceState() {
         case .result, .failed:
             hideVoiceSurface()
-        case .hidden, .listening, .processing, .working:
+        case .hidden, .listening, .processing, .working, .asking:
             break
         }
         configuration.selectedMode = mode
@@ -2317,6 +2331,15 @@ final class AppModel: ObservableObject {
                       AgentProgressPanelState.shouldContinuePolling(for: updated.phase)
                 else { return }
                 updated.steps = AgentProgressPanelState.steps(fromProgressEvents: snapshot.events)
+                // Same tick, no second loop (T5): a pending question is part
+                // of "what is this run doing right now", exactly like steps.
+                // A failed question poll leaves the previous value alone --
+                // clearing it on a transient error would blink the card away
+                // while the agent is still waiting.
+                if let prompt = try? await self.sidecarClient.agentQuestion(runId: runId) {
+                    updated.question = prompt.questions.first
+                }
+                guard self.agentPanelState?.runId == runId else { return }
                 self.agentPanelState = updated
             }
         }

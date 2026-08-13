@@ -224,7 +224,10 @@ Time zone could not be determined; ask the user to confirm before acting on a re
 MCP 部分完全取决于用户接了什么，**不受本仓库控制**。
 
 **KV Cache**：工具列表变化（接入/断开一个 MCP server）会让前缀失效。
-本仓库尚无工具目录文档——T9 会补上（`docs/tool-catalog.md`）。
+
+内置工具的完整 schema 见 **[`docs/tool-catalog.md`](tool-catalog.md)**——
+由 `sidecar/scripts/gen-tool-catalog.ts` 从实际的 `openAiTools` 描述符生成，
+`bun run check:tool-catalog` 验证无漂移。MCP 工具按定义不在其中。
 
 ### 3.6 工具结果回灌
 

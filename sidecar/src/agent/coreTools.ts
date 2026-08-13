@@ -33,7 +33,7 @@ export interface CoreToolsDeps {
   fetchFn?: typeof fetch;
   execTimeoutMs?: number;
   /** Launches the system opener for an (already `~`-expanded) absolute path. */
-  openRunner?: (path: string) => Promise<{ exitCode: number }>;
+  openRunner?: (path: string, signal?: AbortSignal) => Promise<{ exitCode: number }>;
 }
 
 const BASH_TOOL_NAME = "opentype__bash";
@@ -97,24 +97,42 @@ interface ExecOutcome {
  * the Swift-side curl transport hardening closed). On timeout the child is
  * SIGTERM'd, escalating to SIGKILL if it ignores that.
  */
-async function runProcess(argv: string[], cwd: string, timeoutMs: number): Promise<ExecOutcome> {
+async function runProcess(
+  argv: string[],
+  cwd: string,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<ExecOutcome> {
   const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const stdoutPromise = new Response(proc.stdout).text();
   const stderrPromise = new Response(proc.stderr).text();
 
   let timedOut = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutTimer = setTimeout(() => {
-    timedOut = true;
+  // Cancellation reuses the timeout's own escalation (SIGTERM, then SIGKILL
+  // after 2s) rather than adding a second kill path: a cancelled child and a
+  // timed-out child need identical treatment, and one path is one thing to
+  // get right.
+  const terminate = (): void => {
     proc.kill();
     killTimer = setTimeout(() => proc.kill(9), 2000);
+  };
+  const timeoutTimer = setTimeout(() => {
+    timedOut = true;
+    terminate();
   }, timeoutMs);
+  const onAbort = (): void => terminate();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) {
+    terminate();
+  }
 
   let exitCode: number;
   try {
     exitCode = await proc.exited;
   } finally {
     clearTimeout(timeoutTimer);
+    signal?.removeEventListener("abort", onAbort);
     if (killTimer !== undefined) {
       clearTimeout(killTimer);
     }
@@ -222,8 +240,13 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
   // no app window ever appears during a run.
   const openRunner =
     deps.openRunner ??
-    (async (targetPath: string): Promise<{ exitCode: number }> => {
-      const outcome = await runProcess(["/usr/bin/open", targetPath], homeDir, execTimeoutMs);
+    (async (targetPath: string, signal?: AbortSignal): Promise<{ exitCode: number }> => {
+      const outcome = await runProcess(
+        ["/usr/bin/open", targetPath],
+        homeDir,
+        execTimeoutMs,
+        signal
+      );
       return { exitCode: outcome.exitCode };
     });
 
@@ -234,7 +257,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return homeDir;
   }
 
-  async function handleBash(rawArgs: unknown): Promise<{ content: string }> {
+  async function handleBash(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { command?: unknown; cwd?: unknown };
     if (typeof args.command !== "string" || args.command.trim().length === 0) {
       return { content: 'Error: bash requires a non-empty "command" string.' };
@@ -242,12 +265,13 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     const outcome = await runProcess(
       ["/bin/bash", "-lc", args.command],
       resolveCwd(args.cwd),
-      execTimeoutMs
+      execTimeoutMs,
+      signal
     );
     return formatExecResult(outcome, execTimeoutMs);
   }
 
-  async function handlePython(rawArgs: unknown): Promise<{ content: string }> {
+  async function handlePython(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { code?: unknown; cwd?: unknown };
     if (typeof args.code !== "string" || args.code.trim().length === 0) {
       return { content: 'Error: python requires a non-empty "code" string.' };
@@ -259,7 +283,8 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
       const outcome = await runProcess(
         ["python3", scriptPath],
         resolveCwd(args.cwd),
-        execTimeoutMs
+        execTimeoutMs,
+        signal
       );
       return formatExecResult(outcome, execTimeoutMs);
     } finally {
@@ -267,7 +292,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     }
   }
 
-  async function handleReadFile(rawArgs: unknown): Promise<{ content: string }> {
+  async function handleReadFile(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { path?: unknown };
     if (typeof args.path !== "string" || args.path.trim().length === 0) {
       return { content: 'Error: read_file requires a non-empty "path" string.' };
@@ -276,7 +301,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: clampAtSource(fs.readFileSync(filePath, "utf8")) };
   }
 
-  async function handleListDir(rawArgs: unknown): Promise<{ content: string }> {
+  async function handleListDir(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { path?: unknown };
     const dirPath = typeof args.path === "string" && args.path.trim().length > 0
       ? expandTilde(args.path, homeDir)
@@ -291,7 +316,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: clampAtSource(lines.join("\n")) };
   }
 
-  async function handleGrep(rawArgs: unknown): Promise<{ content: string }> {
+  async function handleGrep(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { pattern?: unknown; path?: unknown; caseInsensitive?: unknown };
     if (typeof args.pattern !== "string" || args.pattern.length === 0) {
       return { content: 'Error: grep requires a non-empty "pattern" string.' };
@@ -316,7 +341,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
       argv.push("-i");
     }
     argv.push("--", args.pattern, ...roots);
-    const outcome = await runProcess(argv, homeDir, execTimeoutMs);
+    const outcome = await runProcess(argv, homeDir, execTimeoutMs, signal);
     if (outcome.timedOut) {
       return { content: `Error: grep timed out after ${execTimeoutMs}ms and was killed.` };
     }
@@ -330,7 +355,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: clampAtSource(outcome.stdout.trimEnd()) };
   }
 
-  async function handleWebSearch(rawArgs: unknown): Promise<{ content: string }> {
+  async function handleWebSearch(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { query?: unknown };
     if (typeof args.query !== "string" || args.query.trim().length === 0) {
       return { content: 'Error: web_search requires a non-empty "query" string.' };
@@ -339,6 +364,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     const response = await fetchFn(url, {
       headers: { "User-Agent": USER_AGENT },
       redirect: "follow",
+      signal,
     });
     if (!response.ok) {
       return { content: `Error: web search failed with HTTP ${response.status}.` };
@@ -354,7 +380,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: clampAtSource(lines.join("\n")) };
   }
 
-  async function handleWebFetch(rawArgs: unknown): Promise<{ content: string }> {
+  async function handleWebFetch(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { url?: unknown };
     if (typeof args.url !== "string" || args.url.trim().length === 0) {
       return { content: 'Error: web_fetch requires a non-empty "url" string.' };
@@ -362,6 +388,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     const response = await fetchFn(args.url, {
       headers: { "User-Agent": USER_AGENT },
       redirect: "follow",
+      signal,
     });
     if (!response.ok) {
       return { content: `Error: fetch of ${args.url} failed with HTTP ${response.status}.` };
@@ -377,7 +404,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
    * directly under the YOLO posture -- opening the preview IS the requested
    * outcome. Existence is verified before the runner is ever invoked.
    */
-  async function handleOpenFile(rawArgs: unknown): Promise<{ content: string }> {
+  async function handleOpenFile(rawArgs: unknown, signal?: AbortSignal): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as { path?: unknown };
     if (typeof args.path !== "string" || args.path.trim().length === 0) {
       return { content: 'Error: open_file requires a non-empty "path" string.' };
@@ -386,7 +413,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     if (!fs.existsSync(filePath)) {
       return { content: `Error: no file exists at ${filePath}.` };
     }
-    const { exitCode } = await openRunner(filePath);
+    const { exitCode } = await openRunner(filePath, signal);
     if (exitCode !== 0) {
       return {
         content: `Error: failed to open ${filePath} (opener finished with exit code ${exitCode}).`,
@@ -395,7 +422,10 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: `Opened ${filePath} with its default application.` };
   }
 
-  const handlers = new Map<string, (rawArgs: unknown) => Promise<{ content: string }>>([
+  const handlers = new Map<
+    string,
+    (rawArgs: unknown, signal?: AbortSignal) => Promise<{ content: string }>
+  >([
     [BASH_TOOL_NAME, handleBash],
     [PYTHON_TOOL_NAME, handlePython],
     [READ_FILE_TOOL_NAME, handleReadFile],
@@ -561,13 +591,17 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     },
   ];
 
-  async function callTool(name: string, args: unknown): Promise<{ content: string }> {
+  async function callTool(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
     const handler = handlers.get(name);
     if (!handler) {
       throw new Error(`Unknown core tool: ${name}`);
     }
     try {
-      return await handler(args);
+      return await handler(args, signal);
     } catch (err) {
       return errorContent(err);
     }

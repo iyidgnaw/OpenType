@@ -82,13 +82,21 @@ final class OverlayController {
     var onCopyResult: ((String) -> Void)?
     /// The 打开主窗口 button.
     var onOpenMainWindow: (() -> Void)?
+    /// The 停止 control shown while a stoppable agent run is on screen (T1).
+    var onStopAgentRun: (() -> Void)?
+    /// The user's answer to an agent question (T5): run id plus the answer.
+    var onAnswerAgentQuestion: ((String, AgentQuestionAnswerItem) -> Void)?
 
     private lazy var hostingView = NSHostingView(
         rootView: OverlayView(
             presentation: presentation,
             onClose: { [weak self] in self?.onRequestDismiss?() },
             onCopy: { [weak self] text in self?.onCopyResult?(text) },
-            onOpenMainWindow: { [weak self] in self?.onOpenMainWindow?() }
+            onOpenMainWindow: { [weak self] in self?.onOpenMainWindow?() },
+            onStop: { [weak self] in self?.onStopAgentRun?() },
+            onAnswer: { [weak self] runId, answer in
+                self?.onAnswerAgentQuestion?(runId, answer)
+            }
         )
     )
 
@@ -424,6 +432,8 @@ private struct OverlayView: View {
     let onClose: () -> Void
     let onCopy: (String) -> Void
     let onOpenMainWindow: () -> Void
+    let onStop: () -> Void
+    let onAnswer: (String, AgentQuestionAnswerItem) -> Void
 
     var body: some View {
         Group {
@@ -453,7 +463,14 @@ private struct OverlayView: View {
                     // is still working), so `presentation.mode` would be able
                     // to label an Agent run "听写".
                     modeTitle: (detail.kind == .agent ? InputMode.agent : .ask).title,
-                    ticker: detail.currentStep
+                    ticker: detail.currentStep,
+                    onStop: presentation.surface.stoppableAgentRun ? onStop : nil
+                )
+            case .asking(let detail):
+                AgentQuestionCard(
+                    detail: detail,
+                    onAnswer: { answer in onAnswer(detail.runId, answer) },
+                    onStop: onStop
                 )
             case .result(let card):
                 VoiceSurfaceCard(
@@ -594,6 +611,11 @@ private struct WorkingPill: View {
     let headline: String
     let modeTitle: String
     let ticker: String?
+    /// Non-nil only while the surface is showing a stoppable agent run
+    /// (`VoiceSurfaceState.stoppableAgentRun`). Separate from the card's
+    /// 关闭: closing the panel and stopping the run are different intentions,
+    /// and dismissal deliberately never cancels an agent run.
+    var onStop: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -611,6 +633,12 @@ private struct WorkingPill: View {
                     .background(Color.primary.opacity(0.055), in: Capsule())
 
                 Spacer(minLength: 4)
+
+                if let onStop {
+                    Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
             }
 
             Text(ticker ?? OpenTypeL10n.text("请稍候…", english: "One moment…"))
@@ -626,6 +654,101 @@ private struct WorkingPill: View {
         .padding(.vertical, 12)
         .frame(width: 388, alignment: .leading)
         .frame(maxHeight: .infinity, alignment: .center)
+    }
+}
+
+/// The agent asking the user something mid-run (T5). Deliberately plain: a
+/// question list with buttons, plus a free-text field for "something else".
+/// The answer encoding is the same whichever control the user touches, so a
+/// richer presentation later changes nothing the agent receives.
+private struct AgentQuestionCard: View {
+    let detail: VoiceSurfaceState.AskingDetail
+    let onAnswer: (AgentQuestionAnswerItem) -> Void
+    let onStop: () -> Void
+
+    @State private var custom = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "questionmark.bubble")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text(OpenTypeL10n.text("Agent 有个问题", english: "The agent has a question"))
+                    .font(.system(size: 12.5, weight: .semibold))
+                Spacer(minLength: 4)
+                Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+
+            Text(detail.question.question)
+                .font(.system(size: 12))
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let text = detail.question.detail, !text.isEmpty {
+                Text(text)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let options = detail.question.options, !options.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(options, id: \.label) { option in
+                        Button {
+                            onAnswer(
+                                AgentQuestionAnswerItem(
+                                    id: detail.question.id,
+                                    selected: [option.label],
+                                    custom: nil
+                                )
+                            )
+                        } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(option.label)
+                                    .font(.system(size: 11.5, weight: .medium))
+                                if let description = option.description, !description.isEmpty {
+                                    Text(description)
+                                        .font(.system(size: 9.5))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                TextField(
+                    OpenTypeL10n.text("其他…", english: "Something else…"),
+                    text: $custom
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .onSubmit(submitCustom)
+
+                Button(OpenTypeL10n.text("发送", english: "Send"), action: submitCustom)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(width: 480, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func submitCustom() {
+        let text = custom.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        onAnswer(
+            AgentQuestionAnswerItem(id: detail.question.id, selected: [], custom: text)
+        )
     }
 }
 

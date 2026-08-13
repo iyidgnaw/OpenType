@@ -559,6 +559,60 @@ final class SidecarClient {
         return try await request(method: "GET", path: "/agent/progress/\(encoded)")
     }
 
+    /// The sidecar's answer to `POST /agent/cancel/:runId`.
+    struct AgentCancelResponse: Decodable {
+        /// `false` for an unknown or already-settled id — not an error, just
+        /// nothing to cancel (the sidecar's documented semantics).
+        let cancelled: Bool
+    }
+
+    /// Asks the sidecar to stop an in-flight Agent run (T1). The run itself
+    /// reports its own terminal state: the blocked `/agent/run` call answers
+    /// 499, and `AppModel.runAgentDispatch` turns that into `.cancelled`. This
+    /// call only delivers the signal, so a lost response cannot leave the
+    /// record disagreeing with the run.
+    func cancelAgentRun(runId: String) async throws -> AgentCancelResponse {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        let encoded = runId.addingPercentEncoding(withAllowedCharacters: allowed) ?? runId
+        return try await request(method: "POST", path: "/agent/cancel/\(encoded)")
+    }
+
+    /// Reads the question one Agent run is currently waiting on (T5), or an
+    /// empty list when it is not waiting on anything. Polled on the same tick
+    /// as progress, so asking needs no second polling loop.
+    func agentQuestion(runId: String) async throws -> AgentQuestionPrompt {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        let encoded = runId.addingPercentEncoding(withAllowedCharacters: allowed) ?? runId
+        return try await request(method: "GET", path: "/agent/question/\(encoded)")
+    }
+
+    /// Delivers the user's answer back to a waiting Agent run (T5).
+    @discardableResult
+    func answerAgentQuestion(
+        runId: String,
+        answers: [AgentQuestionAnswerItem]
+    ) async throws -> AgentAnswerAck {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        let encoded = runId.addingPercentEncoding(withAllowedCharacters: allowed) ?? runId
+        return try await request(
+            method: "POST",
+            path: "/agent/answer/\(encoded)",
+            body: AgentAnswerBody(answers: answers)
+        )
+    }
+
+    private struct AgentAnswerBody: Encodable {
+        let answers: [AgentQuestionAnswerItem]
+    }
+
+    /// The sidecar's acknowledgement of a delivered answer.
+    struct AgentAnswerAck: Decodable {
+        let delivered: Bool
+    }
+
     /// Generic request helper: shells out to `curl --unix-socket`, then
     /// decodes stdout as JSON into `Response`. More endpoints beyond
     /// `/health` will be added to the sidecar later; this method doesn't

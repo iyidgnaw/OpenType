@@ -170,6 +170,37 @@ struct AgentProgressStep: Equatable {
     var detail: String
 }
 
+/// One choice offered by an agent question (T5), mirroring the sidecar's
+/// `AskUserOption`. `label` is both the button text and the answer value, so
+/// a richer UI later returns the same encoding a plain list does.
+struct AgentQuestionOption: Decodable, Equatable {
+    let label: String
+    let description: String?
+}
+
+/// One question the agent is waiting on, from `GET /agent/question/:runId`.
+struct AgentQuestion: Decodable, Equatable {
+    let id: String
+    let question: String
+    let detail: String?
+    let options: [AgentQuestionOption]?
+    let multiSelect: Bool?
+}
+
+/// The pending-question payload for one run; `questions` is empty when the
+/// run is not waiting on anything.
+struct AgentQuestionPrompt: Decodable, Equatable {
+    let runId: String
+    let questions: [AgentQuestion]
+}
+
+/// One answer sent back through `POST /agent/answer/:runId`.
+struct AgentQuestionAnswerItem: Encodable, Equatable {
+    let id: String
+    let selected: [String]
+    let custom: String?
+}
+
 /// The wire shape of one entry from the sidecar's
 /// `GET /agent/progress/:runId` response (`{ status, events }`) — what
 /// `SidecarClient.agentProgress(runId:)` decodes each `events` element into.
@@ -192,6 +223,9 @@ struct AgentProgressPanelState: Equatable {
         case running
         case succeeded
         case failed
+        /// The user stopped the run (T1). Kept apart from `.failed` so the
+        /// card can say "stopped" rather than accusing the run of breaking.
+        case cancelled
     }
 
     /// The client-generated run id sent in the `/agent/run` body — the key
@@ -204,6 +238,10 @@ struct AgentProgressPanelState: Equatable {
     /// The final answer once the run succeeds, or the error text once it
     /// fails; `nil` while `phase == .running`.
     var result: String?
+    /// The question this run is currently waiting on (T5), or `nil`. Set from
+    /// the same ~0.7s poll that drives `steps`, so asking needs no second
+    /// polling loop.
+    var question: AgentQuestion?
 
     /// Maps polled sidecar progress events to displayable feed steps:
     /// `"thinking"`/`"tool_call"`/`"tool_result"`/`"error"` map to the
@@ -260,6 +298,8 @@ enum VoiceSurfaceState: Equatable {
     /// The LLM/agent is working: dots continue, plus (agent only) a one-line
     /// live step ticker.
     case working(WorkingDetail)
+    /// The agent is waiting on the user's answer (T5).
+    case asking(AskingDetail)
     /// The panel has grown into the result card.
     case result(ResultCard)
     /// The same card, showing a failed agent run.
@@ -283,6 +323,12 @@ enum VoiceSurfaceState: Equatable {
         var query: String
         var body: String
         var steps: [AgentProgressStep]
+    }
+
+    /// Payload of `.asking`: the run to answer and the question to render.
+    struct AskingDetail: Equatable {
+        var runId: String
+        var question: AgentQuestion
     }
 
     /// Derives the surface from what `AppModel` already owns. Evaluated in a
@@ -344,12 +390,22 @@ enum VoiceSurfaceState: Equatable {
                 )
                 switch agent.phase {
                 case .running:
+                    // A pending question outranks the step ticker: the run is
+                    // blocked on the user, so showing "working…" would ask
+                    // them to wait for something that is waiting for them.
+                    if let question = agent.question {
+                        return .asking(
+                            AskingDetail(runId: agent.runId, question: question)
+                        )
+                    }
                     return .working(
                         WorkingDetail(kind: .agent, currentStep: agent.steps.last?.detail)
                     )
                 case .succeeded:
                     return .result(card)
-                case .failed:
+                case .failed, .cancelled:
+                    // Both render the same card shape; the body text carries
+                    // the difference, so the surface needs no fourth case.
                     return .failed(card)
                 }
             }
@@ -372,7 +428,30 @@ enum VoiceSurfaceState: Equatable {
         switch self {
         case .result, .failed:
             return true
-        case .hidden, .listening, .processing, .working:
+        // A question that a stray click dismisses is not a question. It stays
+        // until answered, cancelled, or timed out.
+        case .hidden, .listening, .processing, .working, .asking:
+            return false
+        }
+    }
+
+    /// The run this surface can stop, when it is showing a stoppable one
+    /// (T1). Deliberately NOT folded into `dismissalEffect`: closing the
+    /// panel and stopping the run are different intentions, and the documented
+    /// rule that dismissing an agent run never cancels it stays intact.
+    ///
+    /// Only `.working` for an agent qualifies. An ask has no run id to address
+    /// and is already cancelled by dismissal; a finished card has nothing left
+    /// to stop.
+    var stoppableAgentRun: Bool {
+        switch self {
+        case .working(let detail):
+            return detail.kind == .agent
+        // A blocked run is still a run: stopping must stay reachable while a
+        // question is on screen.
+        case .asking:
+            return true
+        case .hidden, .listening, .processing, .result, .failed:
             return false
         }
     }
@@ -384,7 +463,7 @@ enum VoiceSurfaceState: Equatable {
         switch self {
         case .working(let detail) where detail.kind == .ask:
             return .cancelAsk
-        case .hidden, .listening, .processing, .working, .result, .failed:
+        case .hidden, .listening, .processing, .working, .asking, .result, .failed:
             return .none
         }
     }
@@ -432,6 +511,10 @@ enum VoiceSurfacePanelLayout {
         case .working:
             // Slightly taller than the pill: room for the step-ticker line.
             return CGSize(width: 388, height: 120)
+        case .asking:
+            // Wide enough to read a question and its choices, but well short
+            // of the result card: this is a prompt, not a document.
+            return CGSize(width: 480, height: 260)
         case .result, .failed:
             return CGSize(width: 620, height: 480)
         }

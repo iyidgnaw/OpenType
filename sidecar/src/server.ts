@@ -52,7 +52,15 @@ export function buildApp(
   contextLogWriter: ContextUsageLogWriter,
   callLLM: CallLLM,
   transcribe: (audio: Uint8Array) => Promise<string>,
-  providerConfigStore: ProviderConfigStore
+  providerConfigStore: ProviderConfigStore,
+  /**
+   * Root for spilled oversized tool results (T2). Omitted -- as every
+   * pre-existing test call site does -- restores the truncate-and-discard
+   * behavior, so spilling is opt-in per assembly rather than ambient.
+   */
+  spillRoot?: string,
+  /** Root for durable per-run step logs (T7); omitted disables recording. */
+  runLogRoot?: string
 ) {
   return createRouter([
     {
@@ -62,7 +70,15 @@ export function buildApp(
     },
     ...buildOneShotRoutes(store, conversations, chat, contextLogWriter, tools),
     ...buildMemoryRoutes(store, callLLM),
-    ...buildAgentRoutes(store, conversations, chat, tools, contextLogWriter),
+    ...buildAgentRoutes(
+      store,
+      conversations,
+      chat,
+      tools,
+      contextLogWriter,
+      spillRoot,
+      runLogRoot
+    ),
     ...buildConversationRoutes(conversations),
     ...buildAsrRoutes(transcribe),
     ...buildTranscribeRoutes(chat),
@@ -117,6 +133,10 @@ async function main() {
   // The approval seam wraps the *merged* set so built-in memory tools, core
   // tools, and MCP tools all flow through the same gate; v2 ships only the
   // always-allow YOLO policy (see agent/approval.ts for the swap-in seam).
+  // No guards are registered: the YOLO stance is unchanged (T6 added the
+  // guard SEAM and its monotonicity, not a policy). The audit sink is left
+  // unset here because the approval pair belongs to a run, and only the agent
+  // route knows which run a call belongs to.
   const tools = withApproval(mergeToolSets(builtInTools, coreTools, mcpTools), yoloApprovalPolicy);
   const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
 
@@ -208,7 +228,9 @@ async function main() {
     contextLogWriter,
     callLLM,
     resolveTranscribe,
-    providerConfigStore
+    providerConfigStore,
+    env.spillRoot,
+    env.runLogRoot
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

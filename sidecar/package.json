@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "bun run src/server.ts",
     "test": "bun test",
+    "gen:tool-catalog": "bun run scripts/gen-tool-catalog.ts",
+    "check:tool-catalog": "bun run scripts/gen-tool-catalog.ts --check",
     "build": "bun build ./src/server.ts --compile --outfile dist/opentype-sidecar"
   },
   "dependencies": {

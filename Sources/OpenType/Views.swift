@@ -876,7 +876,8 @@ private struct AgentConversationsView: View {
                                 ForEach(runningRuns) { run in
                                     AgentRunRow(
                                         run: run,
-                                        isFocused: model.focusedAgentRunID == run.id
+                                        isFocused: model.focusedAgentRunID == run.id,
+                                        onStop: { model.cancelAgentRun(run.id) }
                                     )
                                     .id(run.id)
                                 }
@@ -1770,6 +1771,8 @@ private struct MemoryPanelView: View {
 private struct AgentRunRow: View {
     let run: AgentRunRecord
     let isFocused: Bool
+    /// Invoked by the row's stop control while the run is still `.running`.
+    let onStop: () -> Void
     @State private var stepsExpanded = false
 
     var body: some View {
@@ -1795,6 +1798,19 @@ private struct AgentRunRow: View {
                     Text(OpenTypeL10n.text("运行中…", english: "Running…"))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    // The BACKSTOP stop control (T1). The voice surface is
+                    // transient -- a new recording, a mode switch, or a newer
+                    // dispatch all hide it -- so a stop button that lives only
+                    // there disappears exactly when a long run is most likely
+                    // to need stopping. This row is also the only place to
+                    // reach a run that is no longer the most recent one.
+                    Button(OpenTypeL10n.text("停止", english: "Stop")) {
+                        onStop()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 8.8, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
                 }
             case .completed(let result):
                 Text(result)
@@ -1806,6 +1822,11 @@ private struct AgentRunRow: View {
                 Text(message)
                     .font(.system(size: 9.5))
                     .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .cancelled(let message):
+                Text(message)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -1880,6 +1901,14 @@ private struct AgentRunRow: View {
                     OpenTypeL10n.text("失败", english: "Failed"),
                     "exclamationmark.triangle.fill",
                     .red
+                )
+            case .cancelled:
+                // Not red: the user stopping their own run is a normal
+                // outcome, not an error to alarm them about.
+                return (
+                    OpenTypeL10n.text("已停止", english: "Stopped"),
+                    "stop.circle.fill",
+                    .secondary
                 )
             }
         }()

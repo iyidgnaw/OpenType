@@ -102,7 +102,20 @@ describe("POST /agent/run", () => {
 
     await router(post({ task: "use a tool" }));
 
-    expect(capturedTools).toEqual([{ type: "function", function: { name: "server__tool" } }]);
+    // The connected tool still reaches the model unchanged. It is no longer
+    // the WHOLE list: since T5 the agent also carries `opentype__ask_user`,
+    // which is built per run and merged in here. That tool stays visible even
+    // when a run has no way to ask (it then refuses immediately), so the tool
+    // catalog does not change shape between requests and the reusable prompt
+    // prefix stays stable.
+    expect(capturedTools).toContainEqual({
+      type: "function",
+      function: { name: "server__tool" },
+    });
+    const names = (capturedTools as { function: { name: string } }[]).map(
+      (tool) => tool.function.name
+    );
+    expect(names).toContain("opentype__ask_user");
   });
 
   test("logs context usage and injects matched known terms into the loop's prompt", async () => {

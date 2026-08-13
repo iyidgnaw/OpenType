@@ -7,7 +7,16 @@
  */
 export interface ToolSet {
   openAiTools: unknown[];
-  callTool: (name: string, args: unknown) => Promise<{ content: string }>;
+  /**
+   * `signal` is the run's cancellation (T1). Every combinator below forwards
+   * it unchanged: a wrapper may observe it, but none may drop it -- dropping
+   * it would silently detach the user's stop button from whatever it wraps.
+   */
+  callTool: (
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ) => Promise<{ content: string }>;
 }
 
 function toolNamesIn(set: ToolSet): Set<string> {
@@ -38,12 +47,16 @@ export function mergeToolSets(...sets: ToolSet[]): ToolSet {
     }
   }
 
-  async function callTool(name: string, args: unknown): Promise<{ content: string }> {
+  async function callTool(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
     const owningSet = setsByToolName.get(name);
     if (!owningSet) {
       throw new Error(`Unknown tool: ${name}`);
     }
-    return owningSet.callTool(name, args);
+    return owningSet.callTool(name, args, signal);
   }
 
   return { openAiTools, callTool };
@@ -66,11 +79,15 @@ export function filterToolSet(set: ToolSet, names: string[]): ToolSet {
     return typeof name === "string" && allowed.has(name);
   });
 
-  async function callTool(name: string, args: unknown): Promise<{ content: string }> {
+  async function callTool(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
     if (!allowed.has(name)) {
       throw new Error(`Unknown tool: ${name}`);
     }
-    return set.callTool(name, args);
+    return set.callTool(name, args, signal);
   }
 
   return { openAiTools, callTool };

@@ -1081,6 +1081,122 @@ final class VoiceSurfaceTests: XCTestCase {
         )
     }
 
+    // MARK: - D2. Stop control (T1)
+
+    func testOnlyAWorkingAgentRunIsStoppable() {
+        let card = VoiceSurfaceState.ResultCard(
+            kind: .agent, query: "q", body: "b", steps: []
+        )
+
+        XCTAssertTrue(
+            VoiceSurfaceState.working(.init(kind: .agent, currentStep: nil)).stoppableAgentRun
+        )
+        // An ask has no run id to address, and dismissal already cancels it.
+        XCTAssertFalse(
+            VoiceSurfaceState.working(.init(kind: .ask, currentStep: nil)).stoppableAgentRun
+        )
+        // A settled card has nothing left to stop.
+        for state: VoiceSurfaceState in [
+            .hidden, .listening, .processing, .result(card), .failed(card)
+        ] {
+            XCTAssertFalse(state.stoppableAgentRun, "\(state) must not offer a stop control")
+        }
+    }
+
+    func testStoppingIsSeparateFromDismissing() {
+        // The rule this protects: closing the panel and stopping the run are
+        // different intentions. A stoppable state must STILL dismiss to
+        // `.none`, or the stop control would be redundant with 关闭 and
+        // dismissing would silently kill runs.
+        let working = VoiceSurfaceState.working(.init(kind: .agent, currentStep: "step"))
+
+        XCTAssertTrue(working.stoppableAgentRun)
+        XCTAssertEqual(working.dismissalEffect, VoiceSurfaceDismissalEffect.none)
+    }
+
+    func testCancelledAgentPhaseRendersACardRatherThanVanishing() {
+        let agent = AgentProgressPanelState(
+            runId: "r", task: "t", steps: [], phase: .cancelled, result: "已停止"
+        )
+
+        let state = VoiceSurfaceState.reduce(
+            mode: .agent, processing: .idle, ask: nil, agent: agent
+        )
+
+        guard case .failed(let card) = state else {
+            return XCTFail("a cancelled run must still render its card, got \(state)")
+        }
+        XCTAssertEqual(card.body, "已停止")
+    }
+
+    // MARK: - D3. Agent questions (T5)
+
+    private func question() -> AgentQuestion {
+        AgentQuestion(
+            id: "q1",
+            question: "Which file?",
+            detail: nil,
+            options: [AgentQuestionOption(label: "a.pdf", description: nil)],
+            multiSelect: nil
+        )
+    }
+
+    func testAPendingQuestionOutranksTheStepTicker() {
+        // The run is blocked ON the user, so showing "working…" would ask them
+        // to wait for something that is waiting for them.
+        let agent = AgentProgressPanelState(
+            runId: "r",
+            task: "t",
+            steps: [AgentProgressStep(kind: .thinking, detail: "still going")],
+            phase: .running,
+            result: nil,
+            question: question()
+        )
+
+        let state = VoiceSurfaceState.reduce(
+            mode: .agent, processing: .idle, ask: nil, agent: agent
+        )
+
+        guard case .asking(let detail) = state else {
+            return XCTFail("a pending question must take the surface, got \(state)")
+        }
+        XCTAssertEqual(detail.runId, "r")
+        XCTAssertEqual(detail.question.id, "q1")
+    }
+
+    func testAQuestionCannotBeDismissedByAStrayClick() {
+        // A question a misclick can erase is not a question.
+        let state = VoiceSurfaceState.asking(
+            .init(runId: "r", question: question())
+        )
+
+        XCTAssertFalse(state.allowsClickOutsideDismiss)
+        XCTAssertEqual(state.dismissalEffect, VoiceSurfaceDismissalEffect.none)
+    }
+
+    func testAQuestionKeepsTheRunStoppable() {
+        // A blocked run is still a run.
+        XCTAssertTrue(
+            VoiceSurfaceState.asking(.init(runId: "r", question: question()))
+                .stoppableAgentRun
+        )
+    }
+
+    func testAnsweredRunGoesBackToWorking() {
+        var agent = AgentProgressPanelState(
+            runId: "r", task: "t", steps: [], phase: .running, result: nil, question: question()
+        )
+        agent.question = nil
+
+        let state = VoiceSurfaceState.reduce(
+            mode: .agent, processing: .idle, ask: nil, agent: agent
+        )
+
+        guard case .working = state else {
+            return XCTFail("clearing the question must resume the ticker, got \(state)")
+        }
+    }
+
     // MARK: - E. Markdown seam (type existence only)
 
     func testAssistantMarkdownWrapperExists() {

@@ -1,5 +1,8 @@
 import { AGENT_SYSTEM_PROMPT } from "../oneshot/prompts";
 import type { McpToolSet } from "./mcpClient";
+import { spillOrClamp } from "./spill";
+import type { RepeatGuard } from "./repeatGuard";
+import { AgentCancelledError } from "./cancellation";
 
 /**
  * Agent-loop message shape. Deliberately not reusing `OneShotChatFn` from
@@ -24,7 +27,7 @@ export interface AgentChatResult {
 
 export type AgentChatFn = (
   messages: AgentChatMessage[],
-  options?: { tools?: unknown[] }
+  options?: { tools?: unknown[]; signal?: AbortSignal }
 ) => Promise<AgentChatResult>;
 
 export type AgentProgressEvent =
@@ -46,6 +49,18 @@ export interface RunAgentLoopInput {
   task: string;
   context?: string;
   knownTerms?: string;
+  /**
+   * Trusted, harness-supplied runtime facts -- currently the wall-clock
+   * anchor from `context/timeContext.ts` (T4).
+   *
+   * Deliberately NOT folded into `context`: the agent system prompt tells the
+   * model to treat CONTEXT as UNTRUSTED data and never act on instructions
+   * inside it, which is exactly wrong for a fact the harness itself asserts
+   * and wants the model to rely on. Kept separate from `knownTerms` for the
+   * same explicit-over-implicit reason -- one field, one source, one entry in
+   * `docs/model-context-inventory.md`.
+   */
+  runtimeContext?: string;
   /** System message content; defaults to `AGENT_SYSTEM_PROMPT`. */
   systemPrompt?: string;
   /**
@@ -62,6 +77,32 @@ export interface RunAgentLoopDeps {
   chat: AgentChatFn;
   tools: McpToolSet;
   onProgress?: (event: AgentProgressEvent) => void;
+  /**
+   * Persists one oversized tool result and returns its locator, or `null`
+   * when it could not be stored (T2). Omitted, an oversized result is
+   * truncated exactly as before -- so a caller that has nowhere to spill
+   * (tests, the ask path before it opts in) keeps the original behavior.
+   *
+   * The loop deliberately does not know about run ids or spill roots: the
+   * caller closes over both, keeping this seam to "here is text, give me a
+   * locator".
+   */
+  spill?: (text: string, toolName: string) => Promise<string | null>;
+  /**
+   * Advisory repeat-call breaker (T3). One instance per run -- a chain must
+   * never leak between runs. Omitted, the loop behaves exactly as before.
+   */
+  repeatGuard?: RepeatGuard;
+  /**
+   * Cancellation for the whole run (T1): checked before every model call and
+   * after every tool call, and handed to each tool so an in-flight subprocess
+   * or fetch is actually abandoned rather than merely ignored on return.
+   *
+   * Aborting rejects with the signal's reason, so a caller can tell a user
+   * cancellation from a budget expiry. Omitted, the loop runs exactly as
+   * before.
+   */
+  signal?: AbortSignal;
 }
 
 export interface RunAgentLoopResult {
@@ -81,17 +122,23 @@ const MAX_ITERATIONS = 10;
 const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /**
- * Pure size cap for a tool result. Returns `text` unchanged when it already
- * fits within `maxLen`; otherwise truncates to `maxLen` and appends a short
- * marker (so the total stays close to `maxLen`) carrying a visible truncation
- * indicator, so the model can tell content was cut rather than silently
- * receiving a partial blob.
+ * Re-exported from `./spill`, which owns tool-result bounding since T2 added
+ * the spill path beside this truncation. Kept exported here because it was
+ * this module's public helper first and is imported as such.
  */
-export function clampToolResult(text: string, maxLen: number): string {
-  if (text.length <= maxLen) {
-    return text;
+export { clampToolResult } from "./spill";
+
+/**
+ * Reject with the signal's own reason so the cause (`user` vs `budget`)
+ * survives; a bare `AbortError` would lose the distinction the caller needs
+ * to report the run honestly.
+ */
+function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new AgentCancelledError("user");
   }
-  return `${text.slice(0, maxLen)}\n...[truncated]`;
 }
 
 interface OpenAiToolCall {
@@ -113,6 +160,12 @@ function isOpenAiToolCall(value: unknown): value is OpenAiToolCall {
   );
 }
 
+/**
+ * MODEL EXPERIENCE: this function IS the message-array assembly every model
+ * request goes through (`docs/model-context-inventory.md` §1.1). Changing the
+ * order or framing here changes what every mode's model sees — update that
+ * document in the SAME change.
+ */
 function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   const userContentParts = [`TASK:`, input.task];
   if (input.context) {
@@ -120,6 +173,9 @@ function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   }
   if (input.knownTerms) {
     userContentParts.push("", input.knownTerms);
+  }
+  if (input.runtimeContext) {
+    userContentParts.push("", input.runtimeContext);
   }
 
   return [
@@ -141,7 +197,7 @@ export async function runAgentLoop(
   input: RunAgentLoopInput,
   deps: RunAgentLoopDeps
 ): Promise<RunAgentLoopResult> {
-  const { chat, tools, onProgress } = deps;
+  const { chat, tools, onProgress, spill, repeatGuard, signal } = deps;
   const maxIterations = input.maxIterations ?? MAX_ITERATIONS;
   const messages = buildInitialMessages(input);
   const steps: AgentProgressEvent[] = [];
@@ -154,9 +210,12 @@ export async function runAgentLoop(
   let lastContent: string | null = null;
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
+    // Checked BEFORE the model call, so an abort that lands between steps
+    // costs nothing: no request is issued and no tokens are spent.
+    throwIfCancelled(signal);
     emit({ type: "thinking", detail: `Thinking (step ${iteration + 1}/${maxIterations})...` });
 
-    const response = await chat(messages, { tools: tools.openAiTools });
+    const response = await chat(messages, { tools: tools.openAiTools, signal });
     lastContent = response.content ?? lastContent;
 
     const toolCalls = (response.toolCalls ?? []).filter(isOpenAiToolCall);
@@ -183,10 +242,16 @@ export async function runAgentLoop(
         const parsedArgs = toolCall.function.arguments
           ? JSON.parse(toolCall.function.arguments)
           : {};
-        const toolResult = await tools.callTool(toolCall.function.name, parsedArgs);
+        const toolResult = await tools.callTool(toolCall.function.name, parsedArgs, signal);
         toolResultContent = toolResult.content;
         emit({ type: "tool_result", detail: toolResultContent });
       } catch (err) {
+        // A cancellation is not a tool failure to report back to the model:
+        // it ends the run. Rethrowing here also stops the remaining calls in
+        // this batch from being issued.
+        if (err instanceof AgentCancelledError) {
+          throw err;
+        }
         toolResultContent = `Error calling tool ${toolCall.function.name}: ${
           err instanceof Error ? err.message : String(err)
         }`;
@@ -197,8 +262,29 @@ export async function runAgentLoop(
         role: "tool",
         tool_call_id: toolCall.id,
         name: toolCall.function.name,
-        content: clampToolResult(toolResultContent, MAX_TOOL_RESULT_CHARS),
+        content: await spillOrClamp(toolResultContent, {
+          maxInline: MAX_TOOL_RESULT_CHARS,
+          save: spill
+            ? () => spill(toolResultContent, toolCall.function.name)
+            : undefined,
+        }),
       });
+
+      // The reminder rides as its own user message AFTER the tool result,
+      // never as a replacement for that result's content: the result stays
+      // the tool's own output so the step log and any audit of it remain
+      // faithful. Observation happens for every call including denied ones --
+      // a model hammering a call the approval policy keeps refusing is
+      // exactly the loop worth breaking, and a denial arrives here as an
+      // ordinary result string.
+      const reminder = repeatGuard?.observe(
+        toolCall.function.name,
+        toolCall.function.arguments ?? ""
+      );
+      if (reminder) {
+        emit({ type: "thinking", detail: reminder });
+        messages.push({ role: "user", content: reminder });
+      }
     }
   }
 

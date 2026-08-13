@@ -4,6 +4,11 @@
  * prompts here. The polish/translate/xreply prompts that used to live in
  * this file were removed along with their endpoints when the product was
  * cut down to exactly 3 modes.
+ *
+ * MODEL EXPERIENCE: these strings reach the model verbatim. Their exact text,
+ * token cost, and KV-cache implications are catalogued in
+ * `docs/model-context-inventory.md` §2 — update it in the SAME change that
+ * edits a prompt here.
  */
 
 /**

@@ -1,6 +1,14 @@
 import type { EntityTerm, MemoryStore } from "../memory/MemoryStore";
 
 /**
+ * MODEL EXPERIENCE: everything this module returns is injected verbatim into
+ * the ask/agent user message. Exact rendered text, token cost (including the
+ * unbounded, relevance-unfiltered owner-facts line), and KV-cache impact are
+ * catalogued in `docs/model-context-inventory.md` §3.1–3.2 — update it in the
+ * SAME change that alters what is injected here.
+ */
+
+/**
  * Finds which entity terms the local MemoryStore already knows about are
  * mentioned somewhere in `relevantText`. Split out from
  * `buildKnownTermsContext` so callers that need the raw matched terms (e.g.

@@ -185,7 +185,15 @@ export function createBuiltInTools(deps: BuiltInToolsDeps): BuiltInToolSet {
     },
   ];
 
-  async function callTool(name: string, args: unknown): Promise<{ content: string }> {
+  async function callTool(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
+    // These are local SQLite operations with no interruptible await inside,
+    // so cancellation can only be honored at the boundary: refuse to start,
+    // never abandon a half-written record.
+    signal?.throwIfAborted();
     switch (name) {
       case REMEMBER_FACT_TOOL_NAME:
         return handleRememberFact(deps.store, args);

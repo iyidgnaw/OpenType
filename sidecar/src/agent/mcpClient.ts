@@ -25,7 +25,11 @@ interface OpenAiFunctionTool {
 
 export interface McpToolSet {
   openAiTools: unknown[];
-  callTool: (name: string, args: unknown) => Promise<{ content: string }>;
+  callTool: (
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ) => Promise<{ content: string }>;
 }
 
 interface McpToolDescriptor {
@@ -42,7 +46,11 @@ interface McpToolDescriptor {
 export interface McpClientLike {
   connect(transport: unknown): Promise<void>;
   listTools(): Promise<{ tools: McpToolDescriptor[] }>;
-  callTool(params: { name: string; arguments?: unknown }): Promise<{ content: unknown }>;
+  callTool(
+    params: { name: string; arguments?: unknown },
+    resultSchema?: unknown,
+    options?: { signal?: AbortSignal }
+  ): Promise<{ content: unknown }>;
 }
 
 /**
@@ -157,15 +165,26 @@ export async function connectConfiguredMcpServers(
     }
   }
 
-  async function callTool(name: string, args: unknown): Promise<{ content: string }> {
+  async function callTool(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
     const route = routes.get(name);
     if (!route) {
       throw new Error(`Unknown MCP tool: ${name}`);
     }
-    const result = await route.client.callTool({
-      name: route.originalName,
-      arguments: args as Record<string, unknown> | undefined,
-    });
+    // The MCP SDK takes cancellation through its per-request options, which
+    // is how an in-flight remote call is actually abandoned rather than just
+    // ignored on return.
+    const result = await route.client.callTool(
+      {
+        name: route.originalName,
+        arguments: args as Record<string, unknown> | undefined,
+      },
+      undefined,
+      signal ? { signal } : undefined
+    );
     return { content: stringifyToolResultContent(result.content) };
   }
 

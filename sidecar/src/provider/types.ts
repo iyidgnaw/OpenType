@@ -19,6 +19,12 @@ export interface ProviderChatMessage {
 
 export interface ProviderChatOptions {
   tools?: unknown[];
+  /**
+   * Caller cancellation for this request, fused with the provider's own
+   * timeout (T1). Lets an agent run abandon an in-flight model call instead
+   * of paying for a completion nobody will read.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ProviderChatResult {

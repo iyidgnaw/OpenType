@@ -133,6 +133,10 @@ async function main() {
   // The approval seam wraps the *merged* set so built-in memory tools, core
   // tools, and MCP tools all flow through the same gate; v2 ships only the
   // always-allow YOLO policy (see agent/approval.ts for the swap-in seam).
+  // No guards are registered: the YOLO stance is unchanged (T6 added the
+  // guard SEAM and its monotonicity, not a policy). The audit sink is left
+  // unset here because the approval pair belongs to a run, and only the agent
+  // route knows which run a call belongs to.
   const tools = withApproval(mergeToolSets(builtInTools, coreTools, mcpTools), yoloApprovalPolicy);
   const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
 

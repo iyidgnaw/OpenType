@@ -36,13 +36,17 @@ function makeRecordingToolSet(
 }
 
 describe("yoloApprovalPolicy", () => {
-  test("approves any tool name and any args with { allowed: true }", async () => {
+  // T6 replaced the two-valued `{ allowed }` decision with the closed
+  // fail-closed outcome vocabulary (see approvalVocabulary.test.ts): the
+  // grant is now a named value rather than a boolean, so that a denial can
+  // say WHICH kind of denial it is.
+  test("approves any tool name and any args with 'allowed-once'", async () => {
     await expect(
       yoloApprovalPolicy.approve("opentype__bash", { command: "rm -rf /tmp/whatever" })
-    ).resolves.toEqual({ allowed: true });
+    ).resolves.toBe("allowed-once");
     await expect(
       yoloApprovalPolicy.approve("some_mcp_server__anything", null)
-    ).resolves.toEqual({ allowed: true });
+    ).resolves.toBe("allowed-once");
   });
 });
 
@@ -71,9 +75,7 @@ describe("withApproval", () => {
 
   test("on a denying policy, the wrapped tool is never invoked and the denial resolves as { content }", async () => {
     const { set, calls } = makeRecordingToolSet(["opentype__bash"]);
-    const denyAll: ApprovalPolicy = {
-      approve: async () => ({ allowed: false, reason: "not on my watch" }),
-    };
+    const denyAll: ApprovalPolicy = { approve: async () => "rejected" };
     const wrapped = withApproval(set, denyAll);
 
     // Per design §1: "a denial surfaces to the model as a tool-error result,
@@ -82,7 +84,12 @@ describe("withApproval", () => {
 
     expect(calls).toHaveLength(0);
     expect(result.content).toMatch(/denied/i);
-    expect(result.content).toContain("not on my watch");
+    // T6: the outcome is a closed value, so the denial no longer carries the
+    // policy's own free text. Free-text reasons did not disappear -- they
+    // moved to `ToolGuard`, which is the layer that HAS a specific reason to
+    // give ("denied by a guard: <why>"). An approval outcome answers "may
+    // this proceed", not "explain yourself".
+    expect(result.content).toContain("the user denied it");
   });
 
   test("the policy receives the tool name and parsed args of the call", async () => {
@@ -91,7 +98,7 @@ describe("withApproval", () => {
     const recordingPolicy: ApprovalPolicy = {
       approve: async (toolName, args) => {
         seen.push({ name: toolName, args });
-        return { allowed: true };
+        return "allowed-once";
       },
     };
     const wrapped = withApproval(set, recordingPolicy);

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum InputMode: String, CaseIterable, Codable, Identifiable {
@@ -131,12 +132,17 @@ struct ReviewPanelState: Equatable {
     let originalTranscript: String
 }
 
-/// Drives the floating "Ask"/"Agent" popup (`AskPanelController`) introduced
-/// alongside the 3-mode cut: `nil` means the popup is hidden, non-nil means
-/// it's showing, and `answer == nil` means it's still in the "thinking"
-/// state. `AppModel.process(audioURL:)` sets this right before issuing the
-/// `/oneshot/ask` or `/agent/run` sidecar call, and fills in `answer` once
-/// the response arrives.
+/// The ask side of the unified voice surface (`VoiceSurfaceState`), which is
+/// derived from it: `nil` means no live ask, non-nil means one is on screen,
+/// and `answer == nil` means it's still in the "thinking" state.
+/// `AppModel.process(audioURL:)` sets this right before issuing the
+/// `/oneshot/ask` sidecar call, and fills in `answer` once the response
+/// arrives (including an error, delivered as answer text). `Kind` is also the
+/// surface's own ask/agent discriminator — see `VoiceSurfaceState`.
+///
+/// Was originally the model behind a separate center-screen popup
+/// (`AskPanelController`); that window is gone, but the state stayed, because
+/// it is what `runAskDispatch` guards its late-answer delivery on.
 struct AskPanelState: Equatable {
     enum Kind: Equatable {
         case ask
@@ -172,14 +178,15 @@ struct SidecarAgentProgressEvent: Decodable, Equatable {
     let detail: String
 }
 
-/// Drives the floating Agent progress panel
-/// (`AgentProgressPanelController`), the top-right live feedback surface for
-/// an in-flight `/agent/run` (spec:
-/// docs/superpowers/specs/2026-08-13-agent-progress-panel-design.md). Same
-/// ownership split as `AskPanelState`/`AskPanelController`: `AppModel` is the
-/// single source of truth (`agentPanelState`; `nil` hides the panel), the
-/// controller mirrors it. The panel always shows the most recently
-/// dispatched run — a newer dispatch replaces this state wholesale.
+/// The agent side of the unified voice surface: live feedback for an
+/// in-flight `/agent/run` (spec:
+/// docs/superpowers/specs/2026-08-13-agent-progress-panel-design.md for the
+/// transport/state half, which the HUD-morph spec explicitly retains; that
+/// spec's separate top-right window is gone). `AppModel` is the single source
+/// of truth (`agentPanelState`; `nil` means nothing to show), and
+/// `VoiceSurfaceState.reduce(...)` derives what the panel renders from it.
+/// The surface always shows the most recently dispatched run — a newer
+/// dispatch replaces this state wholesale.
 struct AgentProgressPanelState: Equatable {
     enum Phase: Equatable {
         case running
@@ -223,6 +230,211 @@ struct AgentProgressPanelState: Equatable {
     /// while the displayed run is still `.running`.
     static func shouldContinuePolling(for phase: Phase) -> Bool {
         phase == .running
+    }
+}
+
+// MARK: - Unified voice surface
+
+/// The single state machine behind the unified voice surface — the one
+/// bottom-center `NSPanel` (`OverlayController`) that now covers the whole
+/// ask/agent lifecycle, from the live-caption pill through "thinking" to the
+/// result card it morphs into (spec:
+/// `docs/superpowers/specs/2026-08-13-hud-morph-result-surface-design.md` §1).
+/// It replaced the center-screen Ask popup and the top-right Agent progress
+/// panel, both of which are gone.
+///
+/// This type is pure state: `AppModel` derives it from what it already owns
+/// (`reduce(mode:processing:ask:agent:)`) and hands it to the controller,
+/// which never decides anything itself. `transcribe` mode is deliberately
+/// outside this machine — it keeps the legacy HUD/toast path and the Review
+/// panel — so the reducer maps it to `.hidden` unconditionally.
+enum VoiceSurfaceState: Equatable {
+    /// Nothing for this surface to show; the legacy HUD/toast path owns the
+    /// panel (all of transcribe mode, plus ask/agent with no live run).
+    case hidden
+    /// The existing live-caption pill, unchanged.
+    case listening
+    /// ASR in flight: the pill stays, with breathing dots in place of the
+    /// waveform.
+    case processing
+    /// The LLM/agent is working: dots continue, plus (agent only) a one-line
+    /// live step ticker.
+    case working(WorkingDetail)
+    /// The panel has grown into the result card.
+    case result(ResultCard)
+    /// The same card, showing a failed agent run.
+    case failed(ResultCard)
+
+    /// Payload of `.working`. `currentStep` is the agent's live one-liner
+    /// (the last step that arrived, `nil` before the first one); it is always
+    /// `nil` for ask, which per spec §4 gets a generic indicator with no
+    /// per-step display.
+    struct WorkingDetail: Equatable {
+        var kind: AskPanelState.Kind
+        var currentStep: String?
+    }
+
+    /// Payload of `.result`/`.failed`. `body` is **Markdown source** — the
+    /// card renders it through `AssistantMarkdownView`, nothing is
+    /// pre-rendered here. `steps` backs the collapsible agent step list and
+    /// is always empty for ask.
+    struct ResultCard: Equatable {
+        var kind: AskPanelState.Kind
+        var query: String
+        var body: String
+        var steps: [AgentProgressStep]
+    }
+
+    /// Derives the surface from what `AppModel` already owns. Evaluated in a
+    /// documented order:
+    ///
+    /// 1. `transcribe` → `.hidden`, unconditionally (it keeps the legacy HUD,
+    ///    the Review panel, and the toast states).
+    /// 2. `.listening` → `.listening`, **even with a live panel state**: a new
+    ///    recording resets the surface to the pill while an in-flight agent
+    ///    run keeps running in the background (its `AgentProgressPanelState`
+    ///    must survive, since that state is what drives progress polling).
+    /// 3. Otherwise the panel state **for the active mode** wins over
+    ///    `ProcessingState` — the run has outlived the recording, and
+    ///    `process(audioURL:)` drops back to `.idle`/`.dispatched` while the
+    ///    run is still in flight. Only the active mode's panel state is
+    ///    consulted, so a stale panel from the other mode can't leak in.
+    /// 4. No panel state for the active mode + `.transcribing`/`.transforming`
+    ///    → `.processing` (ASR in flight, plus the hand-off window,
+    ///    defensively).
+    /// 5. Everything else → `.hidden`.
+    static func reduce(
+        mode: InputMode,
+        processing: ProcessingState,
+        ask: AskPanelState?,
+        agent: AgentProgressPanelState?
+    ) -> VoiceSurfaceState {
+        // 1. transcribe never uses this surface.
+        guard mode != .transcribe else { return .hidden }
+
+        // 2. A new recording always wins: the user is speaking and needs the
+        //    live-caption pill, even if a previous run is still live.
+        if processing == .listening { return .listening }
+
+        // 3. The active mode's run outranks a lingering ProcessingState.
+        switch mode {
+        case .transcribe:
+            return .hidden
+        case .ask:
+            if let ask {
+                guard let answer = ask.answer else {
+                    return .working(WorkingDetail(kind: .ask, currentStep: nil))
+                }
+                // An empty-string answer is still an answer (and an ask
+                // failure arrives as answer text), so the split is
+                // `answer == nil`, never `answer?.isEmpty`.
+                return .result(
+                    ResultCard(kind: .ask, query: ask.query, body: answer, steps: [])
+                )
+            }
+        case .agent:
+            if let agent {
+                let card = ResultCard(
+                    kind: .agent,
+                    query: agent.task,
+                    // A malformed completion still shows the task + step list
+                    // instead of vanishing.
+                    body: agent.result ?? "",
+                    steps: agent.steps
+                )
+                switch agent.phase {
+                case .running:
+                    return .working(
+                        WorkingDetail(kind: .agent, currentStep: agent.steps.last?.detail)
+                    )
+                case .succeeded:
+                    return .result(card)
+                case .failed:
+                    return .failed(card)
+                }
+            }
+        }
+
+        // 4/5. No live run for this mode: only the genuinely in-flight
+        //      ASR/hand-off states render anything.
+        switch processing {
+        case .transcribing, .transforming:
+            return .processing
+        default:
+            return .hidden
+        }
+    }
+
+    /// Clicking outside dismisses only a finished card. While `.working` the
+    /// user must be able to click away and keep working during a long agent
+    /// run without killing the surface.
+    var allowsClickOutsideDismiss: Bool {
+        switch self {
+        case .result, .failed:
+            return true
+        case .hidden, .listening, .processing, .working:
+            return false
+        }
+    }
+
+    /// What dismissing this state must do beyond hiding the panel. Only a
+    /// still-thinking ask is cancelled (today's `dismissAskPanel`
+    /// ghost-answer semantics); dismissing an agent run NEVER cancels it.
+    var dismissalEffect: VoiceSurfaceDismissalEffect {
+        switch self {
+        case .working(let detail) where detail.kind == .ask:
+            return .cancelAsk
+        case .hidden, .listening, .processing, .working, .result, .failed:
+            return .none
+        }
+    }
+}
+
+/// The side effect of dismissing a `VoiceSurfaceState` — see
+/// `VoiceSurfaceState.dismissalEffect`.
+enum VoiceSurfaceDismissalEffect: Equatable {
+    /// Abort the in-flight `/oneshot/ask` so a late "ghost answer" can't
+    /// clobber the clipboard after the user moved on.
+    case cancelAsk
+    /// Just hide. Notably the agent case: the run, its clipboard delivery,
+    /// its completion notification, its audit events, and its Agent-tab entry
+    /// all continue untouched.
+    case none
+}
+
+/// Bottom-center-anchored geometry for the unified voice surface's single
+/// panel. Pure namespace enum (precedent: `OutputDeliveryPolicy`,
+/// `OnboardingPolicy`) so the frame math is unit-testable without a screen.
+///
+/// The bottom edge is FIXED across every state and the card grows upward,
+/// which is what makes `setFrame(_:display:animate:)` read as the pill
+/// morphing into the card rather than as a new window appearing.
+enum VoiceSurfacePanelLayout {
+    /// The same 54pt bottom margin the HUD has always used.
+    static let bottomMargin: CGFloat = 54
+
+    static func frame(for size: CGSize, visibleFrame: CGRect) -> CGRect {
+        CGRect(
+            x: visibleFrame.midX - size.width / 2,
+            y: visibleFrame.minY + bottomMargin,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    /// The spec §1 size table.
+    static func size(for state: VoiceSurfaceState) -> CGSize {
+        switch state {
+        case .hidden:
+            return .zero
+        case .listening, .processing:
+            return CGSize(width: 388, height: 96)
+        case .working:
+            // Slightly taller than the pill: room for the step-ticker line.
+            return CGSize(width: 388, height: 120)
+        case .result, .failed:
+            return CGSize(width: 620, height: 480)
+        }
     }
 }
 

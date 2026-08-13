@@ -993,7 +993,7 @@ private struct ConversationListRow: View {
 /// Shared thread view for both the Q&A and Agent tabs: a back/"new
 /// conversation" header plus a scrollable list of user/assistant bubbles
 /// (`ConversationBubble`), matching this app's existing floating-panel chat
-/// look (`AskPanelController.swift`'s `AskPanelView`) rather than inventing a
+/// look (`OverlayController.swift`'s voice-surface card) rather than inventing a
 /// new visual language. `detail == nil` means the fetch
 /// (`AppModel.openAskConversation(_:)`/`openAgentConversation(_:)`) is still
 /// in flight.
@@ -1054,6 +1054,11 @@ private struct ConversationThreadView: View {
     }
 }
 
+/// One message in a Q&A/Agent thread. Assistant messages render as Markdown
+/// (`AssistantMarkdownView`) — Ask answers and Agent results come back
+/// GitHub-flavored, so a bare `Text` showed raw `##`/`|`/``` ``` `` noise. The
+/// user's own turn stays a plain `Text`: it is transcribed speech, not
+/// Markdown, and parsing it would mangle stray `*`/`#` characters.
 private struct ConversationBubble: View {
     let message: ConversationMessageSummary
 
@@ -1063,17 +1068,24 @@ private struct ConversationBubble: View {
         HStack {
             if isUser { Spacer(minLength: 36) }
 
-            Text(message.content)
-                .font(.system(size: 12))
-                .foregroundStyle(isUser ? Color.white : Color.primary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .background(
-                    isUser ? Color.accentColor : OpenTypeTheme.surface,
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
+            Group {
+                if isUser {
+                    Text(message.content)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.white)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    AssistantMarkdownView(markdown: message.content, fontSize: 12)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                isUser ? Color.accentColor : OpenTypeTheme.surface,
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
 
             if !isUser { Spacer(minLength: 36) }
         }

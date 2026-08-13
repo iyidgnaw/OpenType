@@ -3,6 +3,18 @@
 Status: approved design (owner request, 2026-08-13 session — "说完话 agent
 就去执行,我还得点开主程序才能看到结果,这不太对;现在反馈很少").
 
+> **Presentation layer superseded** by
+> `2026-08-13-hud-morph-result-surface-design.md` (same session, later
+> decision): the separate top-right window and `AgentProgressPanelController`
+> are **deleted**; the live step ticker and result now render in the one
+> bottom-center unified voice surface (`OverlayController` +
+> `VoiceSurfaceState`), shared with `ask`. Everything else in this spec —
+> the sidecar progress registry and `GET /agent/progress/:runId`,
+> `SidecarClient.agentProgress`, `AgentProgressPanelState` with its
+> `steps(fromProgressEvents:)`/`shouldContinuePolling(for:)` seams, and
+> `AppModel`'s polling loop — is **retained and reused unchanged**. Read §2's
+> transport/state half as current; read §1's window geometry as history.
+
 ## 0. Problem
 
 Agent mode today gives almost no feedback: after ASR the HUD flashes a

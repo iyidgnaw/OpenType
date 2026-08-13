@@ -248,7 +248,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 }
 
 /// The real, resizable app window from Part A of the Alfred-style menubar
-/// split. Distinct from `OverlayController`/`AskPanelController`'s borderless
+/// split. Distinct from `OverlayController`/`ReviewPanelController`'s borderless
 /// `.nonactivatingPanel`s (transient HUD-style feedback) — this is a normal
 /// titled window with standard close/miniaturize/resize chrome, since it
 /// hosts content (Settings, History, Memory panel, Agent Task List) the user

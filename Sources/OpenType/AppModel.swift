@@ -88,13 +88,15 @@ final class AppModel: ObservableObject {
     /// fresh conversation, same as today's one-shot behavior.
     @Published var focusedAskConversationId: Int?
     @Published var focusedAgentConversationId: Int?
-    /// Drives the floating Ask/Agent popup (`AskPanelController`). `nil`
-    /// hides it; non-nil shows it; `answer == nil` is the "thinking" state.
-    /// The `didSet` keeps `askPanel` (an imperative `NSPanel` owner, not an
-    /// `ObservableObject` itself — same split as `overlay`/`OverlayController`)
-    /// in sync with this single source of truth.
+    /// The ask side of the unified voice surface. `nil` means no live ask;
+    /// non-nil with `answer == nil` is the "thinking" state, and an answer
+    /// resolves it into the result card. Still a first-class source of truth
+    /// (not folded into `VoiceSurfaceState`) because it is what
+    /// `runAskDispatch` guards its late-answer delivery on; the surface is
+    /// *derived* from it by `VoiceSurfaceState.reduce(...)`, which the
+    /// `didSet` re-runs through `presentVoiceSurface()`.
     @Published private(set) var askPanelState: AskPanelState? {
-        didSet { syncAskPanel() }
+        didSet { presentVoiceSurface() }
     }
     /// Drives the floating Review panel (`ReviewPanelController`) — see
     /// `ReviewPanelState`'s doc comment. `nil` hides it; non-nil shows it.
@@ -102,13 +104,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var reviewPanelState: ReviewPanelState? {
         didSet { syncReviewPanel() }
     }
-    /// Drives the top-right Agent progress panel
-    /// (`AgentProgressPanelController`) — see `AgentProgressPanelState`'s doc
-    /// comment. `nil` hides it; non-nil shows it (set the moment an Agent run
-    /// is dispatched, replaced wholesale by a newer dispatch). Same
-    /// imperative-controller-sync split as `askPanelState`/`askPanel`.
+    /// The agent side of the unified voice surface — see
+    /// `AgentProgressPanelState`'s doc comment. `nil` means no run is being
+    /// shown; non-nil is set the moment a run is dispatched and replaced
+    /// wholesale by a newer dispatch. It also drives progress polling, which
+    /// is why the reducer never requires it to be cleared. Same derived-view
+    /// split as `askPanelState`.
     @Published private(set) var agentPanelState: AgentProgressPanelState? {
-        didSet { syncAgentPanel() }
+        didSet { presentVoiceSurface() }
     }
     /// The sidecar's `/config/status` view of whether the user has
     /// explicitly finished configuring a Whisper backend and an LLM
@@ -171,10 +174,12 @@ final class AppModel: ObservableObject {
     private let liveSpeechTranscriber = LiveSpeechTranscriber()
     private let contextBridge = ContextBridge()
     private let hotKey = GlobalHotKey()
+    /// The one floating bottom-center panel: transcribe's HUD/toasts *and*
+    /// the unified ask/agent voice surface (`VoiceSurfaceState`). The
+    /// center-screen Ask popup and the top-right Agent progress panel it
+    /// replaced are gone.
     private let overlay = OverlayController()
-    private let askPanel = AskPanelController()
     private let reviewPanel = ReviewPanelController()
-    private let agentProgressPanel = AgentProgressPanelController()
     private var customSounds: [String: NSSound] = [:]
     private var activeFeedbackSound: NSSound?
     private var capturedContext = CapturedContext(
@@ -185,12 +190,12 @@ final class AppModel: ObservableObject {
     private var processingTask: Task<Void, Never>?
     /// The detached, non-blocking `/oneshot/ask` request (see `dispatchAskRun`).
     /// Tracked separately from `processingTask` so an in-flight Ask answer does
-    /// not hold the recording pipeline busy, and so dismissing the Ask popup
-    /// (`dismissAskPanel`) can abort just this request without touching an
+    /// not hold the recording pipeline busy, and so dismissing a still-thinking
+    /// ask (`dismissAskPanel`) can abort just this request without touching an
     /// unrelated recording/processing task.
     private var askTask: Task<Void, Never>?
-    /// The ~0.7s `GET /agent/progress/:runId` polling loop feeding the Agent
-    /// progress panel's live step feed (see `startAgentProgressPolling`).
+    /// The ~0.7s `GET /agent/progress/:runId` polling loop feeding the voice
+    /// surface's live step ticker (see `startAgentProgressPolling`).
     /// There is at most one: it always serves the most recently dispatched
     /// run (the one `agentPanelState` shows), and a newer dispatch replaces
     /// it. Cancelling it never cancels the run itself — the detached
@@ -319,14 +324,14 @@ final class AppModel: ObservableObject {
             enabled: self.configuration.agentMemoryEnabled
                 && self.configuration.automaticOwnerProfileUpdates
         )
-        self.askPanel.onRequestDismiss = { [weak self] in
-            self?.askPanelState = nil
+        self.overlay.onRequestDismiss = { [weak self] in
+            self?.dismissVoiceSurface()
         }
-        self.agentProgressPanel.onRequestDismiss = { [weak self] in
-            self?.dismissAgentPanel()
+        self.overlay.onCopyResult = { [weak self] text in
+            self?.copy(text)
         }
-        self.agentProgressPanel.onOpenMainWindow = { [weak self] in
-            self?.openMainWindowFromAgentPanel()
+        self.overlay.onOpenMainWindow = { [weak self] in
+            self?.openMainWindowFromVoiceSurface()
         }
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
@@ -653,8 +658,11 @@ final class AppModel: ObservableObject {
         hotKey.setRecordingActive(false)
         audioRecorder.cancel()
         liveSpeechTranscriber.stop()
+        // `setState(.idle)` re-runs the reducer, which hides the HUD outright
+        // when nothing is live and keeps a still-running agent's surface up
+        // when one is — so no explicit `overlay.hide()` here, which would
+        // otherwise tear down a surface the run still owns.
         setState(.idle)
-        overlay.hide()
     }
 
     /// Discards whatever voice activity is currently in flight, wired to the
@@ -682,7 +690,24 @@ final class AppModel: ObservableObject {
     }
 
     func selectMode(_ mode: InputMode) {
+        // The surface is derived from the mode, so a switch has to re-derive
+        // it. A *settled* card is retired outright rather than left live but
+        // invisible: it belongs to an interaction the user has moved on from,
+        // and leaving it would both pop it back the next time they returned to
+        // its mode and leave the panel showing a card the reducer no longer
+        // agrees is there (which is what would make it undismissable —
+        // dismissal routes through the reducer too). A still-working run keeps
+        // its state, its polling, and its surface.
+        switch currentVoiceSurfaceState() {
+        case .result, .failed:
+            hideVoiceSurface()
+        case .hidden, .listening, .processing, .working:
+            break
+        }
         configuration.selectedMode = mode
+        presentVoiceSurface()
+        // Preempts a still-working run's pill for its 1.2s and restores it
+        // afterwards, so switching modes mid-run still confirms the switch.
         overlay.show(state: .modeChanged, mode: mode)
     }
 
@@ -946,58 +971,127 @@ final class AppModel: ObservableObject {
         agentConversationDetail = nil
     }
 
-    /// Explicit dismissal entry point for the Ask/Agent popup, in addition to
-    /// the panel's own close button / Escape / click-outside handling.
+    /// Explicit dismissal entry point for a live Ask, in addition to the
+    /// voice surface's own close button / Escape / click-outside handling.
     func dismissAskPanel() {
         // Abort any in-flight Ask request so a late answer can't overwrite the
-        // clipboard or re-populate a popup the user just closed (P1-10 "ghost
-        // answer"). The SidecarClient transport propagates this cancellation
-        // down to the underlying curl process.
+        // clipboard or re-populate a surface the user just closed (P1-10
+        // "ghost answer"). The SidecarClient transport propagates this
+        // cancellation down to the underlying curl process.
         askTask?.cancel()
         askTask = nil
         askPanelState = nil
     }
 
-    private func syncAskPanel() {
-        if let askPanelState {
-            askPanel.show(askPanelState)
-        } else {
-            askPanel.hide()
-        }
-    }
-
-    private func syncAgentPanel() {
-        if let agentPanelState {
-            agentProgressPanel.show(agentPanelState)
-        } else {
-            agentProgressPanel.hide()
-        }
-    }
-
-    /// Dismisses the Agent progress panel (close button, Escape, or the
-    /// 打开主窗口 button after it opened the main window) and stops progress
-    /// polling. Deliberately does NOT cancel the run itself: the detached
-    /// `/agent/run` task keeps going, and every existing delivery path
-    /// (clipboard + completion notification + Agent tab/conversation) is
-    /// untouched — the panel is a view over the run, not its owner.
+    /// Takes the Agent run off the voice surface and stops progress polling.
+    /// Deliberately does NOT cancel the run itself: the detached `/agent/run`
+    /// task keeps going, and every existing delivery path (clipboard +
+    /// completion notification + audit trail + Agent tab/conversation) is
+    /// untouched — the surface is a view over the run, not its owner.
     func dismissAgentPanel() {
         agentProgressPollTask?.cancel()
         agentProgressPollTask = nil
         agentPanelState = nil
     }
 
-    /// The 打开主窗口 button: routes through the same
+    // MARK: - Unified voice surface
+
+    /// The mode the surface is currently speaking for: the mode locked in by
+    /// the active recording if there is one, otherwise the mode of the run
+    /// that is still on the surface, otherwise the selected mode.
+    private var voiceSurfaceMode: InputMode {
+        activeMode ?? surfaceRunMode ?? configuration.selectedMode
+    }
+
+    /// The mode of the run currently occupying the surface, when that is
+    /// unambiguous. A dispatched run outlives `activeMode` (cleared by
+    /// `process(audioURL:)`'s `defer`) and need not match `selectedMode` at
+    /// all: `VoiceModeRouter` can route a recording into `.agent` from any
+    /// mode, and the practice flow forces `.ask`. Without this the surface
+    /// would be re-derived for a mode that owns nothing the moment the
+    /// recording ends — a voice-routed Agent run's ticker and result card
+    /// would vanish on the next poll tick. When both sides are live the
+    /// selected mode arbitrates, which is the same "the active mode picks"
+    /// rule the reducer itself applies.
+    private var surfaceRunMode: InputMode? {
+        switch (askPanelState, agentPanelState) {
+        case (.some, nil): return .ask
+        case (nil, .some): return .agent
+        case (.some, .some), (nil, nil): return nil
+        }
+    }
+
+    /// The surface state as the reducer sees it right now — the single
+    /// derivation used both for rendering and for deciding what a dismissal
+    /// must do.
+    private func currentVoiceSurfaceState() -> VoiceSurfaceState {
+        VoiceSurfaceState.reduce(
+            mode: voiceSurfaceMode,
+            processing: state,
+            ask: askPanelState,
+            agent: agentPanelState
+        )
+    }
+
+    /// Pushes the freshly-reduced surface to the one floating panel. Called
+    /// after anything that can change it: a `ProcessingState` transition, an
+    /// ask answer landing, a polled agent step, a run settling, a dismissal.
+    /// A `.hidden` result hands the panel back to the legacy transcribe
+    /// HUD/toast path inside `OverlayController`.
+    private func presentVoiceSurface() {
+        overlay.apply(
+            currentVoiceSurfaceState(),
+            state: state,
+            mode: voiceSurfaceMode
+        )
+    }
+
+    /// Escape, the 关闭 button, or a click outside a finished card. Routes
+    /// through `VoiceSurfaceState.dismissalEffect`, so only a still-thinking
+    /// ask is cancelled — dismissing an agent run never cancels it.
+    func dismissVoiceSurface() {
+        switch currentVoiceSurfaceState().dismissalEffect {
+        case .cancelAsk:
+            dismissAskPanel()
+        case .none:
+            hideVoiceSurface()
+        }
+    }
+
+    /// Clears whichever panel state is feeding the surface for the active
+    /// mode, without cancelling anything. Mirrors the reducer's
+    /// active-mode-only rule so dismissing an ask card can't also take down a
+    /// long agent run still ticking in the background.
+    private func hideVoiceSurface() {
+        switch voiceSurfaceMode {
+        case .ask:
+            askPanelState = nil
+        case .agent:
+            dismissAgentPanel()
+        case .transcribe:
+            break
+        }
+    }
+
+    /// The 打开主窗口 button. For agent it routes through the same
     /// open-main-window-to-Agent-tab path a tapped completion notification
-    /// uses (`focusAgentRun(_:)` — the panel's `runId` is the
-    /// `AgentRunRecord.id` it was dispatched with), then dismisses the panel.
-    private func openMainWindowFromAgentPanel() {
-        if let state = agentPanelState, let runID = UUID(uuidString: state.runId) {
-            focusAgentRun(runID)
-        } else {
-            selectedTab = .agent
+    /// uses (`focusAgentRun(_:)` — the surface's `runId` is the
+    /// `AgentRunRecord.id` it was dispatched with); for ask it opens the Q&A
+    /// tab. Either way the surface then goes away.
+    private func openMainWindowFromVoiceSurface() {
+        switch voiceSurfaceMode {
+        case .agent:
+            if let state = agentPanelState, let runID = UUID(uuidString: state.runId) {
+                focusAgentRun(runID)
+            } else {
+                selectedTab = .agent
+                openMainWindow()
+            }
+        case .ask, .transcribe:
+            selectedTab = .qa
             openMainWindow()
         }
-        dismissAgentPanel()
+        hideVoiceSurface()
     }
 
     private func syncReviewPanel() {
@@ -1359,7 +1453,7 @@ final class AppModel: ObservableObject {
     /// `AskRequestBody`'s, keyed off the Agent tab's focused thread instead.
     /// `runId` is the client-generated id (the `AgentRunRecord.id`'s UUID
     /// string) that keys the sidecar's live progress registry, so the
-    /// progress panel can poll `GET /agent/progress/:runId` while this
+    /// Swift side can poll `GET /agent/progress/:runId` while this
     /// blocking call is still running.
     private struct AgentRunRequestBody: Encodable { let task: String; let context: String?; let conversationId: Int?; let runId: String? }
     private struct AgentRunResponseBody: Decodable {
@@ -1739,19 +1833,21 @@ final class AppModel: ObservableObject {
                     result = nil
                 } else {
                     // Pure ASR passthrough: no sidecar/LLM call at all, and
-                    // no Ask popup — the transcript itself is the result.
+                    // no voice surface — the transcript itself is the result.
                     result = transcript
                 }
             case .ask:
                 // Non-blocking dispatch, mirroring `.agent`/`dispatchAgentRun`
-                // below: show the popup in its "thinking" state immediately,
-                // then hand the `/oneshot/ask` call off to a detached task
+                // below: assigning `askPanelState` puts the unified voice
+                // surface into its "thinking" state immediately, then the
+                // `/oneshot/ask` call is handed off to a detached task
                 // (`dispatchAskRun`) that is never awaited here, so a slow LLM
                 // answer can't hold the whole recording pipeline busy — the
                 // user can start a new recording while an answer is in flight.
-                // The answer is delivered to the popup + clipboard when it
-                // returns; dismissing the popup (`dismissAskPanel`) cancels the
-                // task so no "ghost answer" can arrive after the user moved on.
+                // The answer is delivered to the surface's result card +
+                // clipboard when it returns; dismissing a still-thinking ask
+                // cancels the task so no "ghost answer" can arrive after the
+                // user moved on.
                 effectiveTextModel = sidecarTextModel
                 askPanelState = AskPanelState(kind: .ask, query: transcript, answer: nil)
                 dispatchAskRun(
@@ -1768,13 +1864,13 @@ final class AppModel: ObservableObject {
                 // `/agent/run` call runs as an independent, detached `Task`
                 // that is never awaited here, so a slow multi-step Agent
                 // loop can't hold the app's general recording pipeline busy.
-                // Live feedback comes from the top-right Agent progress
-                // panel (`agentPanelState`/`AgentProgressPanelController`),
-                // shown by `dispatchAgentRun` the moment the task is handed
-                // off and fed by polling `GET /agent/progress/:runId`;
+                // Live feedback comes from the unified voice surface
+                // (`agentPanelState` -> `VoiceSurfaceState`), put into its
+                // working state by `dispatchAgentRun` the moment the task is
+                // handed off and fed by polling `GET /agent/progress/:runId`;
                 // completion is additionally surfaced via a
                 // `UNUserNotification` plus the Agent tab, and dismissing
-                // the panel never cancels the run.
+                // the surface never cancels the run.
                 effectiveTextModel = sidecarTextModel
                 dispatchAgentRun(
                     transcript: transcript,
@@ -1947,7 +2043,7 @@ final class AppModel: ObservableObject {
     /// and returns immediately — the Ask-mode counterpart of `dispatchAgentRun`
     /// (P1-11). The `/oneshot/ask` call is tracked in `askTask` (never awaited
     /// by `process(audioURL:)`), so a slow answer can't hold the recording
-    /// pipeline busy and dismissing the popup can abort it cleanly.
+    /// pipeline busy and dismissing the surface can abort it cleanly.
     private func dispatchAskRun(
         transcript: String,
         context: CapturedContext,
@@ -1972,9 +2068,9 @@ final class AppModel: ObservableObject {
     }
 
     /// The detached unit of work started by `dispatchAskRun`: issues the
-    /// `/oneshot/ask` call, then delivers the answer to the popup + clipboard
-    /// and records history/memory/audit — all independent of whatever `state`
-    /// the app has moved on to. A cancellation (popup dismissed, or superseded
+    /// `/oneshot/ask` call, then delivers the answer to the voice surface +
+    /// clipboard and records history/memory/audit — all independent of whatever
+    /// `state` the app has moved on to. A cancellation (surface dismissed, or superseded
     /// by a newer Ask) drops silently without touching the clipboard, so a
     /// late "ghost answer" can never overwrite what the user is doing now.
     private func runAskDispatch(
@@ -2008,7 +2104,7 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
             let result = response.result
 
-            // Only surface into the popup if it's still showing this same
+            // Only deliver into the surface if it's still showing this same
             // question awaiting an answer — the user may have dismissed it or
             // moved on to another Ask in the meantime.
             if var current = askPanelState,
@@ -2098,9 +2194,10 @@ final class AppModel: ObservableObject {
             )
         } catch {
             let message = ErrorMessagePresenter.message(for: error)
-            // Surface the failure inside the popup (rather than clobbering the
-            // global overlay, which may now be showing an unrelated recording)
-            // so the user is never left staring at a "thinking…" spinner.
+            // Deliver the failure as the answer text, so the surface resolves
+            // into a result card instead of leaving the user staring at a
+            // "thinking…" indicator forever. (This is why the reducer has no
+            // ask-side `.failed` case — see `VoiceSurfaceState`.)
             if var current = askPanelState,
                current.kind == .ask,
                current.query == transcript,
@@ -2153,9 +2250,9 @@ final class AppModel: ObservableObject {
 
         let runID = record.id
 
-        // Show the progress panel immediately — before the call is even
-        // issued — so the user gets live feedback the moment the task is
-        // dispatched. The panel always shows the most recently dispatched
+        // Put the voice surface into its working state immediately — before
+        // the call is even issued — so the user gets live feedback the moment
+        // the task is dispatched. It always shows the most recently dispatched
         // run: this assignment replaces whatever older run it was showing
         // (that run keeps going and stays visible in the Agent tab), and the
         // restarted poller below guards on `runId` so the old run's poller
@@ -2182,8 +2279,8 @@ final class AppModel: ObservableObject {
     }
 
     /// Starts (replacing any previous) the ~0.7s polling loop that feeds the
-    /// progress panel's live step feed from `GET /agent/progress/:runId`.
-    /// Each tick re-checks that `runId` is still the run the panel shows and
+    /// voice surface's live step ticker from `GET /agent/progress/:runId`.
+    /// Each tick re-checks that `runId` is still the run the surface shows and
     /// that its phase still says to poll (`shouldContinuePolling`) — so the
     /// loop winds down by itself when the blocking `/agent/run` call
     /// completes, when a newer dispatch replaces the panel, or when the user
@@ -2274,7 +2371,7 @@ final class AppModel: ObservableObject {
             }
             runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
 
-            // Settle the progress panel (if it's still showing this run):
+            // Settle the surface's agent state (if it's still showing this run):
             // final phase + result, and the response's own durable step log —
             // untruncated and complete, so always at least as rich as the
             // polled display feed — replaces the polled steps. The poller
@@ -2354,7 +2451,7 @@ final class AppModel: ObservableObject {
             }
             runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
 
-            // Settle the progress panel with the failure (if it's still
+            // Settle the surface's agent state with the failure (if it's still
             // showing this run); the error text doubles as the result area's
             // content. The poller stops on its next tick.
             updateAgentPanel(runId: runID.uuidString) { state in
@@ -2420,10 +2517,10 @@ final class AppModel: ObservableObject {
     private func setState(_ newState: ProcessingState) {
         state = newState
         hotKey.setRecordingActive(newState == .listening)
-        overlay.show(
-            state: newState,
-            mode: activeMode ?? configuration.selectedMode
-        )
+        // One entry point: the reducer decides whether this is a voice-surface
+        // moment (ask/agent) or a legacy HUD/toast moment (transcribe, and
+        // ask/agent with no live run).
+        presentVoiceSurface()
     }
 
     private func fail(_ error: Error) {
@@ -2437,8 +2534,20 @@ final class AppModel: ObservableObject {
         hotKey.setRecordingActive(false)
         liveSpeechTranscriber.stop()
         state = .failure(message)
-        overlay.show(
-            state: .failure(message),
+        // Same reducer-first routing as `setState`, but with the mode this
+        // recording actually ran as (`activeMode` has just been cleared) and
+        // with the failure toast shown *over* whatever the surface reduces to:
+        // a previous run's card or ticker must not swallow the one signal that
+        // this recording failed, and must not be torn down by it either — see
+        // `OverlayController.applyWithToast`.
+        overlay.applyWithToast(
+            VoiceSurfaceState.reduce(
+                mode: failedMode,
+                processing: state,
+                ask: askPanelState,
+                agent: agentPanelState
+            ),
+            state: state,
             mode: failedMode
         )
         playFeedbackSound(.issue)

@@ -20,7 +20,7 @@ private final class ReviewPanelPresentation: ObservableObject {
 /// transcription for the user to read, edit, or voice-correct before
 /// committing it into the originally-focused field. Follows the same
 /// `NSPanel` + `.nonactivatingPanel` + `canBecomeKey` pattern
-/// `AskPanelController`/`OverlayController` already establish in this
+/// `OverlayController` already establishes in this
 /// codebase (so the underlying target app stays frontmost the whole time,
 /// which is what lets the eventual commit's `ContextBridge.insert(...)`
 /// still land in the field the user had focused when they started
@@ -236,7 +236,7 @@ final class ReviewPanelController {
     }
 }
 
-/// See `AskPanelController.swift`'s identical type for why `canBecomeKey`
+/// See `OverlayController.swift`'s identical type for why `canBecomeKey`
 /// must be overridden: a `.nonactivatingPanel` normally can't become key,
 /// which would swallow the keyboard input this panel's text editing and
 /// Escape/Cmd+Return shortcuts depend on.

@@ -1,4 +1,3 @@
-import CoreGraphics
 import XCTest
 @testable import OpenType
 
@@ -28,11 +27,12 @@ import XCTest
 ///   with details preserved, "done" events are NOT shown as steps (the
 ///   `result` field covers them), unknown type strings are dropped, and
 ///   relative order is preserved.
-/// - Panel geometry is the pure static function
-///   `AgentProgressPanelController.panelOrigin(visibleFrame: CGRect, panelSize: CGSize) -> CGPoint`:
-///   flush to the TOP-RIGHT of the screen's `visibleFrame` with a 16pt
-///   margin, in AppKit's bottom-left-origin coordinates
-///   (x = maxX - width - 16, y = maxY - height - 16).
+/// - Panel geometry was the pure static function
+///   `AgentProgressPanelController.panelOrigin(visibleFrame:panelSize:)`
+///   (top-right of `visibleFrame`, 16pt margin). **Retired**: the HUD-morph
+///   spec supersedes this spec's presentation layer, and the geometry seam is
+///   now `VoiceSurfacePanelLayout.frame(for:visibleFrame:)` in
+///   `VoiceSurfaceTests` — see the note where those two tests used to live.
 /// - The polling decision is the pure static function
 ///   `AgentProgressPanelState.shouldContinuePolling(for: Phase) -> Bool`:
 ///   `.running` → true, `.succeeded`/`.failed` → false.
@@ -163,38 +163,19 @@ final class AgentProgressPanelTests: XCTestCase {
         XCTAssertEqual(AgentProgressPanelState.steps(fromProgressEvents: []), [])
     }
 
-    // MARK: - Panel geometry (pure static, precedent: OverlayHideBehavior)
-
-    func testPanelOriginIsTopRightOfVisibleFrameWith16ptMargin() {
-        let visibleFrame = CGRect(x: 0, y: 0, width: 1512, height: 944)
-        let panelSize = CGSize(width: 360, height: 240)
-
-        let origin = AgentProgressPanelController.panelOrigin(
-            visibleFrame: visibleFrame,
-            panelSize: panelSize
-        )
-
-        // AppKit bottom-left-origin coordinates:
-        // x = maxX - width - 16, y = maxY - height - 16.
-        XCTAssertEqual(origin.x, 1512 - 360 - 16)
-        XCTAssertEqual(origin.y, 944 - 240 - 16)
-    }
-
-    func testPanelOriginHonorsNonZeroVisibleFrameOrigin() {
-        // A secondary display / dock-and-menubar-inset visibleFrame does not
-        // start at (0, 0); the panel must hug ITS top-right, not the main
-        // screen's.
-        let visibleFrame = CGRect(x: 100, y: 50, width: 1000, height: 800)
-        let panelSize = CGSize(width: 320, height: 200)
-
-        let origin = AgentProgressPanelController.panelOrigin(
-            visibleFrame: visibleFrame,
-            panelSize: panelSize
-        )
-
-        XCTAssertEqual(origin.x, visibleFrame.maxX - 320 - 16)
-        XCTAssertEqual(origin.y, visibleFrame.maxY - 200 - 16)
-    }
+    // MARK: - Panel geometry
+    //
+    // The two `AgentProgressPanelController.panelOrigin` tests that lived here
+    // (top-right of `visibleFrame` with a 16pt margin) were retired together
+    // with the top-right window itself: the HUD-morph spec
+    // (docs/superpowers/specs/2026-08-13-hud-morph-result-surface-design.md §2)
+    // supersedes this spec's *presentation* layer, folding the Agent progress
+    // feed into the one bottom-center voice surface. `panelOrigin` no longer
+    // exists; the replacement geometry coverage is
+    // `VoiceSurfaceTests`' "Frame math: bottom-anchored growth" section
+    // (`VoiceSurfacePanelLayout.frame(for:visibleFrame:)`). Everything else in
+    // this file — the state model, the step mapping, the polling decision — is
+    // transport/state infrastructure the new spec explicitly retains and reuses.
 
     // MARK: - Polling decision (pure static)
 

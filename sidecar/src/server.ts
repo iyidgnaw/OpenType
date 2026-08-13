@@ -1,9 +1,11 @@
 import { unlinkSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { buildAgentRoutes } from "./agent/routes";
+import { withApproval, yoloApprovalPolicy } from "./agent/approval";
 import type { AgentChatFn } from "./agent/loop";
 import { connectConfiguredMcpServers } from "./agent/mcpClient";
 import { createBuiltInTools } from "./agent/builtInTools";
+import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
 import { buildAsrRoutes } from "./asr/routes";
 import { createRemoteWhisperClient } from "./asr/remoteWhisperClient";
@@ -31,11 +33,13 @@ import { buildTranscribeRoutes } from "./transcribe/routes";
  * message shape; `AgentChatFn` is structurally compatible with
  * `OneShotChatFn`, so it still satisfies `buildOneShotRoutes` unchanged.
  *
- * `tools` is expected to already be the merge of built-in tools
- * (`agent/builtInTools.ts`, always available) and whatever MCP servers are
- * configured (`agent/mcpClient.ts`) -- see `mergeToolSets` in
- * `agent/toolSets.ts` and its use in `main()` below. `buildApp` itself
- * doesn't care which is which, it just needs one combined `ToolSet`.
+ * `tools` is expected to already be the merge of the built-in memory tools
+ * (`agent/builtInTools.ts`, always available), the core shell/Python/file/web
+ * tools (`agent/coreTools.ts`, always available), and whatever MCP servers
+ * are configured (`agent/mcpClient.ts`) -- wrapped in the approval seam
+ * (`agent/approval.ts`) so every tool call flows through one gate. See
+ * `main()` below for the assembly. `buildApp` itself doesn't care which is
+ * which, it just needs one combined `ToolSet`.
  */
 export function buildApp(
   store: MemoryStore,
@@ -106,7 +110,11 @@ async function main() {
   };
   const mcpTools = await connectConfiguredMcpServers(process.env.OPENTYPE_MCP_SERVERS);
   const builtInTools = createBuiltInTools({ store, callLLM });
-  const tools = mergeToolSets(builtInTools, mcpTools);
+  const coreTools = createCoreTools({});
+  // The approval seam wraps the *merged* set so built-in memory tools, core
+  // tools, and MCP tools all flow through the same gate; v2 ships only the
+  // always-allow YOLO policy (see agent/approval.ts for the swap-in seam).
+  const tools = withApproval(mergeToolSets(builtInTools, coreTools, mcpTools), yoloApprovalPolicy);
   const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
 
   // Local MLX-Whisper ASR: spawns the python server once here (alongside the

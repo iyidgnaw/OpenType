@@ -113,6 +113,12 @@ function isOpenAiToolCall(value: unknown): value is OpenAiToolCall {
   );
 }
 
+/**
+ * MODEL EXPERIENCE: this function IS the message-array assembly every model
+ * request goes through (`docs/model-context-inventory.md` §1.1). Changing the
+ * order or framing here changes what every mode's model sees — update that
+ * document in the SAME change.
+ */
 function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   const userContentParts = [`TASK:`, input.task];
   if (input.context) {

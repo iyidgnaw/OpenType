@@ -11,6 +11,12 @@
  * result back in at the same offsets rather than trusting the model to
  * return the whole document.
  */
+/**
+ * MODEL EXPERIENCE: catalogued in `docs/model-context-inventory.md` §2.3
+ * (note that the surrounding-context windows re-send the selected text, so a
+ * long passage is the most expensive request in the product) — update it in
+ * the SAME change that edits this prompt or `buildUserContent`.
+ */
 export const CORRECTION_SYSTEM_PROMPT = `You are correcting one specific span of text inside a larger passage that was produced by voice transcription. You will be given the full surrounding text for context, the exact selected span, and a spoken instruction describing what's wrong with the span or how to change it.
 
 Return ONLY the replacement text for the selected span -- nothing else. No quotes around it, no explanation, no restating the instruction, no leading or trailing whitespace, and no text from outside the span. If the instruction asks for a full rewrite (e.g. "rewrite this more formally"), the selected span will be the entire text, and your reply should be the complete rewritten passage and nothing more. Never change or repeat anything outside the selected span -- the caller splices your reply back into the original text at the exact same position, so anything extra you add would be inserted verbatim into the middle of the user's document.`;

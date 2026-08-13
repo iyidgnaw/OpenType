@@ -35,6 +35,11 @@ async function readJsonBody<T>(req: Request): Promise<T> {
  * know what was already asked and delivered on this same task, without
  * replaying the full internal tool-call step trace (`AgentProgressEvent[]`)
  * from earlier runs.
+ *
+ * MODEL EXPERIENCE: this block reaches the model verbatim inside `CONTEXT:`,
+ * and grows linearly with conversation length with no cap and no compaction.
+ * See `docs/model-context-inventory.md` §3.3 — update it in the SAME change
+ * that alters this rendering.
  */
 function formatPriorTurns(messages: OneShotChatMessage[]): string | undefined {
   if (messages.length === 0) {

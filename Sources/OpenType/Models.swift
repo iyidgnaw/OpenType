@@ -148,6 +148,84 @@ struct AskPanelState: Equatable {
     var answer: String?
 }
 
+/// One step of the Agent progress panel's live feed — the display-side
+/// mapping of a sidecar progress event (`SidecarAgentProgressEvent`). The
+/// sidecar's `"done"` event type deliberately has no `Kind` here: the final
+/// answer is shown via `AgentProgressPanelState.result`, not as a feed step.
+struct AgentProgressStep: Equatable {
+    enum Kind: Equatable {
+        case thinking
+        case toolCall
+        case toolResult
+        case error
+    }
+
+    var kind: Kind
+    var detail: String
+}
+
+/// The wire shape of one entry from the sidecar's
+/// `GET /agent/progress/:runId` response (`{ status, events }`) — what
+/// `SidecarClient.agentProgress(runId:)` decodes each `events` element into.
+struct SidecarAgentProgressEvent: Decodable, Equatable {
+    let type: String
+    let detail: String
+}
+
+/// Drives the floating Agent progress panel
+/// (`AgentProgressPanelController`), the top-right live feedback surface for
+/// an in-flight `/agent/run` (spec:
+/// docs/superpowers/specs/2026-08-13-agent-progress-panel-design.md). Same
+/// ownership split as `AskPanelState`/`AskPanelController`: `AppModel` is the
+/// single source of truth (`agentPanelState`; `nil` hides the panel), the
+/// controller mirrors it. The panel always shows the most recently
+/// dispatched run — a newer dispatch replaces this state wholesale.
+struct AgentProgressPanelState: Equatable {
+    enum Phase: Equatable {
+        case running
+        case succeeded
+        case failed
+    }
+
+    /// The client-generated run id sent in the `/agent/run` body — the key
+    /// both for progress polling and for guarding late updates (a poller or
+    /// completion for an older run must not touch a newer run's panel).
+    var runId: String
+    var task: String
+    var steps: [AgentProgressStep]
+    var phase: Phase
+    /// The final answer once the run succeeds, or the error text once it
+    /// fails; `nil` while `phase == .running`.
+    var result: String?
+
+    /// Maps polled sidecar progress events to displayable feed steps:
+    /// `"thinking"`/`"tool_call"`/`"tool_result"`/`"error"` map to the
+    /// matching kinds with details preserved, `"done"` events are dropped
+    /// (the `result` field covers them), unknown type strings are dropped,
+    /// and relative order is preserved.
+    static func steps(
+        fromProgressEvents events: [SidecarAgentProgressEvent]
+    ) -> [AgentProgressStep] {
+        events.compactMap { event in
+            let kind: AgentProgressStep.Kind?
+            switch event.type {
+            case "thinking": kind = .thinking
+            case "tool_call": kind = .toolCall
+            case "tool_result": kind = .toolResult
+            case "error": kind = .error
+            default: kind = nil
+            }
+            return kind.map { AgentProgressStep(kind: $0, detail: event.detail) }
+        }
+    }
+
+    /// Pure polling decision: keep polling `/agent/progress/:runId` only
+    /// while the displayed run is still `.running`.
+    static func shouldContinuePolling(for phase: Phase) -> Bool {
+        phase == .running
+    }
+}
+
 /// Locale for the ASR pass. Fed to the sidecar's `/asr/transcribe` request
 /// isn't language-scoped (MLX-Whisper auto-detects), so this now only drives
 /// the Apple on-device live-caption preview's locale

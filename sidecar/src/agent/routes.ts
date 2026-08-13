@@ -5,6 +5,8 @@ import { ApiError } from "../router";
 import type { AgentChatFn } from "./loop";
 import { runAgentLoop } from "./loop";
 import type { McpToolSet } from "./mcpClient";
+import type { AgentProgressRegistry } from "./progressRegistry";
+import { createAgentProgressRegistry } from "./progressRegistry";
 import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext";
 import { logContextUsage, type ContextUsageLogWriter } from "../oneshot/contextDebugLog";
 import { resolveConversation } from "../oneshot/routes";
@@ -14,6 +16,13 @@ interface AgentRunRequestBody {
   task?: string;
   context?: string;
   conversationId?: number;
+  /**
+   * Optional client-generated id for live progress polling. When present the
+   * run is registered in the progress registry and its loop events become
+   * visible via `GET /agent/progress/:runId`; when absent, behavior and the
+   * response shape are exactly as before and nothing is registered.
+   */
+  runId?: string;
 }
 
 async function readJsonBody<T>(req: Request): Promise<T> {
@@ -47,7 +56,8 @@ async function handleAgentRun(
   conversations: ConversationStore,
   chat: AgentChatFn,
   tools: McpToolSet,
-  contextLogWriter: ContextUsageLogWriter
+  contextLogWriter: ContextUsageLogWriter,
+  progressRegistry: AgentProgressRegistry
 ): Promise<Response> {
   const body = await readJsonBody<AgentRunRequestBody>(req);
   const task = body.task ?? "";
@@ -55,6 +65,8 @@ async function handleAgentRun(
     throw new ApiError("task is required", 400);
   }
   const context = body.context;
+  const runId =
+    typeof body.runId === "string" && body.runId.length > 0 ? body.runId : undefined;
 
   // Agent mode's known-terms context lookup runs against the same input
   // (task + any selected context) `runAgentLoop`'s optional `knownTerms`
@@ -83,10 +95,34 @@ async function handleAgentRun(
   const priorTurnsSummary = formatPriorTurns(priorMessages);
   const combinedContext = [priorTurnsSummary, context].filter(Boolean).join("\n\n") || undefined;
 
-  const loopResult = await runAgentLoop(
-    { task, context: combinedContext, knownTerms },
-    { chat, tools }
-  );
+  // With a `runId`, the loop's (previously unused) `onProgress` hook feeds
+  // the in-memory progress registry so `GET /agent/progress/:runId` can show
+  // a live feed while this blocking call is still running. The run is marked
+  // `done`/`failed` the moment the loop resolves/throws; a throw is rethrown
+  // unchanged so the router's existing error-envelope behavior (500 etc.) is
+  // untouched.
+  if (runId) {
+    progressRegistry.register(runId);
+  }
+  let loopResult;
+  try {
+    loopResult = await runAgentLoop(
+      { task, context: combinedContext, knownTerms },
+      {
+        chat,
+        tools,
+        onProgress: runId ? (event) => progressRegistry.append(runId, event) : undefined,
+      }
+    );
+  } catch (error) {
+    if (runId) {
+      progressRegistry.finish(runId, "failed");
+    }
+    throw error;
+  }
+  if (runId) {
+    progressRegistry.finish(runId, "done");
+  }
 
   conversations.appendMessage(conversationId, "assistant", loopResult.result);
 
@@ -110,9 +146,23 @@ async function handleAgentRun(
 }
 
 /**
- * A single blocking call for tonight: `/agent/run` runs the whole loop and
- * returns the full progress log at once. There's no real-time progress
- * streaming to a UI yet (a Task List panel is a separate future task).
+ * Reads the progress snapshot for one run. An unknown id is not an error —
+ * it's "nothing to show" — so it returns 200 with
+ * `{ status: "unknown", events: [] }` rather than a 404 (spec §2).
+ */
+function handleAgentProgress(req: Request, progressRegistry: AgentProgressRegistry): Response {
+  const pathname = new URL(req.url).pathname;
+  const runId = decodeURIComponent(pathname.slice(pathname.lastIndexOf("/") + 1));
+  return Response.json(progressRegistry.get(runId));
+}
+
+/**
+ * `/agent/run` is still a single blocking call: it runs the whole loop and
+ * returns the full (untruncated) step log at once. Live feedback comes from
+ * the sidecar-internal progress registry created here: a run dispatched with
+ * a client-generated `runId` streams its loop events into it, and
+ * `GET /agent/progress/:runId` serves the display-truncated snapshot for the
+ * floating progress panel to poll while the run is in flight.
  */
 export function buildAgentRoutes(
   store: MemoryStore,
@@ -121,11 +171,18 @@ export function buildAgentRoutes(
   tools: McpToolSet,
   contextLogWriter: ContextUsageLogWriter
 ): Route[] {
+  const progressRegistry = createAgentProgressRegistry();
   return [
     {
       method: "POST",
       path: "/agent/run",
-      handler: (req) => handleAgentRun(req, store, conversations, chat, tools, contextLogWriter),
+      handler: (req) =>
+        handleAgentRun(req, store, conversations, chat, tools, contextLogWriter, progressRegistry),
+    },
+    {
+      method: "GET",
+      path: "/agent/progress/:runId",
+      handler: (req) => handleAgentProgress(req, progressRegistry),
     },
   ];
 }

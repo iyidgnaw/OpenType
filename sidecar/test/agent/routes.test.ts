@@ -27,6 +27,10 @@ function post(body: unknown): Request {
   });
 }
 
+function getProgress(runId: string): Request {
+  return new Request(`http://sidecar/agent/progress/${runId}`, { method: "GET" });
+}
+
 function captureContextLog(): { writer: ContextUsageLogWriter; lines: string[] } {
   const lines: string[] = [];
   return { writer: (line) => lines.push(line), lines };
@@ -254,5 +258,210 @@ describe("POST /agent/run", () => {
       expect(body.conversationId).not.toBe(999_999);
       expect(conversations.getConversation(body.conversationId)).not.toBeNull();
     });
+  });
+});
+
+/**
+ * Stage-1 TDD (red) for the agent progress panel's sidecar half
+ * (spec: docs/superpowers/specs/2026-08-13-agent-progress-panel-design.md §2).
+ *
+ * Contract picks (stage 3 implements these exactly):
+ * - `POST /agent/run` accepts an optional client-generated `runId` string in
+ *   the body. When present, the handler registers the run in the progress
+ *   registry, wires `runAgentLoop`'s `onProgress` hook to append events, and
+ *   marks the run done/failed when the loop resolves/throws. When absent,
+ *   behavior and response shape are exactly as before and nothing is
+ *   registered.
+ * - New `GET /agent/progress/:runId` returns 200 with `{ status, events }`;
+ *   an unknown id returns 200 with `{ status: "unknown", events: [] }` (not
+ *   a 404 -- an unknown id is "nothing to show", not an error).
+ * - The registry is owned inside `buildAgentRoutes` (its signature is
+ *   unchanged), shared between the two routes; these tests drive it purely
+ *   over HTTP through the router.
+ * - Progress events are the DISPLAY feed: per-event detail is truncated
+ *   (~400 chars + marker). The blocking `/agent/run` response's `steps`
+ *   stays the untruncated durable log.
+ *
+ * Note for the red state: `GET /agent/progress/...` currently falls through
+ * the router to `404 { error: "not_found" }`, so the `expect(200)` /
+ * body-shape assertions below fail for the right reason (the endpoint does
+ * not exist yet) rather than passing accidentally.
+ */
+describe("agent progress (runId + GET /agent/progress/:runId)", () => {
+  interface ProgressBody {
+    status: string;
+    events: Array<{ type: string; detail: string }>;
+  }
+
+  /** Fake chat: first call requests one tool call, second call answers. */
+  function oneToolThenAnswerChat(finalAnswer: string): AgentChatFn {
+    let calls = 0;
+    return async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "search__lookup", arguments: '{"query":"weather"}' },
+            },
+          ],
+        };
+      }
+      return { content: finalAnswer };
+    };
+  }
+
+  test("run with runId: after the run resolves, progress reports done with ordered events", async () => {
+    const longToolResult = "R".repeat(1000);
+    const tools: McpToolSet = {
+      openAiTools: [{ type: "function", function: { name: "search__lookup" } }],
+      callTool: async () => ({ content: longToolResult }),
+    };
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        oneToolThenAnswerChat("It is sunny."),
+        tools,
+        captureContextLog().writer
+      )
+    );
+
+    const runResponse = await router(post({ task: "What's the weather?", runId: "run-abc" }));
+
+    // The blocking response is unchanged by runId: same three fields, and
+    // `steps` stays the untruncated durable log.
+    expect(runResponse.status).toBe(200);
+    const runBody = (await runResponse.json()) as {
+      result: string;
+      steps: Array<{ type: string; detail: string }>;
+      conversationId: number;
+    };
+    expect(Object.keys(runBody).sort()).toEqual(["conversationId", "result", "steps"]);
+    expect(runBody.result).toBe("It is sunny.");
+    const durableToolResult = runBody.steps.find((s) => s.type === "tool_result");
+    expect(durableToolResult?.detail).toBe(longToolResult);
+
+    const progressResponse = await router(getProgress("run-abc"));
+    expect(progressResponse.status).toBe(200);
+    const progress = (await progressResponse.json()) as ProgressBody;
+    expect(progress.status).toBe("done");
+
+    // At least one thinking, tool_call, tool_result, and done -- in order.
+    const types = progress.events.map((e) => e.type);
+    const firstThinking = types.indexOf("thinking");
+    const firstToolCall = types.indexOf("tool_call");
+    const firstToolResult = types.indexOf("tool_result");
+    const firstDone = types.indexOf("done");
+    expect(firstThinking).toBeGreaterThanOrEqual(0);
+    expect(firstToolCall).toBeGreaterThan(firstThinking);
+    expect(firstToolResult).toBeGreaterThan(firstToolCall);
+    expect(firstDone).toBeGreaterThan(firstToolResult);
+
+    // The progress feed's copy of the tool result is display-truncated.
+    const progressToolResult = progress.events.find((e) => e.type === "tool_result");
+    expect((progressToolResult?.detail ?? "").length).toBeLessThanOrEqual(450);
+    expect(progressToolResult?.detail).toContain("truncated");
+  });
+
+  test("while the run is in flight, progress reports 'running' with the events so far", async () => {
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    let signalToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      signalToolStarted = resolve;
+    });
+    const tools: McpToolSet = {
+      openAiTools: [{ type: "function", function: { name: "search__lookup" } }],
+      callTool: async () => {
+        signalToolStarted();
+        await toolGate;
+        return { content: "sunny, 75F" };
+      },
+    };
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        oneToolThenAnswerChat("It is sunny."),
+        tools,
+        captureContextLog().writer
+      )
+    );
+
+    const runPromise = router(post({ task: "What's the weather?", runId: "run-mid" }));
+    try {
+      await toolStarted;
+
+      const progressResponse = await router(getProgress("run-mid"));
+      expect(progressResponse.status).toBe(200);
+      const progress = (await progressResponse.json()) as ProgressBody;
+      expect(progress.status).toBe("running");
+      const types = progress.events.map((e) => e.type);
+      expect(types).toContain("thinking");
+      expect(types).toContain("tool_call");
+      expect(types).not.toContain("done");
+    } finally {
+      releaseTool();
+      await runPromise.catch(() => {});
+    }
+
+    const finalResponse = await router(getProgress("run-mid"));
+    const final = (await finalResponse.json()) as ProgressBody;
+    expect(final.status).toBe("done");
+  });
+
+  test("a failing run with a runId is reported as 'failed'", async () => {
+    const chat: AgentChatFn = async () => {
+      throw new Error("provider exploded");
+    };
+    const router = createRouter(
+      buildAgentRoutes(makeStore(), makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    const runResponse = await router(post({ task: "doomed task", runId: "run-fail" }));
+    expect(runResponse.status).toBe(500);
+
+    const progressResponse = await router(getProgress("run-fail"));
+    expect(progressResponse.status).toBe(200);
+    const progress = (await progressResponse.json()) as ProgressBody;
+    expect(progress.status).toBe("failed");
+  });
+
+  test("run WITHOUT runId: response unchanged and nothing registered", async () => {
+    const chat: AgentChatFn = async () => ({ content: "done" });
+    const router = createRouter(
+      buildAgentRoutes(makeStore(), makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    const runResponse = await router(post({ task: "plain task" }));
+    expect(runResponse.status).toBe(200);
+    const runBody = (await runResponse.json()) as Record<string, unknown>;
+    expect(Object.keys(runBody).sort()).toEqual(["conversationId", "result", "steps"]);
+
+    // No runId was sent, so no run was registered under any id.
+    const progressResponse = await router(getProgress("some-id-nobody-registered"));
+    expect(progressResponse.status).toBe(200);
+    expect((await progressResponse.json()) as ProgressBody).toEqual({
+      status: "unknown",
+      events: [],
+    });
+  });
+
+  test("GET /agent/progress/nonexistent returns 200 with { status: 'unknown', events: [] }", async () => {
+    const chat: AgentChatFn = async () => ({ content: "done" });
+    const router = createRouter(
+      buildAgentRoutes(makeStore(), makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    const response = await router(getProgress("nonexistent"));
+
+    expect(response.status).toBe(200);
+    expect((await response.json()) as ProgressBody).toEqual({ status: "unknown", events: [] });
   });
 });

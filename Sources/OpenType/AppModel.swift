@@ -102,6 +102,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var reviewPanelState: ReviewPanelState? {
         didSet { syncReviewPanel() }
     }
+    /// Drives the top-right Agent progress panel
+    /// (`AgentProgressPanelController`) — see `AgentProgressPanelState`'s doc
+    /// comment. `nil` hides it; non-nil shows it (set the moment an Agent run
+    /// is dispatched, replaced wholesale by a newer dispatch). Same
+    /// imperative-controller-sync split as `askPanelState`/`askPanel`.
+    @Published private(set) var agentPanelState: AgentProgressPanelState? {
+        didSet { syncAgentPanel() }
+    }
     /// The sidecar's `/config/status` view of whether the user has
     /// explicitly finished configuring a Whisper backend and an LLM
     /// provider through the new provider-config system (see
@@ -166,6 +174,7 @@ final class AppModel: ObservableObject {
     private let overlay = OverlayController()
     private let askPanel = AskPanelController()
     private let reviewPanel = ReviewPanelController()
+    private let agentProgressPanel = AgentProgressPanelController()
     private var customSounds: [String: NSSound] = [:]
     private var activeFeedbackSound: NSSound?
     private var capturedContext = CapturedContext(
@@ -180,6 +189,14 @@ final class AppModel: ObservableObject {
     /// (`dismissAskPanel`) can abort just this request without touching an
     /// unrelated recording/processing task.
     private var askTask: Task<Void, Never>?
+    /// The ~0.7s `GET /agent/progress/:runId` polling loop feeding the Agent
+    /// progress panel's live step feed (see `startAgentProgressPolling`).
+    /// There is at most one: it always serves the most recently dispatched
+    /// run (the one `agentPanelState` shows), and a newer dispatch replaces
+    /// it. Cancelling it never cancels the run itself — the detached
+    /// `/agent/run` task in `runningAgentTasks` is deliberately untouched by
+    /// panel dismissal.
+    private var agentProgressPollTask: Task<Void, Never>?
     private var accessibilityPollTimer: Timer?
     private var activeMode: InputMode?
     private var didStart = false
@@ -304,6 +321,12 @@ final class AppModel: ObservableObject {
         )
         self.askPanel.onRequestDismiss = { [weak self] in
             self?.askPanelState = nil
+        }
+        self.agentProgressPanel.onRequestDismiss = { [weak self] in
+            self?.dismissAgentPanel()
+        }
+        self.agentProgressPanel.onOpenMainWindow = { [weak self] in
+            self?.openMainWindowFromAgentPanel()
         }
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
@@ -943,6 +966,40 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func syncAgentPanel() {
+        if let agentPanelState {
+            agentProgressPanel.show(agentPanelState)
+        } else {
+            agentProgressPanel.hide()
+        }
+    }
+
+    /// Dismisses the Agent progress panel (close button, Escape, or the
+    /// 打开主窗口 button after it opened the main window) and stops progress
+    /// polling. Deliberately does NOT cancel the run itself: the detached
+    /// `/agent/run` task keeps going, and every existing delivery path
+    /// (clipboard + completion notification + Agent tab/conversation) is
+    /// untouched — the panel is a view over the run, not its owner.
+    func dismissAgentPanel() {
+        agentProgressPollTask?.cancel()
+        agentProgressPollTask = nil
+        agentPanelState = nil
+    }
+
+    /// The 打开主窗口 button: routes through the same
+    /// open-main-window-to-Agent-tab path a tapped completion notification
+    /// uses (`focusAgentRun(_:)` — the panel's `runId` is the
+    /// `AgentRunRecord.id` it was dispatched with), then dismisses the panel.
+    private func openMainWindowFromAgentPanel() {
+        if let state = agentPanelState, let runID = UUID(uuidString: state.runId) {
+            focusAgentRun(runID)
+        } else {
+            selectedTab = .agent
+            openMainWindow()
+        }
+        dismissAgentPanel()
+    }
+
     private func syncReviewPanel() {
         if let reviewPanelState {
             reviewPanel.show(originalTranscript: reviewPanelState.originalTranscript)
@@ -1300,7 +1357,11 @@ final class AppModel: ObservableObject {
     /// step-by-step log after the fact for display in the Agent tab's
     /// "running now" strip. `conversationId` works the same as
     /// `AskRequestBody`'s, keyed off the Agent tab's focused thread instead.
-    private struct AgentRunRequestBody: Encodable { let task: String; let context: String?; let conversationId: Int? }
+    /// `runId` is the client-generated id (the `AgentRunRecord.id`'s UUID
+    /// string) that keys the sidecar's live progress registry, so the
+    /// progress panel can poll `GET /agent/progress/:runId` while this
+    /// blocking call is still running.
+    private struct AgentRunRequestBody: Encodable { let task: String; let context: String?; let conversationId: Int?; let runId: String? }
     private struct AgentRunResponseBody: Decodable {
         let result: String
         let steps: [AgentStepSummary]
@@ -1707,10 +1768,13 @@ final class AppModel: ObservableObject {
                 // `/agent/run` call runs as an independent, detached `Task`
                 // that is never awaited here, so a slow multi-step Agent
                 // loop can't hold the app's general recording pipeline busy.
-                // No Ask/Agent popup either — completion is surfaced later
-                // via a `UNUserNotification` plus the Task List panel in the
-                // main app window (Part A), not a panel the user waits in
-                // front of.
+                // Live feedback comes from the top-right Agent progress
+                // panel (`agentPanelState`/`AgentProgressPanelController`),
+                // shown by `dispatchAgentRun` the moment the task is handed
+                // off and fed by polling `GET /agent/progress/:runId`;
+                // completion is additionally surfaced via a
+                // `UNUserNotification` plus the Agent tab, and dismissing
+                // the panel never cancels the run.
                 effectiveTextModel = sidecarTextModel
                 dispatchAgentRun(
                     transcript: transcript,
@@ -2088,6 +2152,23 @@ final class AppModel: ObservableObject {
         runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
 
         let runID = record.id
+
+        // Show the progress panel immediately — before the call is even
+        // issued — so the user gets live feedback the moment the task is
+        // dispatched. The panel always shows the most recently dispatched
+        // run: this assignment replaces whatever older run it was showing
+        // (that run keeps going and stays visible in the Agent tab), and the
+        // restarted poller below guards on `runId` so the old run's poller
+        // and completion can no longer touch the panel.
+        agentPanelState = AgentProgressPanelState(
+            runId: runID.uuidString,
+            task: transcript,
+            steps: [],
+            phase: .running,
+            result: nil
+        )
+        startAgentProgressPolling(runId: runID.uuidString)
+
         runningAgentTasks[runID] = Task { [weak self] in
             await self?.runAgentDispatch(
                 runID: runID,
@@ -2098,6 +2179,54 @@ final class AppModel: ObservableObject {
                 conversationId: conversationId
             )
         }
+    }
+
+    /// Starts (replacing any previous) the ~0.7s polling loop that feeds the
+    /// progress panel's live step feed from `GET /agent/progress/:runId`.
+    /// Each tick re-checks that `runId` is still the run the panel shows and
+    /// that its phase still says to poll (`shouldContinuePolling`) — so the
+    /// loop winds down by itself when the blocking `/agent/run` call
+    /// completes, when a newer dispatch replaces the panel, or when the user
+    /// dismisses it (which also cancels the task outright).
+    private func startAgentProgressPolling(runId: String) {
+        agentProgressPollTask?.cancel()
+        agentProgressPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                guard !Task.isCancelled, let self else { return }
+                guard let current = self.agentPanelState,
+                      current.runId == runId,
+                      AgentProgressPanelState.shouldContinuePolling(for: current.phase)
+                else { return }
+
+                guard let snapshot = try? await self.sidecarClient.agentProgress(runId: runId)
+                else { continue } // Transient poll failure: just try again next tick.
+
+                // Re-check after the await: the blocking response (terminal
+                // phase, authoritative steps) or a newer dispatch may have
+                // landed while this poll request was in flight — never let a
+                // stale snapshot overwrite either.
+                guard var updated = self.agentPanelState,
+                      updated.runId == runId,
+                      AgentProgressPanelState.shouldContinuePolling(for: updated.phase)
+                else { return }
+                updated.steps = AgentProgressPanelState.steps(fromProgressEvents: snapshot.events)
+                self.agentPanelState = updated
+            }
+        }
+    }
+
+    /// Applies `transform` to the panel state only if it is still showing
+    /// `runId` — the guard that keeps an older run's completion (or a late
+    /// poll) from clobbering a newer run's panel, or resurrecting a panel the
+    /// user already dismissed.
+    private func updateAgentPanel(
+        runId: String,
+        _ transform: (inout AgentProgressPanelState) -> Void
+    ) {
+        guard var state = agentPanelState, state.runId == runId else { return }
+        transform(&state)
+        agentPanelState = state
     }
 
     /// The detached unit of work started by `dispatchAgentRun`: issues the
@@ -2132,7 +2261,8 @@ final class AppModel: ObservableObject {
                 body: AgentRunRequestBody(
                     task: transcript,
                     context: context.selectedText,
-                    conversationId: conversationId
+                    conversationId: conversationId,
+                    runId: runID.uuidString
                 )
             )
 
@@ -2143,6 +2273,24 @@ final class AppModel: ObservableObject {
                 record.conversationId = response.conversationId
             }
             runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
+
+            // Settle the progress panel (if it's still showing this run):
+            // final phase + result, and the response's own durable step log —
+            // untruncated and complete, so always at least as rich as the
+            // polled display feed — replaces the polled steps. The poller
+            // sees the non-running phase on its next tick and stops.
+            updateAgentPanel(runId: runID.uuidString) { state in
+                state.phase = .succeeded
+                state.result = response.result
+                let finalSteps = AgentProgressPanelState.steps(
+                    fromProgressEvents: response.steps.map {
+                        SidecarAgentProgressEvent(type: $0.type, detail: $0.detail)
+                    }
+                )
+                if !finalSteps.isEmpty {
+                    state.steps = finalSteps
+                }
+            }
             await refreshAgentConversations()
             if focusedAgentConversationId == response.conversationId {
                 openAgentConversation(response.conversationId)
@@ -2205,6 +2353,14 @@ final class AppModel: ObservableObject {
                 record.completedAt = Date()
             }
             runningAgentRunCount = AgentRunHistory.runningCount(in: agentRuns)
+
+            // Settle the progress panel with the failure (if it's still
+            // showing this run); the error text doubles as the result area's
+            // content. The poller stops on its next tick.
+            updateAgentPanel(runId: runID.uuidString) { state in
+                state.phase = .failed
+                state.result = message
+            }
 
             recordAuditEvent(
                 ImmutableAuditEvent(

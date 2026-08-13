@@ -538,6 +538,27 @@ final class SidecarClient {
         return response.status == "ok"
     }
 
+    /// The sidecar's `GET /agent/progress/:runId` response — the live,
+    /// display-truncated progress snapshot for one Agent run. `status` is
+    /// `"running"`/`"done"`/`"failed"`, or `"unknown"` (with empty `events`)
+    /// for an id the sidecar isn't tracking, always as a 200 — an unknown id
+    /// is "nothing to show", not an error.
+    struct AgentProgressResponse: Decodable {
+        let status: String
+        let events: [SidecarAgentProgressEvent]
+    }
+
+    /// Polls the live progress feed for the Agent run dispatched with
+    /// `runId` (see `AppModel.dispatchAgentRun`). The id rides on the URL
+    /// path, so it's percent-encoded here — including `/`, which
+    /// `.urlPathAllowed` alone would let through as a path separator.
+    func agentProgress(runId: String) async throws -> AgentProgressResponse {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        let encoded = runId.addingPercentEncoding(withAllowedCharacters: allowed) ?? runId
+        return try await request(method: "GET", path: "/agent/progress/\(encoded)")
+    }
+
     /// Generic request helper: shells out to `curl --unix-socket`, then
     /// decodes stdout as JSON into `Response`. More endpoints beyond
     /// `/health` will be added to the sidecar later; this method doesn't

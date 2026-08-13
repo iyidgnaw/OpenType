@@ -16,6 +16,8 @@ export interface SidecarEnv {
   whisperScriptPath?: string;
   /** Root directory for spilled oversized tool results (`agent/spill.ts`). */
   spillRoot: string;
+  /** Root directory for durable per-run step logs (`agent/runLog.ts`). */
+  runLogRoot: string;
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
@@ -62,6 +64,9 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
   // default would scatter artifacts depending on where the sidecar launched.
   const spillRoot =
     source.OPENTYPE_SPILL_ROOT ?? resolve(import.meta.dir, "..", ".data", "spill");
+  // Durable agent step logs (`agent/runLog.ts`, T7); same convention again.
+  const runLogRoot =
+    source.OPENTYPE_RUN_LOG_ROOT ?? resolve(import.meta.dir, "..", ".data", "run-logs");
 
   return {
     socketPath,
@@ -74,5 +79,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
     whisperPythonBin,
     whisperScriptPath,
     spillRoot,
+    runLogRoot,
   };
 }

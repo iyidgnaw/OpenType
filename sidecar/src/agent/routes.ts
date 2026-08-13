@@ -11,6 +11,7 @@ import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext
 import { buildTimeContext } from "../context/timeContext";
 import { saveSpill } from "./spill";
 import { createRepeatGuard } from "./repeatGuard";
+import { createRunLog, type RunLog } from "./runLog";
 import {
   AgentCancelledError,
   createCancellationRegistry,
@@ -73,7 +74,8 @@ async function handleAgentRun(
   contextLogWriter: ContextUsageLogWriter,
   progressRegistry: AgentProgressRegistry,
   cancellations: CancellationRegistry,
-  spillRoot?: string
+  spillRoot?: string,
+  runLog?: RunLog
 ): Promise<Response> {
   const body = await readJsonBody<AgentRunRequestBody>(req);
   const task = body.task ?? "";
@@ -131,7 +133,16 @@ async function handleAgentRun(
       {
         chat,
         tools,
-        onProgress: runId ? (event) => progressRegistry.append(runId, event) : undefined,
+        // One producer, two consumers (T7): the durable log keeps the full
+        // record, the display registry keeps its bounded view of it. The log
+        // append is fire-and-forget -- it never rejects, and awaiting it here
+        // would put disk latency inside the agent's step loop.
+        onProgress: runId
+          ? (event) => {
+              progressRegistry.append(runId, event);
+              void runLog?.append(runId, event);
+            }
+          : undefined,
         // The loop knows nothing about run ids or spill roots; this closure
         // supplies both, keeping that seam to "here is text, give me a
         // locator" (T2). Omitted when no root is configured, which restores
@@ -229,10 +240,12 @@ export function buildAgentRoutes(
   chat: AgentChatFn,
   tools: McpToolSet,
   contextLogWriter: ContextUsageLogWriter,
-  spillRoot?: string
+  spillRoot?: string,
+  runLogRoot?: string
 ): Route[] {
   const progressRegistry = createAgentProgressRegistry();
   const cancellations = createCancellationRegistry();
+  const runLog = runLogRoot ? createRunLog(runLogRoot) : undefined;
   return [
     {
       method: "POST",
@@ -247,7 +260,8 @@ export function buildAgentRoutes(
           contextLogWriter,
           progressRegistry,
           cancellations,
-          spillRoot
+          spillRoot,
+          runLog
         ),
     },
     {

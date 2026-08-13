@@ -58,7 +58,9 @@ export function buildApp(
    * pre-existing test call site does -- restores the truncate-and-discard
    * behavior, so spilling is opt-in per assembly rather than ambient.
    */
-  spillRoot?: string
+  spillRoot?: string,
+  /** Root for durable per-run step logs (T7); omitted disables recording. */
+  runLogRoot?: string
 ) {
   return createRouter([
     {
@@ -68,7 +70,15 @@ export function buildApp(
     },
     ...buildOneShotRoutes(store, conversations, chat, contextLogWriter, tools),
     ...buildMemoryRoutes(store, callLLM),
-    ...buildAgentRoutes(store, conversations, chat, tools, contextLogWriter, spillRoot),
+    ...buildAgentRoutes(
+      store,
+      conversations,
+      chat,
+      tools,
+      contextLogWriter,
+      spillRoot,
+      runLogRoot
+    ),
     ...buildConversationRoutes(conversations),
     ...buildAsrRoutes(transcribe),
     ...buildTranscribeRoutes(chat),
@@ -215,7 +225,8 @@ async function main() {
     callLLM,
     resolveTranscribe,
     providerConfigStore,
-    env.spillRoot
+    env.spillRoot,
+    env.runLogRoot
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

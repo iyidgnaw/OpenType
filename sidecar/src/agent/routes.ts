@@ -9,6 +9,7 @@ import type { AgentProgressRegistry } from "./progressRegistry";
 import { createAgentProgressRegistry } from "./progressRegistry";
 import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext";
 import { buildTimeContext } from "../context/timeContext";
+import { saveSpill } from "./spill";
 import { logContextUsage, type ContextUsageLogWriter } from "../oneshot/contextDebugLog";
 import { resolveConversation } from "../oneshot/routes";
 import type { OneShotChatMessage } from "../oneshot/client";
@@ -63,7 +64,8 @@ async function handleAgentRun(
   chat: AgentChatFn,
   tools: McpToolSet,
   contextLogWriter: ContextUsageLogWriter,
-  progressRegistry: AgentProgressRegistry
+  progressRegistry: AgentProgressRegistry,
+  spillRoot?: string
 ): Promise<Response> {
   const body = await readJsonBody<AgentRunRequestBody>(req);
   const task = body.task ?? "";
@@ -118,6 +120,13 @@ async function handleAgentRun(
         chat,
         tools,
         onProgress: runId ? (event) => progressRegistry.append(runId, event) : undefined,
+        // The loop knows nothing about run ids or spill roots; this closure
+        // supplies both, keeping that seam to "here is text, give me a
+        // locator" (T2). Omitted when no root is configured, which restores
+        // the pre-spill truncate-and-discard behavior exactly.
+        spill: spillRoot
+          ? (text, toolName) => saveSpill(text, { toolName, runId }, spillRoot)
+          : undefined,
       }
     );
   } catch (error) {
@@ -175,7 +184,8 @@ export function buildAgentRoutes(
   conversations: ConversationStore,
   chat: AgentChatFn,
   tools: McpToolSet,
-  contextLogWriter: ContextUsageLogWriter
+  contextLogWriter: ContextUsageLogWriter,
+  spillRoot?: string
 ): Route[] {
   const progressRegistry = createAgentProgressRegistry();
   return [
@@ -183,7 +193,16 @@ export function buildAgentRoutes(
       method: "POST",
       path: "/agent/run",
       handler: (req) =>
-        handleAgentRun(req, store, conversations, chat, tools, contextLogWriter, progressRegistry),
+        handleAgentRun(
+          req,
+          store,
+          conversations,
+          chat,
+          tools,
+          contextLogWriter,
+          progressRegistry,
+          spillRoot
+        ),
     },
     {
       method: "GET",

@@ -238,11 +238,29 @@ MCP 部分完全取决于用户接了什么，**不受本仓库控制**。
 | 工具源头 | 25 000 字符 | `clampAtSource`，`src/agent/coreTools.ts:65` |
 | 循环 | 20 000 字符 | `clampToolResult`，`src/agent/loop.ts:90` |
 
-**模型看到什么**：超限时结尾追加 `\n...[truncated]`，模型能看出被截断了。
+**模型看到什么**：自 T2 起，超限结果**不再被丢弃**，而是落盘并替换成：
 
-⚠️ **但没有任何取回剩余内容的途径**——这正是 T2（spill）要解决的问题。
+```
+<前 2000 字符>
+...[<N> chars total; full output saved to <path>]...
+<后 1000 字符>
+Use opentype__read_file or opentype__grep on <path> to read the rest.
+```
 
-**Token 成本**：单次最多约 5000 token；10 次迭代累积可达数万 token。
+取回路径不是承诺而是事实：`opentype__read_file` 和 `opentype__grep` 本来就在 agent 的工具集里
+（有一个集成测试直接用 `read_file` 读回落盘内容）。
+
+落盘失败时**退回**到原来的 `\n...[truncated]` 截断——best-effort，
+**一次成功的工具调用绝不能因为存储失败变成错误结果**。
+`/oneshot/ask` 目前未接 spill（保持纯截断），因为它的 web 工具结果本就受源头钳制约束。
+
+**Token 成本**：spill 后单次约 750 token（3000 字符预览 + 提示），
+低于此前 20 000 字符截断的约 5000 token——**spill 反而更省**，
+代价是模型可能追加一次 `read_file` 调用去取它真正需要的片段。
+
+**存储**：`OPENTYPE_SPILL_ROOT`（默认 `sidecar/.data/spill/`）下按 runId 分目录，
+目录 0700、文件 0600 且以 `wx` 独占创建（防符号链接重定向）。
+工具名与 runId 都经消毒后才进路径。
 
 ---
 

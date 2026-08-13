@@ -14,6 +14,8 @@ export interface SidecarEnv {
   /** Overrides `WhisperClient`'s default relative `whisper/serve.py`;
    *  unset in dev mode, set to an absolute bundled path by the packaged app. */
   whisperScriptPath?: string;
+  /** Root directory for spilled oversized tool results (`agent/spill.ts`). */
+  spillRoot: string;
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
@@ -54,6 +56,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
   // ("whisper-env/bin/python3", "whisper/serve.py") are correct as-is.
   const whisperPythonBin = source.OPENTYPE_WHISPER_PYTHON_BIN;
   const whisperScriptPath = source.OPENTYPE_WHISPER_SCRIPT_PATH;
+  // Root for oversized tool-result artifacts (`agent/spill.ts`, T2). Same
+  // env-var-override-with-`.data`-default convention as `dbPath` above, and
+  // anchored to the module directory for the same reason: a cwd-relative
+  // default would scatter artifacts depending on where the sidecar launched.
+  const spillRoot =
+    source.OPENTYPE_SPILL_ROOT ?? resolve(import.meta.dir, "..", ".data", "spill");
 
   return {
     socketPath,
@@ -65,5 +73,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
     whisperSocketPath,
     whisperPythonBin,
     whisperScriptPath,
+    spillRoot,
   };
 }

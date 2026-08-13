@@ -1,5 +1,6 @@
 import { AGENT_SYSTEM_PROMPT } from "../oneshot/prompts";
 import type { McpToolSet } from "./mcpClient";
+import { spillOrClamp } from "./spill";
 
 /**
  * Agent-loop message shape. Deliberately not reusing `OneShotChatFn` from
@@ -74,6 +75,17 @@ export interface RunAgentLoopDeps {
   chat: AgentChatFn;
   tools: McpToolSet;
   onProgress?: (event: AgentProgressEvent) => void;
+  /**
+   * Persists one oversized tool result and returns its locator, or `null`
+   * when it could not be stored (T2). Omitted, an oversized result is
+   * truncated exactly as before -- so a caller that has nowhere to spill
+   * (tests, the ask path before it opts in) keeps the original behavior.
+   *
+   * The loop deliberately does not know about run ids or spill roots: the
+   * caller closes over both, keeping this seam to "here is text, give me a
+   * locator".
+   */
+  spill?: (text: string, toolName: string) => Promise<string | null>;
 }
 
 export interface RunAgentLoopResult {
@@ -93,18 +105,11 @@ const MAX_ITERATIONS = 10;
 const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /**
- * Pure size cap for a tool result. Returns `text` unchanged when it already
- * fits within `maxLen`; otherwise truncates to `maxLen` and appends a short
- * marker (so the total stays close to `maxLen`) carrying a visible truncation
- * indicator, so the model can tell content was cut rather than silently
- * receiving a partial blob.
+ * Re-exported from `./spill`, which owns tool-result bounding since T2 added
+ * the spill path beside this truncation. Kept exported here because it was
+ * this module's public helper first and is imported as such.
  */
-export function clampToolResult(text: string, maxLen: number): string {
-  if (text.length <= maxLen) {
-    return text;
-  }
-  return `${text.slice(0, maxLen)}\n...[truncated]`;
-}
+export { clampToolResult } from "./spill";
 
 interface OpenAiToolCall {
   id: string;
@@ -162,7 +167,7 @@ export async function runAgentLoop(
   input: RunAgentLoopInput,
   deps: RunAgentLoopDeps
 ): Promise<RunAgentLoopResult> {
-  const { chat, tools, onProgress } = deps;
+  const { chat, tools, onProgress, spill } = deps;
   const maxIterations = input.maxIterations ?? MAX_ITERATIONS;
   const messages = buildInitialMessages(input);
   const steps: AgentProgressEvent[] = [];
@@ -218,7 +223,12 @@ export async function runAgentLoop(
         role: "tool",
         tool_call_id: toolCall.id,
         name: toolCall.function.name,
-        content: clampToolResult(toolResultContent, MAX_TOOL_RESULT_CHARS),
+        content: await spillOrClamp(toolResultContent, {
+          maxInline: MAX_TOOL_RESULT_CHARS,
+          save: spill
+            ? () => spill(toolResultContent, toolCall.function.name)
+            : undefined,
+        }),
       });
     }
   }

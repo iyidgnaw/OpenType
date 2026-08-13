@@ -52,7 +52,13 @@ export function buildApp(
   contextLogWriter: ContextUsageLogWriter,
   callLLM: CallLLM,
   transcribe: (audio: Uint8Array) => Promise<string>,
-  providerConfigStore: ProviderConfigStore
+  providerConfigStore: ProviderConfigStore,
+  /**
+   * Root for spilled oversized tool results (T2). Omitted -- as every
+   * pre-existing test call site does -- restores the truncate-and-discard
+   * behavior, so spilling is opt-in per assembly rather than ambient.
+   */
+  spillRoot?: string
 ) {
   return createRouter([
     {
@@ -62,7 +68,7 @@ export function buildApp(
     },
     ...buildOneShotRoutes(store, conversations, chat, contextLogWriter, tools),
     ...buildMemoryRoutes(store, callLLM),
-    ...buildAgentRoutes(store, conversations, chat, tools, contextLogWriter),
+    ...buildAgentRoutes(store, conversations, chat, tools, contextLogWriter, spillRoot),
     ...buildConversationRoutes(conversations),
     ...buildAsrRoutes(transcribe),
     ...buildTranscribeRoutes(chat),
@@ -208,7 +214,8 @@ async function main() {
     contextLogWriter,
     callLLM,
     resolveTranscribe,
-    providerConfigStore
+    providerConfigStore,
+    env.spillRoot
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

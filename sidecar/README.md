@@ -29,7 +29,14 @@ its SQLite DB at `sidecar/.data/opentype.sqlite3`. Useful env vars (see
 - `OPENTYPE_SIDECAR_SOCKET` — override the Unix socket path.
 - `OPENTYPE_SIDECAR_DB_PATH` — override the SQLite DB path.
 - `OPENTYPE_MCP_SERVERS` — JSON config for Agent-mode MCP tool servers (see
-  `src/agent/mcpClient.ts`); omit to run Agent mode with no tools connected.
+  `src/agent/mcpClient.ts`); omit to run Agent mode with no MCP servers
+  connected (the built-in tools are always available regardless). Since
+  P2-13 this is only the **zero-config dev fallback**: the saved config in
+  `mcp-servers.json` (written through `/config/mcp`, see `src/agent/
+  mcpConfigStore.ts`) wins whenever the user has ever saved anything, and
+  wins entirely — env servers are never merged in, so removing your last
+  saved server means "no MCP servers" rather than silently reinstating
+  these. An env var alone never reports as configured.
 - `OPENTYPE_WHISPER_PYTHON_BIN` / `OPENTYPE_WHISPER_SCRIPT_PATH` — override
   the MLX-Whisper python interpreter/script path; only needed for the
   packaged app (dev mode uses the relative `whisper-env/`/`whisper/`
@@ -70,7 +77,22 @@ you're debugging packaging specifically.
   two **always-available** built-in tools (`remember_fact`,
   `consolidate_memory_now`); `toolSets.ts` merges them with any connected MCP
   tools, so Agent mode can always call at least those two even with no MCP
-  server configured.
+  server configured. `mcpConfigStore.ts` persists the user's MCP servers
+  (`mcp-servers.json`, next to the SQLite DB, `0600`, same atomic-write /
+  self-healing conventions as `provider/configStore.ts` — and the same
+  documented plaintext tradeoff, since a server's `env`/`headers` routinely
+  carry real tokens) and owns the saved-beats-env precedence
+  (`resolveMcpServers`); `mcpConfigRoutes.ts` is the HTTP surface over it:
+  `GET /config/mcp` (list, `{configured, source, servers}` — secrets only
+  ever as `envMasked`/`headersMasked`), `POST /config/mcp` (create),
+  `PUT /config/mcp/:name` (replace, not patch), `DELETE /config/mcp/:name`,
+  and `POST /config/mcp/test` (connect a candidate, report the tools it
+  exposes, save nothing). On a write, a submitted secret equal to the mask of
+  the stored value for that same server+key means "unchanged" — resolution is
+  scoped to the addressed server and to that one key, never a search across
+  the config, which would make the mask a read primitive for other servers'
+  credentials. Connections are established at boot, so a saved change applies
+  from the next sidecar start.
 - `src/asr/` — `/asr/transcribe`; proxies to the persistent local
   MLX-Whisper python process (`whisper/serve.py`) over its own Unix socket.
   `dictionaryBias.ts` feeds the entity dictionary back into recognition from

@@ -4,6 +4,8 @@ import { buildAgentRoutes } from "./agent/routes";
 import { withApproval, yoloApprovalPolicy } from "./agent/approval";
 import type { AgentChatFn } from "./agent/loop";
 import { connectConfiguredMcpServers } from "./agent/mcpClient";
+import { McpConfigStore, resolveMcpServers } from "./agent/mcpConfigStore";
+import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
 import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
@@ -61,7 +63,17 @@ export function buildApp(
    */
   spillRoot?: string,
   /** Root for durable per-run step logs (T7); omitted disables recording. */
-  runLogRoot?: string
+  runLogRoot?: string,
+  /**
+   * Backs the Settings "MCP 服务器" panel (P2-13). Optional so pre-existing
+   * assembly call sites keep compiling; omitted, the app simply serves no
+   * `/config/mcp` routes. `mcpEnvJson` is the `OPENTYPE_MCP_SERVERS` fallback
+   * those routes report as `source: "env"` -- passed in rather than read from
+   * `process.env` here so it is one explicit wiring decision, made in
+   * `main()`.
+   */
+  mcpConfigStore?: McpConfigStore,
+  mcpEnvJson?: string
 ) {
   return createRouter([
     {
@@ -92,6 +104,9 @@ export function buildApp(
     }),
     ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),
+    ...(mcpConfigStore
+      ? buildMcpConfigRoutes(mcpConfigStore, { envJson: mcpEnvJson })
+      : []),
   ]);
 }
 
@@ -136,7 +151,24 @@ async function main() {
     const result = await resolveChat([{ role: "user", content: prompt }]);
     return result.content ?? "";
   };
-  const mcpTools = await connectConfiguredMcpServers(process.env.OPENTYPE_MCP_SERVERS);
+  // MCP servers: the user's saved config (Settings' "MCP 服务器" panel, P2-13)
+  // if they have any, otherwise the `OPENTYPE_MCP_SERVERS` env var kept as the
+  // zero-config dev fallback -- `resolveMcpServers` owns that precedence, and
+  // the same "configured is explicit, never ambient" rule as the provider
+  // config: an env var alone never reports as configured. Persisted next to
+  // the SQLite DB, same data-directory convention as `provider-config.json`.
+  //
+  // Connections are established once, here, for this process's lifetime: a
+  // server added or edited through the API applies from the next sidecar
+  // start, not mid-run.
+  const mcpConfigStore = new McpConfigStore(
+    join(dirname(env.dbPath), "mcp-servers.json")
+  );
+  const resolvedMcpServers = resolveMcpServers(
+    mcpConfigStore,
+    process.env.OPENTYPE_MCP_SERVERS
+  );
+  const mcpTools = await connectConfiguredMcpServers(resolvedMcpServers.servers);
   const builtInTools = createBuiltInTools({ store, callLLM });
   const coreTools = createCoreTools({});
   // The approval seam wraps the *merged* set so built-in memory tools, core
@@ -246,7 +278,9 @@ async function main() {
     resolveTranscribe,
     providerConfigStore,
     env.spillRoot,
-    env.runLogRoot
+    env.runLogRoot,
+    mcpConfigStore,
+    process.env.OPENTYPE_MCP_SERVERS
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

@@ -158,6 +158,17 @@ P1/P2 是围绕这个环的收敛与体感。
   行内增删改。owner facts 的删除也做进同一个面板（`DELETE /memory/owner-facts/:id` 已经有了，只差 UI）。
 - 词条来源要显示（owner / untrusted / agent / system），因为 untrusted 的存在本身就是 P1-12 要让用户看得见的东西。
 
+### origin 的单向提升（本批新增的规则）
+
+`upsertEntityTerm` 今天不合并 origin：合并进一个已有词条时，保留旧的 origin 不动。这在本批之前无所谓，
+但现在有两条**用户亲手确认**的写入路径（P0-4 的设置里手动新增、P0-2 的语音纠错），如果它们合并进一个
+`remember_fact` 写下的 `untrusted` 词条，那个词条会永远挂着「不可信」标记——而用户刚刚亲自为它背了书。
+provenance 标记的全部意义就是让用户去审；审过了还不摘掉，这个标记就变成噪声，用户会学会无视它。
+
+规则：**incoming origin 是 `owner` 时，合并后的 origin 变成 `owner`；否则保持原样。** 即 owner 是单向提升，
+永远不会被降级——一个 owner 词条被 `remember_fact` 的 untrusted 路径碰到时，仍然是 owner。
+这条逻辑属于 `upsertEntityTerm`（唯一的合并写入路径），不是某个调用方的特例。
+
 ---
 
 ## P1-5 ask + agent 合并成「助理」

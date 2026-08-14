@@ -64,6 +64,16 @@ private final class OverlayPresentation: ObservableObject {
     /// that stays quiet.
     @Published var modeSwitchHintAvailable = true
 
+    /// What the delivery toast shows under its headline: what `AppModel` says
+    /// it delivered, or failing that the caption of the recording that
+    /// produced it. Derived from two `@Published` values, so the layout
+    /// decision (`VoiceSurfacePanelMetrics.delivery`) and the view can read
+    /// the same answer instead of each deciding "is there text" separately.
+    var deliveryBody: String {
+        let text = deliveredText ?? lastCaption
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// The visible half of an armed correction window.
     struct CorrectionHint: Equatable {
         let text: String
@@ -143,17 +153,27 @@ enum VoiceSurfacePanelMetrics {
     static let card = NSSize(width: 640, height: 520)
     /// Toasts with a single headline row (mode changed, failed, cancelled).
     static let compactToast = NSSize(width: 420, height: 66)
-    /// A delivery toast: headline, the delivered text, and the merged
-    /// countdown/hint row.
-    static let deliveryToast = NSSize(width: 420, height: 122)
     static let pendingDispatch = NSSize(width: 420, height: 96)
+
+    /// A delivery toast: the headline, optionally what was delivered, and —
+    /// while a correction window is open — the merged countdown/hint row.
+    ///
+    /// Sized from what it will actually contain rather than to a worst case,
+    /// because the panel is fixed-height and an absent row would otherwise
+    /// leave a strip of blank material under the text.
+    static func delivery(hasText: Bool, hasHint: Bool) -> NSSize {
+        var height: CGFloat = 66
+        if hasText { height += 42 }
+        if hasHint { height += 33 }
+        return NSSize(width: 420, height: height)
+    }
 
     /// The question card grows with its options and stays 420 wide. A prompt,
     /// not a document — it never reaches the card's 640.
     static func asking(optionCount: Int) -> NSSize {
         // Header + question + the mic/answer row + padding, plus one 36pt row
         // per option inside a bordered list.
-        let base: CGFloat = 152
+        let base: CGFloat = 160
         let rows = CGFloat(min(max(optionCount, 0), 6)) * 36
         return NSSize(width: 420, height: base + rows)
     }
@@ -328,10 +348,21 @@ final class OverlayController {
         mode: InputMode
     ) {
         let previous = surfaceState
+        let previousProcessing = presentation.state
         surfaceState = surface
         lastState = state
         lastMode = mode
         trackProgress(from: previous, to: surface)
+
+        // A new recording starts a new thing to say. Keyed on the processing
+        // state rather than the surface because transcribe never enters the
+        // surface at all, and its delivery toast is the main reader of this —
+        // a recording that produces no live caption (captions off, or silence)
+        // must not show the previous one's words as what it just delivered.
+        if state == .listening, previousProcessing != .listening {
+            presentation.lastCaption = ""
+            presentation.deliveredText = nil
+        }
 
         // A new recording is a fresh, user-initiated action: it always wins
         // over a toast still sitting on the panel.
@@ -425,9 +456,10 @@ final class OverlayController {
                 presentation.workingStartedAt = nil
             }
         case .listening:
-            // A new recording starts a new task: the previous run's caption
-            // must not linger under it.
-            presentation.lastCaption = ""
+            // A new recording is a new task: the finished run's duration is no
+            // longer what this panel is about. (The caption is cleared by
+            // `apply`, which sees the processing state transcribe never leaves
+            // the surface for.)
             presentation.finishedElapsed = nil
         case .hidden, .processing, .working, .asking:
             break
@@ -669,13 +701,17 @@ final class OverlayController {
             return true
         }
 
+        // Local only, deliberately. A global monitor sees key events on their
+        // way to *other* applications, so a bare "1" typed into Slack while a
+        // question was open would answer it — and the agent would act on that
+        // answer, with tools. The question card takes key focus when it
+        // appears (`canBecomeKey` + `makeKeyAndOrderFront`, added for the
+        // custom-answer field), so a local monitor covers exactly the moment
+        // the user is looking at the card and means to reply, and nothing else.
         let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             answer(event) ? nil : event
         }
-        let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
-            _ = answer(event)
-        }
-        questionKeyMonitors = [local, global].compactMap { $0 }
+        questionKeyMonitors = [local].compactMap { $0 }
     }
 
     private func removeQuestionKeyMonitors() {
@@ -721,7 +757,10 @@ final class OverlayController {
         case .listening:
             size = VoiceSurfacePanelMetrics.pill
         case .success, .copied:
-            size = VoiceSurfacePanelMetrics.deliveryToast
+            size = VoiceSurfacePanelMetrics.delivery(
+                hasText: !presentation.deliveryBody.isEmpty,
+                hasHint: presentation.correctionHint != nil
+            )
         default:
             size = VoiceSurfacePanelMetrics.compactToast
         }
@@ -1145,7 +1184,14 @@ private struct OverlayView: View {
                 .foregroundStyle(captionColor)
                 .lineLimit(2)
                 .truncationMode(.head)
-                .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
+                // Fills whatever the mode-switch row does not use, so the pill
+                // reads the same height with the hint and without it.
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: 38,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
                 .contentTransition(.opacity)
                 .animation(
                     .easeOut(duration: 0.16),
@@ -1251,12 +1297,16 @@ private struct OverlayView: View {
                 }
             }
 
-            Text(presentation.deliveredText ?? presentation.lastCaption)
-                .font(DS.Text.caption())
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
+            if !presentation.deliveryBody.isEmpty {
+                Text(presentation.deliveryBody)
+                    .font(DS.Text.caption())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+
+            Spacer(minLength: 0)
 
             if let hint {
                 HStack(spacing: 9) {
@@ -1277,11 +1327,7 @@ private struct OverlayView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .frame(
-            width: VoiceSurfacePanelMetrics.deliveryToast.width,
-            height: VoiceSurfacePanelMetrics.deliveryToast.height,
-            alignment: .topLeading
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     /// 「已写入 Notes」 when the text went into an app, 「已复制」 when the
@@ -1465,10 +1511,15 @@ private struct WorkingPill: View {
                 Text(task)
                     .font(DS.Text.body())
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
             }
+
+            // The tool block sits on the pill's bottom edge whether or not
+            // there is a task line above it, so it does not slide up and down
+            // between a run started with live captions on and one without.
+            Spacer(minLength: 0)
 
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
@@ -1856,15 +1907,24 @@ enum VoiceResultActions {
     /// Reads the steps before the body: `opentype__open_file` naming a path is
     /// direct evidence of a produced file, whereas the answer's prose may just
     /// be quoting an input. Only absolute or `~`-rooted paths with an
-    /// extension count — a bare word with a dot in it is not a file.
+    /// extension count, and only ones that **exist** — an answer quoting a URL
+    /// path or an example filename would otherwise put a 「打开 PDF」 button on
+    /// the card that opens nothing.
     static func producedPath(in card: VoiceSurfaceState.ResultCard) -> String? {
         for step in card.steps.reversed() where step.kind == .toolCall {
             guard let line = AgentToolLine.parse(step.detail),
                   line.tool.contains("open_file") || line.tool.contains("write")
             else { continue }
-            if let path = firstPath(in: line.summary) { return path }
+            if let path = existingPath(in: line.summary) { return path }
         }
-        return firstPath(in: card.body)
+        return existingPath(in: card.body)
+    }
+
+    private static func existingPath(in text: String) -> String? {
+        guard let path = firstPath(in: text) else { return nil }
+        let expanded = (path as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: expanded) else { return nil }
+        return path
     }
 
     private static let pathPattern = try? NSRegularExpression(

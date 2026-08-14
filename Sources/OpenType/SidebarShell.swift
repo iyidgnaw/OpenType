@@ -48,6 +48,13 @@ struct SidebarShell<List: View, Detail: View>: View {
                         }
                     }
                     .animation(.easeInOut(duration: 0.22), value: showsDetail)
+                } else if model.selectedTab.isFullWidthPage {
+                    // 听写 and 记忆 are single pages with their own internal
+                    // splits. Giving them the 334pt list slot capped them below
+                    // their own two-column threshold, so they rendered stacked
+                    // next to an empty half-window.
+                    list()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     list()
                         .frame(width: DS.Size.list)

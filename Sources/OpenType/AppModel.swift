@@ -642,6 +642,12 @@ final class AppModel: ObservableObject {
         hotKey.onCancelRequested = { [weak self] in
             self?.cancelActiveVoiceSession()
         }
+        // The listening pill offers 「Tab 切换…」 only where Tab actually
+        // cycles: the Space-chord presets have no modifier-only event tap, so
+        // there is nothing to hold while pressing it, and promising the gesture
+        // to those users would be the same mistake the old hardcoded hint made
+        // in the other direction.
+        overlay.modeSwitchHintAvailable = configuration.hotKeyPreset.modeSwitchHint != nil
         hotKey.onCycleMode = { [weak self] in
             self?.cycleMode()
         }
@@ -1048,11 +1054,15 @@ final class AppModel: ObservableObject {
         let installed = hotKey.reinstall(preference: preset)
         if installed {
             configuration.hotKeyPreset = preset
+            // The pill's Tab hint follows the preset, or it would keep
+            // promising a gesture the user just switched away from.
+            overlay.modeSwitchHintAvailable = preset.modeSwitchHint != nil
             updateShortcutPresentation(preference: preset, installed: true)
             return
         }
 
         let restored = hotKey.reinstall(preference: previous)
+        overlay.modeSwitchHintAvailable = previous.modeSwitchHint != nil
         updateShortcutPresentation(preference: previous, installed: restored)
         shortcutStatus = OpenTypeL10n.text(
             "\(preset.title) 已被系统或其他应用占用，已恢复 \(previous.title)",
@@ -1736,6 +1746,12 @@ final class AppModel: ObservableObject {
     /// these two must never disagree.
     private func syncCorrectionWindowAffordance() {
         overlay.correctionWindowArmed = correctionWindowSession != nil
+        // 「已写入 Notes」 rather than 「已复制」: where the text landed is the
+        // one part of the outcome the user cannot see for themselves, and the
+        // old copy described the mechanism instead. Falls back to the generic
+        // wording when the app is unknown rather than naming the wrong one.
+        overlay.deliveryTargetApp = correctionWindowSession != nil ? lastApplication : nil
+        overlay.deliveredText = correctionWindowSession != nil ? lastResult : nil
     }
 
     /// Commits the current Review-panel text (Enter button / Cmd+Return) —
@@ -3914,6 +3930,21 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .dictation: return "clock.arrow.circlepath"
         case .memory: return "brain"
         case .settings: return "slider.horizontal.3"
+        }
+    }
+
+    /// Whether this destination is one page that wants the whole content area,
+    /// rather than a list beside a detail view.
+    ///
+    /// Not derivable from "is something focused": 会话 with no thread open also
+    /// has nothing in the detail column, but its list must stay 334pt with a
+    /// placeholder beside it, because a thread is about to appear there. These
+    /// two never have a second column at all, so handing them the list slot
+    /// pins them to 334pt and their own two-column layouts never fit.
+    var isFullWidthPage: Bool {
+        switch self {
+        case .dictation, .memory: return true
+        case .sessions, .settings: return false
         }
     }
 }

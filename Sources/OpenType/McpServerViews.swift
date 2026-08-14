@@ -403,10 +403,17 @@ struct AgentToolsPage: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(OpenTypeL10n.text("当前来自环境变量，只读", english: "Currently from an environment variable, read-only"))
                     .font(DS.Text.body(.semibold))
-                Text(OpenTypeL10n.text(
-                    "这 \(servers.count) 个服务器由 OPENTYPE_MCP_SERVERS 提供，不能在这里改。一旦你在这里保存第一个服务器，环境变量会被整份忽略 —— 不是合并。",
-                    english: "These \(servers.count) servers come from OPENTYPE_MCP_SERVERS and can't be edited here. The moment you save your first server, the environment variable is ignored in its entirety — not merged."
-                ))
+                McpCodeSentence(
+                    OpenTypeL10n.text(
+                        "这 \(servers.count) 个服务器由 ",
+                        english: "These \(servers.count) servers come from "
+                    ),
+                    "OPENTYPE_MCP_SERVERS",
+                    OpenTypeL10n.text(
+                        " 提供，不能在这里改。一旦你在这里保存第一个服务器，环境变量会被整份忽略 —— 不是合并。",
+                        english: " and can't be edited here. The moment you save your first server, the environment variable is ignored in its entirety — not merged."
+                    )
+                )
                 .font(DS.Text.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -488,7 +495,7 @@ struct AgentToolsPage: View {
         VStack(alignment: .leading, spacing: 7) {
             Text(OpenTypeL10n.text("环境变量", english: "Environment variable"))
                 .font(DS.Text.body(.semibold))
-            Text(environmentCardBody)
+            environmentCardBody
                 .font(DS.Text.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -499,16 +506,24 @@ struct AgentToolsPage: View {
         .dsCard()
     }
 
-    private var environmentCardBody: String {
+    private var environmentCardBody: Text {
         if isEnvironmentOnly {
-            return OpenTypeL10n.text(
-                "上面的列表来自 OPENTYPE_MCP_SERVERS。你保存第一个服务器之后，这个变量会被整份忽略，不会合并 —— 那之后只用你保存的列表，删光了就是没有 MCP 服务器。",
-                english: "The list above comes from OPENTYPE_MCP_SERVERS. Once you save your first server that variable is ignored in its entirety, not merged — from then on only your saved list is used, and emptying it means no MCP servers at all."
+            return McpCodeSentence(
+                OpenTypeL10n.text("上面的列表来自 ", english: "The list above comes from "),
+                "OPENTYPE_MCP_SERVERS",
+                OpenTypeL10n.text(
+                    "。你保存第一个服务器之后，这个变量会被整份忽略，不会合并 —— 那之后只用你保存的列表，删光了就是没有 MCP 服务器。",
+                    english: ". Once you save your first server that variable is ignored in its entirety, not merged — from then on only your saved list is used, and emptying it means no MCP servers at all."
+                )
             )
         }
-        return OpenTypeL10n.text(
-            "你已保存了自己的配置，所以 OPENTYPE_MCP_SERVERS 被整份忽略，不会合并。删掉最后一个服务器的意思是「没有 MCP 服务器」，不是退回环境变量那一套。",
-            english: "You have your own saved config, so OPENTYPE_MCP_SERVERS is ignored in its entirety rather than merged. Deleting the last server means no MCP servers — not a quiet fall back to the environment variable."
+        return McpCodeSentence(
+            OpenTypeL10n.text("你已保存了自己的配置，所以 ", english: "You have your own saved config, so "),
+            "OPENTYPE_MCP_SERVERS",
+            OpenTypeL10n.text(
+                " 被整份忽略，不会合并。删掉最后一个服务器的意思是「没有 MCP 服务器」，不是退回环境变量那一套。",
+                english: " is ignored in its entirety rather than merged. Deleting the last server means no MCP servers — not a quiet fall back to the environment variable."
+            )
         )
     }
 
@@ -658,9 +673,11 @@ private struct McpServerRowView: View {
                 .foregroundStyle(.tertiary)
                 .padding(.top, 2)
         }
-        .contentShape(Rectangle())
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+        // After the padding, so the whole row is the hit target rather than
+        // just the text inside it.
+        .contentShape(Rectangle())
         .overlay(alignment: .top) {
             if !isFirst {
                 Rectangle().fill(DS.Colour.hairline).frame(height: 0.75)
@@ -891,6 +908,18 @@ struct McpServerSheet: View {
                     if !test.success {
                         failureAdvice
                     }
+                } else if test != nil {
+                    // The result is dropped rather than left on screen next to
+                    // a configuration it no longer describes — but silently
+                    // dropping it would look like the test button did nothing,
+                    // so the reason takes its place.
+                    Text(OpenTypeL10n.text(
+                        "配置改过了，上一次的测试结果不再作数。重新测试通过之后才能保存。",
+                        english: "The configuration changed, so the previous test no longer describes it. Test again and pass before saving."
+                    ))
+                    .font(DS.Text.caption())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 if let saveError {
                     Label(saveError, systemImage: "exclamationmark.triangle.fill")
@@ -920,7 +949,7 @@ struct McpServerSheet: View {
                 text: $draft.name,
                 placeholder: OpenTypeL10n.text("例如 github", english: "e.g. github")
             )
-            Text(nameHint)
+            nameHint
                 .font(DS.Text.groupLabel())
                 .fontWeight(.regular)
                 .foregroundStyle(nameViolation == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(DS.Colour.warningText))
@@ -928,13 +957,20 @@ struct McpServerSheet: View {
         }
     }
 
-    private var nameHint: String {
+    private var nameHint: Text {
         if let nameViolation {
-            return nameViolation
+            return Text(nameViolation)
         }
-        return OpenTypeL10n.text(
-            "会成为工具名的前缀 —— github__create_issue。只能用字母、数字、_ 和 -。",
-            english: "Becomes the prefix of every tool name — github__create_issue. Letters, digits, _ and - only."
+        return McpCodeSentence(
+            OpenTypeL10n.text(
+                "会成为工具名的前缀 —— ",
+                english: "Becomes the prefix of every tool name — "
+            ),
+            "github__create_issue",
+            OpenTypeL10n.text(
+                "。只能用字母、数字、_ 和 -。",
+                english: ". Letters, digits, _ and - only."
+            )
         )
     }
 
@@ -1558,6 +1594,7 @@ private struct McpWrappingTags: View {
     /// Greedy packing on an estimated width — mono glyphs are a fixed advance,
     /// so the estimate is exact enough for chips.
     private var rows: [[String]] {
+        // 560 sheet − 20/20 form padding − 12/12 block padding.
         let available: CGFloat = 496
         var rows: [[String]] = []
         var current: [String] = []
@@ -1945,6 +1982,18 @@ private struct McpSegmentedControl: View {
         case .http: return OpenTypeL10n.text("远程 HTTP", english: "Remote HTTP")
         }
     }
+}
+
+/// A sentence with one machine identifier set in mono, the way the handoff
+/// chips `OPENTYPE_MCP_SERVERS` and `github__create_issue` inside body copy.
+///
+/// Built by concatenating `Text` rather than by handing SwiftUI a markdown
+/// string: the identifiers on this page contain `__`, which markdown would
+/// read as emphasis and swallow — turning a tool name into a bold fragment of
+/// itself in exactly the copy that exists to show the user its literal
+/// spelling.
+private func McpCodeSentence(_ prefix: String, _ code: String, _ suffix: String) -> Text {
+    Text(prefix) + Text(code).font(DS.Text.mono()) + Text(suffix)
 }
 
 private struct McpFormHeightKey: PreferenceKey {

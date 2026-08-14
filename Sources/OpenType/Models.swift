@@ -591,24 +591,32 @@ enum VoiceSurfacePanelLayout {
         )
     }
 
-    /// The spec §1 size table.
+    /// The panel's size for a state.
+    ///
+    /// Forwards to `VoiceSurfacePanelMetrics` (`OverlayController.swift`)
+    /// rather than carrying its own numbers. It used to hold a second copy of
+    /// the table, which is how the 2026-08-14 redesign found the panel using
+    /// six different widths: two tables, each locally reasonable, drifting
+    /// apart one state at a time. One table, one place to change it.
     static func size(for state: VoiceSurfaceState) -> CGSize {
         switch state {
         case .hidden:
             return .zero
-        // One size for every pre-result state. `.processing` and `.working`
-        // render the SAME view, so the 24pt `.working` used to add was dead
-        // space rather than room for anything, and resizing between two
-        // identical-looking pills read as a twitch. The panel now holds still
-        // from the first word until it morphs into the card.
         case .listening, .processing, .working:
-            return CGSize(width: 388, height: 96)
-        case .asking:
-            // Wide enough to read a question and its choices, but well short
-            // of the result card: this is a prompt, not a document.
-            return CGSize(width: 480, height: 260)
+            return CGSize(
+                width: VoiceSurfacePanelMetrics.pill.width,
+                height: VoiceSurfacePanelMetrics.pill.height
+            )
+        case .asking(let detail):
+            let size = VoiceSurfacePanelMetrics.asking(
+                optionCount: detail.question.options?.count ?? 0
+            )
+            return CGSize(width: size.width, height: size.height)
         case .result, .failed:
-            return CGSize(width: 620, height: 480)
+            return CGSize(
+                width: VoiceSurfacePanelMetrics.card.width,
+                height: VoiceSurfacePanelMetrics.card.height
+            )
         }
     }
 }

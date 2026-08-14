@@ -1532,6 +1532,10 @@ private struct SettingsView: View {
                     LLMProviderSetupContent(model: model)
                 }
 
+                SettingsSection(OpenTypeL10n.text("MCP 服务器", english: "MCP Servers")) {
+                    McpServerPanelView(model: model)
+                }
+
                 SettingsSection("连接与权限") {
                     HStack {
                         Label(
@@ -2209,6 +2213,745 @@ private struct MemoryOriginBadge: View {
             return "gearshape"
         default:
             return "questionmark.circle"
+        }
+    }
+}
+
+// MARK: - MCP servers (P2-13)
+
+/// Settings' "MCP 服务器" panel: add, edit, remove and test the MCP servers the
+/// agent gets its extra tools from (`sidecar/src/agent/mcpConfigRoutes.ts`,
+/// via `AppModel`'s "MCP server configuration" section). Until this panel
+/// existed, `OPENTYPE_MCP_SERVERS` was the only way in and a packaged `.app`
+/// user has no way to set an env var.
+///
+/// **Secrets never round-trip through an editable field.** The sidecar answers
+/// with `envMasked`/`headersMasked` only, so a real token never reaches Swift;
+/// an already-saved secret therefore renders as its mask in *static* text with
+/// a "已保存" tag, never inside a `TextField`/`SecureField` a user could be led
+/// to believe holds the real value. Replacing one is an explicit action
+/// (`McpSecretRow`'s "更换"), and it starts from an empty field. See
+/// `McpServerEditor.request()` for the submit side.
+private struct McpServerPanelView: View {
+    @ObservedObject var model: AppModel
+
+    /// Whether the "add a server" form is open. Held here rather than inside
+    /// the editor so closing it discards the whole draft, secrets included,
+    /// instead of leaving typed values parked in a hidden view's state.
+    @State private var isAddingServer = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(OpenTypeL10n.text(
+                "MCP 服务器给 Agent 增加工具。连接是在后台服务启动时建立的，所以这里的改动要重启 OpenType 才生效；保存前先「测试连接」，一个连不上的服务器会拖慢、甚至卡住下次启动。",
+                english: "MCP servers give Agent mode extra tools. Connections are made when the background service starts, so changes here apply after you restart OpenType — and use Test Connection before saving, since a server that can't be reached slows the next startup down, or stalls it."
+            ))
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            // The honest sentence. Anyone adding a server from a half-read
+            // README needs to know what the grant actually is before they paste
+            // a command in, so it sits above the list, not in a tooltip.
+            Label(
+                OpenTypeL10n.text(
+                    "这些工具和内置工具一样，直接在你的电脑上运行，没有沙箱；除少数已知的破坏性 shell 命令会先弹窗确认外，它们做的事不会再经过你同意。只添加你自己信任的服务器。",
+                    english: "Those tools run directly on your Mac with no sandbox, exactly like the built-in ones — and apart from a few named destructive shell commands that ask first, what they do is not confirmed with you. Only add servers you trust."
+                ),
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.system(size: 9.5))
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let error = model.mcpEditError {
+                Label(error, systemImage: "xmark.circle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let config = model.mcpConfig {
+                if config.source == .env && !config.servers.isEmpty {
+                    Text(OpenTypeL10n.text(
+                        "下面的服务器来自 OPENTYPE_MCP_SERVERS 环境变量（开发用的回退），不是你保存的配置，所以不能在这里改。一旦你在这里保存了任何服务器，就只使用你保存的列表，环境变量里的不再生效。",
+                        english: "The servers below come from the OPENTYPE_MCP_SERVERS environment variable — a dev fallback, not your saved config, so they aren't editable here. Once you save any server here, only your saved list is used and the environment variable stops applying."
+                    ))
+                    .font(.system(size: 8.8))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if config.servers.isEmpty {
+                    Text(OpenTypeL10n.text("还没有配置 MCP 服务器", english: "No MCP servers configured yet"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(config.servers) { server in
+                        McpServerRow(
+                            model: model,
+                            server: server,
+                            isEditable: config.source == .saved
+                        )
+                    }
+                }
+            } else {
+                Text(OpenTypeL10n.text("正在读取…", english: "Loading…"))
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
+
+            if isAddingServer {
+                McpServerEditor(
+                    model: model,
+                    existing: nil,
+                    onDone: { isAddingServer = false },
+                    onCancel: { isAddingServer = false }
+                )
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    Color.primary.opacity(0.028),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+            } else {
+                Button(OpenTypeL10n.text("添加服务器", english: "Add a server")) {
+                    isAddingServer = true
+                }
+                .controlSize(.small)
+            }
+        }
+        .task {
+            await model.refreshMcpServers()
+        }
+    }
+}
+
+/// One configured server: a compact read view that flips in place into
+/// `McpServerEditor`, plus a confirmed delete. Env-sourced rows
+/// (`isEditable == false`) show the same information with no actions — they
+/// live in an environment variable, not in the store the routes address, so a
+/// `PUT`/`DELETE` against them would 404.
+private struct McpServerRow: View {
+    @ObservedObject var model: AppModel
+    let server: McpServerSummary
+    let isEditable: Bool
+
+    @State private var isEditing = false
+    @State private var showingDeleteConfirmation = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if isEditing {
+                McpServerEditor(
+                    model: model,
+                    existing: server,
+                    onDone: { isEditing = false },
+                    onCancel: { isEditing = false }
+                )
+            } else {
+                readOnlyRow
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color.primary.opacity(0.028),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .confirmationDialog(
+            OpenTypeL10n.text(
+                "删除 MCP 服务器「\(server.name)」？",
+                english: "Delete the MCP server “\(server.name)”?"
+            ),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                Task { await model.deleteMcpServer(name: server.name) }
+            }
+            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(OpenTypeL10n.text(
+                "Agent 将不再获得这个服务器提供的工具。保存的密钥也会一并删除。",
+                english: "Agent mode will stop getting this server's tools. Its saved secrets are deleted too."
+            ))
+        }
+    }
+
+    private var readOnlyRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(server.name)
+                    .font(.system(size: 10.5, weight: .medium))
+                Text(server.transport.title)
+                    .font(.system(size: 8.8, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if isEditable {
+                    Button {
+                        isEditing = true
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help(OpenTypeL10n.text("编辑这个服务器", english: "Edit this server"))
+
+                    Button {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help(OpenTypeL10n.text("删除这个服务器", english: "Delete this server"))
+                } else {
+                    Label(
+                        OpenTypeL10n.text("来自环境变量", english: "From environment"),
+                        systemImage: "terminal"
+                    )
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(endpointDescription)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !secretKeys.isEmpty {
+                Text(OpenTypeL10n.text(
+                    "已保存密钥：\(secretKeys.joined(separator: "、"))",
+                    english: "Saved secrets: \(secretKeys.joined(separator: ", "))"
+                ))
+                .font(.system(size: 8.8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var endpointDescription: String {
+        switch server.transport {
+        case .stdio:
+            return ([server.command ?? ""] + (server.args ?? []))
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        case .http:
+            return server.url ?? ""
+        }
+    }
+
+    /// Key names only — the panel shows *that* a secret is set, never its
+    /// value, not even masked, at this zoom level.
+    private var secretKeys: [String] {
+        let map = server.transport == .stdio ? server.envMasked : server.headersMasked
+        return (map ?? [:]).keys.sorted()
+    }
+}
+
+/// One `env`/`headers` entry while it is being edited.
+///
+/// The two cases are the whole point of this type: a `.stored` entry is a
+/// secret that lives sidecar-side and reached Swift only as a mask, and a
+/// `.typed` entry is a value the user actually entered in this session. They
+/// render differently (static text vs. a `SecureField`) and submit differently
+/// (the mask, which the sidecar resolves back to the stored secret, vs. the
+/// literal text), so the distinction can't be collapsed into a plain string.
+private struct McpSecretEntry: Identifiable, Equatable {
+    enum Value: Equatable {
+        /// Already saved sidecar-side; `mask` is all Swift ever sees of it.
+        case stored(mask: String)
+        /// Entered by the user in this editing session.
+        case typed(String)
+    }
+
+    let id = UUID()
+    var key: String
+    var value: Value
+
+    var isStored: Bool {
+        if case .stored = value { return true }
+        return false
+    }
+
+    /// What goes into the request. For a `.stored` entry this is the mask, and
+    /// sending it verbatim is exactly how the sidecar is told "unchanged" —
+    /// it resolves a value equal to the stored mask, for that same server and
+    /// that same key, back to the stored secret.
+    var submittedValue: String {
+        switch value {
+        case .stored(let mask): return mask
+        case .typed(let text): return text
+        }
+    }
+}
+
+/// The add/edit form, used for both (`existing == nil` is a create).
+///
+/// Masking rules, which are the security-relevant part of this view:
+///
+///  1. A stored secret is seeded as `.stored(mask:)` and rendered as static
+///     text with a "已保存" tag. It is never placed in an editable field, so no
+///     edit to an unrelated field can carry a mask into a value the user
+///     believes is real.
+///  2. Its *key* is not editable either. The sidecar resolves masks per key, so
+///     renaming a key while keeping its mask would store the mask itself as
+///     that key's literal value — the exact bug rule 1 avoids, one level up.
+///     Changing a key means replacing the entry.
+///  3. "更换" starts from an empty `SecureField`, never from the mask.
+///  4. A `.typed` entry that is left half-filled blocks Save with a stated
+///     reason, rather than silently writing an empty secret or dropping the row.
+///  5. Only the active transport's map is submitted, and the editor closes on a
+///     successful save. Together those keep every `.stored` mask matched to a
+///     secret the sidecar still holds under that same key.
+private struct McpServerEditor: View {
+    @ObservedObject var model: AppModel
+    /// `nil` when adding a server.
+    let existing: McpServerSummary?
+    let onDone: () -> Void
+    let onCancel: () -> Void
+
+    @State private var name = ""
+    @State private var transport: McpTransport = .stdio
+    @State private var command = ""
+    @State private var argsText = ""
+    @State private var url = ""
+    @State private var envEntries: [McpSecretEntry] = []
+    @State private var headerEntries: [McpSecretEntry] = []
+    @State private var testResult: McpTestResultSummary?
+    @State private var isTesting = false
+    @State private var isSaving = false
+    @State private var didSeed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField(
+                OpenTypeL10n.text("名称（字母、数字、_ 或 -）", english: "Name (letters, digits, _ or -)"),
+                text: $name
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10))
+
+            Picker(
+                OpenTypeL10n.text("连接方式", english: "Transport"),
+                selection: $transport
+            ) {
+                ForEach(McpTransport.allCases) { candidate in
+                    Text(candidate.title).tag(candidate)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if transport == .stdio {
+                TextField(
+                    OpenTypeL10n.text("命令，例如 npx", english: "Command, e.g. npx"),
+                    text: $command
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(OpenTypeL10n.text("参数（每行一个）", english: "Arguments (one per line)"))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $argsText)
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(height: 52)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.75)
+                        )
+                }
+
+                McpSecretEntryList(
+                    title: OpenTypeL10n.text("环境变量", english: "Environment variables"),
+                    entries: $envEntries
+                )
+            } else {
+                TextField(
+                    "URL",
+                    text: $url,
+                    prompt: Text("https://mcp.example.com/mcp")
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+
+                McpSecretEntryList(
+                    title: OpenTypeL10n.text("请求头", english: "Headers"),
+                    entries: $headerEntries
+                )
+            }
+
+            if let blocker = saveBlocker {
+                Label(blocker, systemImage: "exclamationmark.circle")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button(isTesting
+                    ? OpenTypeL10n.text("测试中…", english: "Testing…")
+                    : OpenTypeL10n.text("测试连接", english: "Test Connection")
+                ) {
+                    test()
+                }
+                .controlSize(.small)
+                .disabled(saveBlocker != nil || isTesting || isSaving || renameBlocksTest)
+
+                Button(isSaving
+                    ? OpenTypeL10n.text("保存中…", english: "Saving…")
+                    : OpenTypeL10n.text("保存", english: "Save")
+                ) {
+                    save()
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .disabled(saveBlocker != nil || isSaving)
+
+                Button(OpenTypeL10n.text("取消", english: "Cancel")) {
+                    onCancel()
+                }
+                .controlSize(.small)
+                .disabled(isSaving)
+            }
+
+            if renameBlocksTest {
+                Text(OpenTypeL10n.text(
+                    "改名后请先保存，再测试连接：已保存的密钥是按原来的名字存的。",
+                    english: "Save the rename first, then test: the saved secrets are stored under the old name."
+                ))
+                .font(.system(size: 8.8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if hasStoredSecret {
+                Text(OpenTypeL10n.text(
+                    "「测试连接」会把已保存的密钥发送到上面填写的地址／命令。",
+                    english: "Test Connection sends the saved secrets to whatever address/command is entered above."
+                ))
+                .font(.system(size: 8.8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let testResult {
+                McpTestResultView(result: testResult)
+            }
+        }
+        .task {
+            guard !didSeed else { return }
+            didSeed = true
+            seed()
+        }
+    }
+
+    // MARK: Seeding
+
+    /// Populates the form from `existing`. Secrets are seeded as their masks in
+    /// `.stored` state — see the type's doc comment for why that is not the
+    /// same thing as putting a mask in a field.
+    private func seed() {
+        guard let existing else {
+            transport = .stdio
+            return
+        }
+        name = existing.name
+        transport = existing.transport
+        command = existing.command ?? ""
+        argsText = (existing.args ?? []).joined(separator: "\n")
+        url = existing.url ?? ""
+        envEntries = Self.entries(from: existing.envMasked)
+        headerEntries = Self.entries(from: existing.headersMasked)
+    }
+
+    private static func entries(from masked: [String: String]?) -> [McpSecretEntry] {
+        (masked ?? [:]).keys.sorted().map { key in
+            McpSecretEntry(key: key, value: .stored(mask: masked?[key] ?? ""))
+        }
+    }
+
+    // MARK: Validation
+
+    private var activeEntries: [McpSecretEntry] {
+        transport == .stdio ? envEntries : headerEntries
+    }
+
+    private var hasStoredSecret: Bool {
+        activeEntries.contains(where: \.isStored)
+    }
+
+    /// Testing a renamed server would submit masks the sidecar can't resolve
+    /// (it looks the stored record up by the *submitted* name), so they'd be
+    /// probed as literal credentials and fail for a reason that has nothing to
+    /// do with the user's config. Blocked with a stated reason instead.
+    private var renameBlocksTest: Bool {
+        guard let existing else { return false }
+        return hasStoredSecret && name.trimmingCharacters(in: .whitespaces) != existing.name
+    }
+
+    /// Why Save is disabled, or `nil` when it isn't. Stated to the user rather
+    /// than left as a mysteriously grey button.
+    private var saveBlocker: String? {
+        if name.trimmingCharacters(in: .whitespaces).isEmpty {
+            return OpenTypeL10n.text("请填写名称", english: "Enter a name")
+        }
+        if transport == .stdio {
+            if command.trimmingCharacters(in: .whitespaces).isEmpty {
+                return OpenTypeL10n.text("请填写命令", english: "Enter a command")
+            }
+        } else if url.trimmingCharacters(in: .whitespaces).isEmpty {
+            return OpenTypeL10n.text("请填写 URL", english: "Enter a URL")
+        }
+
+        let entries = activeEntries
+        if entries.contains(where: { $0.key.trimmingCharacters(in: .whitespaces).isEmpty }) {
+            return OpenTypeL10n.text("有一行还没填名字", english: "One row has no name yet")
+        }
+        // An empty replacement would be written as an empty secret — almost
+        // always someone who pressed 更换 and then didn't type. Say so instead.
+        if entries.contains(where: { entry in
+            if case .typed(let text) = entry.value { return text.isEmpty }
+            return false
+        }) {
+            return OpenTypeL10n.text("有一项的值还没填", english: "One value is still empty")
+        }
+        let keys = entries.map { $0.key.trimmingCharacters(in: .whitespaces) }
+        if Set(keys).count != keys.count {
+            return OpenTypeL10n.text("有重复的名字", english: "Two rows share a name")
+        }
+        return nil
+    }
+
+    // MARK: Submission
+
+    /// Builds the request. Only the active transport's map is sent, and the
+    /// inactive one is left out entirely (`nil`, i.e. omitted from the JSON)
+    /// rather than sent empty — the sidecar drops the other half anyway, and a
+    /// mask from the *other* map has no stored counterpart under this one, so
+    /// carrying it across is precisely how a mask would end up saved as a
+    /// literal value.
+    private func request() -> McpServerRequest {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        var map: [String: String] = [:]
+        for entry in activeEntries {
+            map[entry.key.trimmingCharacters(in: .whitespaces)] = entry.submittedValue
+        }
+        if transport == .stdio {
+            let args = argsText
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return McpServerRequest(
+                name: trimmedName,
+                transport: .stdio,
+                command: command.trimmingCharacters(in: .whitespaces),
+                args: args,
+                env: map,
+                url: nil,
+                headers: nil
+            )
+        }
+        return McpServerRequest(
+            name: trimmedName,
+            transport: .http,
+            command: nil,
+            args: nil,
+            env: nil,
+            url: url.trimmingCharacters(in: .whitespaces),
+            headers: map
+        )
+    }
+
+    private func test() {
+        isTesting = true
+        testResult = nil
+        let candidate = request()
+        Task { @MainActor in
+            testResult = await model.testMcpServer(candidate)
+            isTesting = false
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        let candidate = request()
+        Task { @MainActor in
+            let ok: Bool
+            if let existing {
+                ok = await model.updateMcpServer(name: existing.name, candidate)
+            } else {
+                ok = await model.createMcpServer(candidate)
+            }
+            isSaving = false
+            if ok {
+                // Close on success so the next edit re-seeds from what the
+                // sidecar now actually stores. A form kept open across a save
+                // could still hold `.stored` masks for secrets that write just
+                // dropped (a transport switch clears the other half), and those
+                // masks would then save as literal values.
+                onDone()
+            }
+        }
+    }
+}
+
+/// The `env`/`headers` editor: existing secrets as static masked rows, new ones
+/// as key + `SecureField` pairs.
+private struct McpSecretEntryList: View {
+    let title: String
+    @Binding var entries: [McpSecretEntry]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(OpenTypeL10n.text("添加一项", english: "Add")) {
+                    entries.append(McpSecretEntry(key: "", value: .typed("")))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
+
+            ForEach($entries) { $entry in
+                McpSecretRow(entry: $entry) {
+                    entries.removeAll { $0.id == entry.id }
+                }
+            }
+        }
+    }
+}
+
+private struct McpSecretRow: View {
+    @Binding var entry: McpSecretEntry
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            switch entry.value {
+            case .stored(let mask):
+                // Static text, not a field: this is a mask, and it must never
+                // sit somewhere that reads as "the real value, editable".
+                // The key is static too — the sidecar matches masks per key, so
+                // a renamed key would save the mask itself as its value.
+                Text(entry.key)
+                    .font(.system(size: 10, design: .monospaced))
+                    .lineLimit(1)
+                Text(mask)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Text(OpenTypeL10n.text("已保存", english: "Saved"))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.green)
+                    .help(OpenTypeL10n.text(
+                        "已保存的密钥不会回传，这里显示的是掩码。保存时保持不变。",
+                        english: "Saved secrets are never sent back; this is a mask. Saving leaves the stored value untouched."
+                    ))
+                Spacer()
+                Button(OpenTypeL10n.text("更换", english: "Replace")) {
+                    // Deliberately empty, never seeded from the mask.
+                    entry.value = .typed("")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+
+            case .typed:
+                TextField(
+                    OpenTypeL10n.text("名称", english: "Name"),
+                    text: $entry.key
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+                .frame(maxWidth: 130)
+
+                SecureField(
+                    OpenTypeL10n.text("值", english: "Value"),
+                    text: Binding(
+                        get: {
+                            if case .typed(let text) = entry.value { return text }
+                            return ""
+                        },
+                        set: { entry.value = .typed($0) }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+            }
+
+            Button {
+                onDelete()
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(OpenTypeL10n.text("删除这一项", english: "Remove this entry"))
+        }
+    }
+}
+
+/// The Test Connection outcome. The tool list is the decision-relevant part —
+/// it is literally the set of unsandboxed capabilities this server would hand
+/// the agent — so it is shown in full rather than summarized as a count.
+private struct McpTestResultView: View {
+    let result: McpTestResultSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if result.success {
+                Label(
+                    OpenTypeL10n.text("连接成功", english: "Connected"),
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.system(size: 9.5))
+                .foregroundStyle(.green)
+
+                let tools = result.tools ?? []
+                if tools.isEmpty {
+                    Text(OpenTypeL10n.text(
+                        "这个服务器没有提供任何工具。",
+                        english: "This server exposes no tools."
+                    ))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(OpenTypeL10n.text(
+                        "Agent 将获得以下 \(tools.count) 个工具：",
+                        english: "Agent mode would get these \(tools.count) tools:"
+                    ))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+
+                    ForEach(tools) { tool in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(tool.name)
+                                .font(.system(size: 9, design: .monospaced))
+                            if let description = tool.description, !description.isEmpty {
+                                Text(description)
+                                    .font(.system(size: 8.8))
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            } else {
+                Label(
+                    result.error ?? OpenTypeL10n.text("连接失败", english: "Connection failed"),
+                    systemImage: "xmark.circle.fill"
+                )
+                .font(.system(size: 9.5))
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

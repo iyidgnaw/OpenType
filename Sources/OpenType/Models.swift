@@ -1657,3 +1657,118 @@ struct ProviderModelListSummary: Decodable, Equatable {
     let models: [String]
     let fallback: Bool
 }
+
+// MARK: - MCP servers (P2-13)
+//
+// Wire models for the sidecar's `/config/mcp*` routes
+// (`sidecar/src/agent/mcpConfigRoutes.ts`), which back the Settings
+// "MCP 服务器" panel. Same shape of split the provider models above use: a
+// `*Summary` for what comes back (secrets masked) and a `*Request` for what
+// goes out (secrets real).
+
+/// The two kinds of MCP server the sidecar can attach to Agent mode: a local
+/// child process spoken to over stdio, or a remote HTTP endpoint. The choice
+/// decides which half of a server record is meaningful — `command`/`args`/`env`
+/// for stdio, `url`/`headers` for http — and the sidecar drops the other half
+/// at normalization time (`normalizeMcpServer`), so a switched server can't
+/// keep credentials it no longer has any use for.
+enum McpTransport: String, Codable, CaseIterable, Identifiable, Equatable {
+    case stdio
+    case http
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .stdio:
+            return OpenTypeL10n.text("本地命令（stdio）", english: "Local command (stdio)")
+        case .http:
+            return OpenTypeL10n.text("远程 HTTP", english: "Remote HTTP")
+        }
+    }
+}
+
+/// Which of the sidecar's two config sources actually supplied the servers in a
+/// `GET /config/mcp` response. `saved` is the user's own persisted list;
+/// `env` is the `OPENTYPE_MCP_SERVERS` zero-config dev fallback, which is shown
+/// but never presented as the user's configuration — same "configured is
+/// explicit, never ambient" stance `ProviderConfigStatus` takes.
+enum McpConfigSource: String, Decodable, Equatable {
+    case saved
+    case env
+}
+
+/// One MCP server as the sidecar reports it.
+///
+/// Secrets arrive **only** as `envMasked`/`headersMasked`. There is
+/// deliberately no `env`/`headers` property to decode into, so a real token
+/// cannot reach Swift (and therefore cannot reach a text field, a log line, or
+/// the pasteboard) even if a future sidecar change started sending one. Map
+/// *keys* are not masked: the user needs to see that `GITHUB_TOKEN` is set,
+/// just not what it is set to.
+struct McpServerSummary: Decodable, Identifiable, Equatable {
+    let name: String
+    let transport: McpTransport
+    let command: String?
+    let args: [String]?
+    let url: String?
+    let envMasked: [String: String]?
+    let headersMasked: [String: String]?
+
+    /// The name is what `PUT`/`DELETE /config/mcp/:name` address, so it is also
+    /// the row identity — there is no separate id to key on.
+    var id: String { name }
+}
+
+/// Mirrors `GET /config/mcp`.
+struct McpConfigSummary: Decodable, Equatable {
+    let configured: Bool
+    let source: McpConfigSource
+    let servers: [McpServerSummary]
+}
+
+/// The `POST /config/mcp`, `PUT /config/mcp/:name` and `POST /config/mcp/test`
+/// request body — the one direction secrets travel in the clear, over the local
+/// Unix socket.
+///
+/// Every optional is encoded with `encodeIfPresent` (the synthesized default),
+/// which is load-bearing in two places:
+///
+///  * `nil` leaves the key out of the JSON entirely rather than sending `null`.
+///    A null `url`/`command` reads on the sidecar side as "supplied but empty"
+///    and 400s a perfectly valid server of the other transport.
+///  * an *empty* `env`/`args` still goes out as `{}`/`[]`, which is how
+///    "delete every entry" is expressed — the write is a replace, not a patch.
+///
+/// A value equal to the mask the sidecar previously reported for that same
+/// server *and* the same key means "unchanged" and is resolved back to the
+/// stored secret server-side. `McpServerEditor` (`Views.swift`) relies on that
+/// round-trip, so masks are passed through verbatim here rather than being
+/// filtered out on the way.
+struct McpServerRequest: Encodable, Equatable {
+    let name: String
+    let transport: McpTransport
+    let command: String?
+    let args: [String]?
+    let env: [String: String]?
+    let url: String?
+    let headers: [String: String]?
+}
+
+/// One tool an MCP server exposes, as reported by `POST /config/mcp/test`.
+struct McpToolSummary: Decodable, Identifiable, Equatable {
+    let name: String
+    /// MCP servers are not required to describe their tools.
+    let description: String?
+
+    var id: String { name }
+}
+
+/// Mirrors `POST /config/mcp/test`. `success == true` with an empty `tools` is a
+/// server that connected but exposes nothing — distinct both from a failure and
+/// from `tools` being absent.
+struct McpTestResultSummary: Decodable, Equatable {
+    let success: Bool
+    let error: String?
+    let tools: [McpToolSummary]?
+}

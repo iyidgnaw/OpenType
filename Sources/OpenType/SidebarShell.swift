@@ -114,7 +114,12 @@ private struct SidebarColumn: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial)
+        // A flat tint rather than `.ultraThinMaterial`. The material samples
+        // whatever is behind the window, so over a light desktop the sidebar
+        // came out the same value as the list beside it and the two columns
+        // read as one. The design separates them by about 4% of luminance, and
+        // that separation is doing the work of a border.
+        .background(DS.Colour.sidebar)
     }
 
     private var brand: some View {

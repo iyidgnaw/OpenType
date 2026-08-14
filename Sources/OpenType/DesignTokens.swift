@@ -81,7 +81,16 @@ enum DS {
         static let agent = Color(red: 0.294, green: 0.271, blue: 0.910)
 
         static let canvas = Color(red: 0.961, green: 0.961, blue: 0.953)
-        static let card = Color(nsColor: .textBackgroundColor)
+        /// Slightly darker than `canvas`, which is what separates the sidebar
+        /// from the list without a border between them.
+        static let sidebar = Color(red: 0.918, green: 0.918, blue: 0.906)
+        /// Literal white rather than `.textBackgroundColor`. The app is pinned
+        /// to the light appearance (`OpenTypeApp`), so the two agree today —
+        /// but a semantic colour here would silently reintroduce the dark
+        /// palette the moment that pin is lifted, and the design's contrast
+        /// ratios are computed against this value, not against whatever the
+        /// system decides a text background is.
+        static let card = Color.white
         /// A recessed block inside a card.
         static let inset = Color.primary.opacity(0.035)
 

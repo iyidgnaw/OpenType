@@ -36,6 +36,23 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     private var lastStatusItemClick: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Pinned light, in dark mode too. The 2026-08 design is a light system
+        // — a paper canvas with white cards and one accent — and the palette
+        // carries meaning that inverting destroys: an orange warning tint at 5%
+        // over white is a hint, the same tint over near-black is invisible, and
+        // "success is neutral, colour means something wants you" only reads on
+        // a light ground.
+        //
+        // Pinning rather than dropping the adaptive colours is deliberate. Half
+        // the app would otherwise stay adaptive through `.textBackgroundColor`,
+        // `.ultraThinMaterial` and every `Color.primary` opacity, so a dark-mode
+        // user got light cards on a dark canvas with black-on-black hairlines —
+        // which is what this replaced. One appearance for every window and
+        // panel is the only version that is coherent.
+        //
+        // A real dark palette is a design deliverable, not a colour flip; when
+        // one exists, this line is what it replaces.
+        NSApp.appearance = NSAppearance(named: .aqua)
         NSApp.setActivationPolicy(.accessory)
         configurePopover()
         configureStatusItem()
@@ -262,13 +279,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     init(model: AppModel) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "OpenType"
-        window.minSize = NSSize(width: 420, height: 480)
+        // The sidebar runs up under the traffic lights and supplies its own
+        // 52pt header strip, so a titlebar of its own would be a second one.
+        // The name is in the sidebar's brand row; repeating it in chrome above
+        // that row says it twice and costs the height of a list row.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: 460, height: 480)
         window.isReleasedWhenClosed = false
         window.center()
         window.contentViewController = NSHostingController(

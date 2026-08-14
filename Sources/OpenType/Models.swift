@@ -85,12 +85,22 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
 
 }
 
-/// The two ways `transcribe` mode can deliver its result, chosen in Settings
+/// The three ways `transcribe` mode can deliver its result, chosen in Settings
 /// and applied to every `transcribe`-mode recording until changed (not a
 /// per-recording toggle — see `docs/superpowers/specs/2026-08-09-current-system-state.md`
 /// for the design rationale). `ask`/`agent` are unaffected by this setting.
+///
+/// All three stay inside `transcribe`'s promise that dictation never reaches a
+/// model: `tidy` cleans by fixed local rules, so the axis is *how much
+/// deterministic processing happens before delivery*, never *whether an LLM
+/// sees the text*.
 enum TranscribeVariant: String, CaseIterable, Codable, Identifiable {
     case direct
+    /// Deterministic local cleanup — **never an LLM call**. See
+    /// `TidyTranscript`. Ordered between `direct` and `review` because the
+    /// three form a ladder of increasing intervention (raw ⇢ rules ⇢ human),
+    /// and `allCases` is what Settings' picker renders.
+    case tidy
     case review
 
     var id: String { rawValue }
@@ -98,6 +108,7 @@ enum TranscribeVariant: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .direct: return OpenTypeL10n.text("直接模式", english: "Direct")
+        case .tidy: return OpenTypeL10n.text("轻整理", english: "Tidy")
         case .review: return OpenTypeL10n.text("复核模式", english: "Review")
         }
     }
@@ -109,11 +120,54 @@ enum TranscribeVariant: String, CaseIterable, Codable, Identifiable {
                 "松开后直接写入光标所在位置",
                 english: "Released speech is inserted straight into the focused field"
             )
+        case .tidy:
+            return OpenTypeL10n.text(
+                "松开后按固定规则去掉口癖、整理标点再写入，不经过任何 AI 模型",
+                english: "Released speech has fillers dropped and punctuation normalised by fixed rules before it's inserted — no AI model involved"
+            )
         case .review:
             return OpenTypeL10n.text(
                 "松开后先在预览面板中查看、编辑或用语音修改，确认后再写入",
                 english: "Released speech is staged in a review panel to check, edit, or voice-correct before it's inserted"
             )
+        }
+    }
+
+    /// What this variant hands to the delivery path, or `nil` when it delivers
+    /// nothing yet.
+    ///
+    /// The routing seam for the whole variant axis, kept here rather than
+    /// inline in `AppModel.process` so it is testable without instantiating the
+    /// model, and so adding a variant is one exhaustive `switch` the compiler
+    /// checks rather than a chain of `== .review` comparisons scattered across
+    /// the pipeline.
+    ///
+    /// `nil` means "dispatched, don't deliver yet" — today only `review`, which
+    /// stages the transcript in its panel and delivers on commit. `tidy`
+    /// deliberately does **not** join it: cleanup is instant and deterministic,
+    /// so making the user confirm it would buy nothing and cost the whole
+    /// point of a tier that sits between "unchanged" and "reviewed".
+    func deliverableText(for transcript: String) -> String? {
+        switch self {
+        case .direct: return transcript
+        case .tidy: return TidyTranscript.tidy(transcript)
+        case .review: return nil
+        }
+    }
+
+    /// Whether a finished recording in this variant lands text in the app the
+    /// user was looking at — the condition the post-delivery correction window
+    /// (`CorrectionWindow`) is built on, since there is nothing to fix in place
+    /// until something has actually been pasted.
+    ///
+    /// The mirror image of `deliverableText(for:)`'s `nil`, stated as its own
+    /// exhaustive `switch` rather than as `!= .review` so that a fourth variant
+    /// has to answer both questions here, in one place, instead of silently
+    /// inheriting an answer from a comparison somewhere down the pipeline.
+    var deliversIntoTargetApp: Bool {
+        switch self {
+        case .direct, .tidy: return true
+        case .review: return false
         }
     }
 }

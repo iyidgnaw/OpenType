@@ -2351,7 +2351,28 @@ final class AppModel: ObservableObject {
             let result: String?
             switch mode {
             case .transcribe:
-                if configuration.transcribeVariant == .review {
+                // The whole variant axis decides here and nowhere else
+                // (`TranscribeVariant.deliverableText(for:)`): Direct hands
+                // the transcript back untouched, Tidy hands back
+                // `TidyTranscript`'s deterministic cleanup, and Review hands
+                // back nothing because it stages instead of delivering. No
+                // sidecar/LLM call and no voice surface in any of the three —
+                // whatever comes back *is* the result.
+                if let deliverable = configuration.transcribeVariant
+                    .deliverableText(for: transcript) {
+                    // Note what is deliberately *not* happening here:
+                    // `auditEffectiveInput` keeps the transcript as spoken.
+                    // Under Tidy the delivered text differs from it, and both
+                    // halves have to stay readable — `rawTranscript` is what
+                    // ASR heard, `effectiveInput` what the user said once
+                    // mode-routing was applied, and the `.completed` event's
+                    // `result` below is what was actually pasted. Overwriting
+                    // `effectiveInput` with the tidied form would make the
+                    // audit chain claim the user spoke the cleaned-up
+                    // sentence, and would contradict the `.recognized` event
+                    // already written above under the same `requestId`.
+                    result = deliverable
+                } else {
                     // Stash the transcript in the Review panel instead of
                     // delivering it — nothing is inserted/copied yet. The
                     // rest of this session (corrections, commit/cancel) is
@@ -2366,10 +2387,6 @@ final class AppModel: ObservableObject {
                         recognizedEventId: recognizedEventId
                     )
                     result = nil
-                } else {
-                    // Pure ASR passthrough: no sidecar/LLM call at all, and
-                    // no voice surface — the transcript itself is the result.
-                    result = transcript
                 }
             case .ask:
                 // Non-blocking dispatch, mirroring `.agent`/`dispatchAgentRun`
@@ -2547,9 +2564,12 @@ final class AppModel: ObservableObject {
             let completedEventId = appendAudit(
                 status: .completed,
                 result: result,
-                // `.transcribe` is a pure ASR passthrough with no sidecar
-                // text-generation call (see the `switch mode` above), so it
-                // has no text provider/model of its own to record here.
+                // `.transcribe` reaches no text provider in any of its three
+                // variants (see the `switch mode` above) — Tidy's rewriting is
+                // local, deterministic rules — so there is no text
+                // provider/model of its own to record here. `nil` states that
+                // no model was involved, which for Tidy is the product
+                // promise, not merely a missing field.
                 provider: mode == .transcribe ? nil : sidecarTextProvider,
                 model: effectiveTextModel
             )

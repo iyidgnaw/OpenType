@@ -4,8 +4,9 @@ import Foundation
 ///
 /// The hotkey has exactly one gesture but two meanings, and which one applies
 /// is a function of the clock and the target app rather than of a second
-/// chord: for a few seconds after a Direct-mode delivery it means "fix what
-/// I just said," and at every other moment it means what it has always meant.
+/// chord: for a few seconds after a delivery that pasted straight into the
+/// user's app it means "fix what I just said," and at every other moment it
+/// means what it has always meant.
 enum HotKeyIntent: Equatable {
     /// The ordinary meaning: begin a new dictation.
     case startNewRecording
@@ -17,11 +18,16 @@ enum HotKeyIntent: Equatable {
 /// The post-delivery correction window (P0-3,
 /// `docs/superpowers/specs/2026-08-14-product-batch-plan.md`).
 ///
-/// Direct mode delivers instantly and adds no latency — that is the whole
-/// point of it, and this feature must not cost it. What it adds instead is an
+/// Direct and Tidy deliver instantly and add no latency — that is the whole
+/// point of both, and this feature must not cost it. What it adds instead is an
 /// *afterwards*: for `windowSeconds` following a delivery, if the user selects
 /// text in the app that delivery landed in and presses the hotkey again, they
 /// are correcting that selection by voice instead of starting a new dictation.
+///
+/// Tidy (P1-8) is the variant that needs this most, not merely the newest one
+/// to qualify for it: it is the only delivering variant whose output differs
+/// from what the user said, so a wrong word there can be the tool's doing
+/// rather than only the recogniser's, and the fix has to be one keypress away.
 ///
 /// It is deliberately **in-place** rather than "re-open the Review panel with
 /// the delivered text prefilled." The text is already pasted into the target
@@ -79,13 +85,15 @@ enum CorrectionWindow {
         mode: InputMode,
         variant: TranscribeVariant
     ) -> HotKeyIntent {
-        // Direct transcribe only. An ask/agent card on screen already gives a
-        // second utterance the meaning "continue this conversation"
-        // (`VoiceFollowUp`), and Review's open panel already gives the hotkey
-        // the meaning "correct the panel's selection" — this feature exists to
-        // give Direct the same affordance those two already have, not to fight
-        // either of them for the same key.
-        guard mode == .transcribe, variant == .direct else {
+        // Transcribe variants that actually deliver into the target app —
+        // today Direct and Tidy (`TranscribeVariant.deliversIntoTargetApp`).
+        // An ask/agent card on screen already gives a second utterance the
+        // meaning "continue this conversation" (`VoiceFollowUp`), and Review's
+        // open panel already gives the hotkey the meaning "correct the panel's
+        // selection" — this feature exists to give the variants that paste
+        // straight into someone else's app the same affordance those two
+        // already have, not to fight either of them for the same key.
+        guard mode == .transcribe, variant.deliversIntoTargetApp else {
             return .startNewRecording
         }
 
@@ -164,14 +172,17 @@ enum CorrectionWindow {
     static func reduce(_ state: State?, on event: Event) -> State? {
         switch event {
         case .delivered(let at, let capturedBundleId, let mode, let variant):
-            // Only a Direct-transcribe delivery arms one. This matters in both
+            // Only a transcribe delivery that landed in the target app arms
+            // one, matching `intent(...)`'s gate exactly. This matters in both
             // directions: `intent(...)` is told the mode the user is in *now*,
             // so a window armed by an ask/agent delivery would let a hotkey
             // press "correct" a selection that delivery never produced, if the
-            // user switched back to Direct inside those seconds. An ineligible
-            // delivery therefore also closes an open window rather than
-            // leaving it standing.
-            guard mode == .transcribe, variant == .direct else { return nil }
+            // user switched back to a delivering variant inside those seconds.
+            // An ineligible delivery therefore also closes an open window
+            // rather than leaving it standing.
+            guard mode == .transcribe, variant.deliversIntoTargetApp else {
+                return nil
+            }
             // A second delivery is a new subject: measured from itself, and
             // guarding whatever app *it* landed in.
             return State(deliveredAt: at, capturedBundleId: capturedBundleId)

@@ -41,8 +41,11 @@ episodic 事件（`/oneshot/ask` 同样追加一条 `mode: "ask"`）。这条路
 未整理事件的 `{id, mode, rawTranscript, correctedTranscript}` 四个字段。
 
 **`mode: "transcribe"` 的事件不在其中，这是本清单里最重要的一条排除。** 「纯听写不经过任何
-LLM」是写在 README、`USER_GUIDE.md` §13 和 `CLAUDE.md` 模式表里的产品承诺，而整理是一次真实的
-模型调用——**延迟发送也是发送**，「只在整理时才发」不构成豁免。排除点在
+LLM」是写在 README、`USER_GUIDE.md` §14 和 `CLAUDE.md` 模式表里的产品承诺，而这里的**记忆整理**
+是一次真实的模型调用——**延迟发送也是发送**，「只在整理时才发」不构成豁免。
+
+（别和听写的 `轻整理` 档搞混：那一档只有本机固定规则，没有任何模型调用，见
+`2026-08-09-current-system-state.md` §8。本节的「整理」自始至终指的是上面这条记忆整理路径。）排除点在
 `MemoryStore.consolidationCandidates()`（唯一的选取查询，由
 `CONSOLIDATION_EXCLUDED_MODES` 定义），**不是**在 `buildConsolidationPrompt` 里过滤：被排除的
 文本根本不会进入 `runConsolidation` 的作用域，因此之后无论谁改提示词组装、门控还是写入阶段，

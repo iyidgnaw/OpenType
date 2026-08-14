@@ -65,11 +65,18 @@ function nextRanAt(): number {
 /**
  * Trigger check from spec §4.4: at least 12 hours since the last run (or no
  * run has ever happened) AND at least 5 unconsolidated events exist.
+ *
+ * "Unconsolidated" here means *eligible* and unconsolidated, which is why this
+ * counts `consolidationCandidateCount()` and not `unconsolidatedEventCount()`:
+ * the modes consolidation may never read (`CONSOLIDATION_EXCLUDED_MODES`) are
+ * also never marked consolidated, so counting them would hold this gate open
+ * permanently and make every launch spend a real LLM call on a set that turns
+ * out to be empty once the filter is applied.
  */
 export function shouldConsolidate(store: MemoryStore): boolean {
   const hours = store.hoursSinceLastConsolidation();
   const enoughTimePassed = hours === null || hours >= MIN_HOURS_BETWEEN_RUNS;
-  return enoughTimePassed && store.unconsolidatedEventCount() >= MIN_UNCONSOLIDATED_EVENTS;
+  return enoughTimePassed && store.consolidationCandidateCount() >= MIN_UNCONSOLIDATED_EVENTS;
 }
 
 /**
@@ -386,11 +393,14 @@ async function runConsolidationInner(
   store: MemoryStore,
   callLLM: CallLLM
 ): Promise<ConsolidationResult> {
-  const events = store.db
-    .query(
-      "SELECT * FROM episodic_events WHERE consolidatedAt IS NULL ORDER BY createdAt DESC LIMIT ?"
-    )
-    .all(MAX_EVENTS_PER_RUN) as EpisodicEventRow[];
+  // Deliberately NOT a query written here. `consolidationCandidates` is the one
+  // definition of what a pass may read, and it excludes the modes listed in
+  // `CONSOLIDATION_EXCLUDED_MODES` (currently `transcribe`) as well as
+  // already-consolidated rows. Filtering at the selection rather than in
+  // `buildConsolidationPrompt` is the point: excluded text never enters this
+  // function at all, so no later change to the prompt builder, the gate, or the
+  // write phase can put it back in front of a model.
+  const events = store.consolidationCandidates(MAX_EVENTS_PER_RUN) as EpisodicEventRow[];
 
   const existingTermsBefore = store.allTerms();
   const prompt = buildConsolidationPrompt(events, existingTermsBefore);

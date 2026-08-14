@@ -18,6 +18,7 @@ import { buildMemoryRoutes } from "./memory/routes";
 import { ConversationStore } from "./memory/conversations";
 import { buildConversationRoutes } from "./memory/conversationRoutes";
 import type { CallLLM } from "./memory/consolidator";
+import { scheduleStartupConsolidation } from "./memory/startupConsolidation";
 import { buildOneShotRoutes } from "./oneshot/routes";
 import { createFileContextUsageLogWriter, type ContextUsageLogWriter } from "./oneshot/contextDebugLog";
 import { createDeepSeekClient } from "./provider/deepseek";
@@ -82,8 +83,13 @@ export function buildApp(
     ...buildConversationRoutes(conversations),
     // P0-1: the entity dictionary feeds back into recognition -- read per
     // request (not captured once) so a term taught mid-session applies to the
-    // very next utterance. See `asr/dictionaryBias.ts`.
-    ...buildAsrRoutes(transcribe, { listTerms: () => store.allTerms() }),
+    // very next utterance. See `asr/dictionaryBias.ts`. P1-7 adds the other
+    // direction: each successful dictation appends an episodic event, so
+    // consolidation's raw material is no longer agent tasks alone.
+    ...buildAsrRoutes(transcribe, {
+      listTerms: () => store.allTerms(),
+      recordEpisodicEvent: (input) => store.recordEpisodicEvent(input),
+    }),
     ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),
   ]);
@@ -279,6 +285,11 @@ async function main() {
   });
 
   console.log(`opentype-sidecar listening on unix:${env.socketPath}`);
+
+  // P1-7: the consolidation gate finally gets a caller. One check, on a delay,
+  // after we're serving -- not a polling timer, and never on the startup path.
+  // See `memory/startupConsolidation.ts` for why the policy lives in a seam.
+  scheduleStartupConsolidation(store, callLLM);
 
   // P1-7: on a termination signal, tear down the local whisper python child
   // (otherwise it's orphaned and keeps holding its socket/model) and remove our

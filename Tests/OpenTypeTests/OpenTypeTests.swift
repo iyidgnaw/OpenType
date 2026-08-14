@@ -369,10 +369,6 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(store.ownerProfile.importantTerms, confirmedProfile.importantTerms)
         XCTAssertEqual(store.ownerProfile.preferredLanguage, .chinese)
         XCTAssertFalse(store.learnedPreferences.taskDomains.isEmpty)
-        XCTAssertEqual(
-            store.profileContextForPrompt().insights,
-            store.learnedPreferences
-        )
         XCTAssertFalse(
             store.refreshOwnerProfileIfNeeded(enabled: true)
         )
@@ -382,84 +378,8 @@ final class OpenTypeTests: XCTestCase {
         XCTAssertEqual(reloaded.learnedPreferences, store.learnedPreferences)
     }
 
-    func testLocalMemoryEmbeddingRoundTripPreservesVector() {
-        let original: [Float] = [0.25, -0.5, 1.75, 0]
-        let decoded = LocalMemoryEmbedding.decoded(
-            LocalMemoryEmbedding.encoded(original)
-        )
-        XCTAssertEqual(decoded, original)
-    }
-
     @MainActor
-    func testMemoryRetrieverKeepsRecentContextAndFindsOlderRelevantTask() {
-        let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("OpenType-Retrieval-\(UUID().uuidString).sqlite3")
-        defer {
-            for suffix in ["", "-wal", "-shm"] {
-                try? FileManager.default.removeItem(atPath: fileURL.path + suffix)
-            }
-        }
-
-        let store = AgentMemoryStore(fileURL: fileURL)
-        let relevant = MemoryEvent(
-            createdAt: Date(timeIntervalSince1970: 100),
-            mode: .agent,
-            applicationName: "X",
-            bundleIdentifier: nil,
-            rawTranscript: "帮我写一条 OpenType 产品发布推文",
-            effectiveInput: "帮我写一条 OpenType 产品发布推文",
-            selectedContext: nil,
-            result: "OpenType is live."
-        )
-        let unrelatedOld = MemoryEvent(
-            createdAt: Date(timeIntervalSince1970: 200),
-            mode: .agent,
-            applicationName: "Calendar",
-            bundleIdentifier: nil,
-            rawTranscript: "安排下周团队会议",
-            effectiveInput: "安排下周团队会议",
-            selectedContext: nil,
-            result: "会议计划"
-        )
-        let recentOne = MemoryEvent(
-            createdAt: Date(timeIntervalSince1970: 300),
-            mode: .ask,
-            applicationName: "Notes",
-            bundleIdentifier: nil,
-            rawTranscript: "整理今天的待办事项",
-            effectiveInput: "整理今天的待办事项",
-            selectedContext: nil,
-            result: "待办清单"
-        )
-        let recentTwo = MemoryEvent(
-            createdAt: Date(timeIntervalSince1970: 400),
-            mode: .ask,
-            applicationName: "Mail",
-            bundleIdentifier: nil,
-            rawTranscript: "回复这封感谢邮件",
-            effectiveInput: "回复这封感谢邮件",
-            selectedContext: nil,
-            result: "感谢邮件"
-        )
-        [relevant, unrelatedOld, recentOne, recentTwo].forEach(store.record)
-
-        let retrieved = store.memoriesForPrompt(
-            query: "再写一条 OpenType 上线的 X 推文",
-            selectedContext: nil,
-            applicationName: "X",
-            maximumEntries: 3
-        )
-        let ids = Set(retrieved.map(\.id))
-
-        XCTAssertTrue(ids.contains(relevant.id))
-        XCTAssertTrue(ids.contains(recentOne.id))
-        XCTAssertTrue(ids.contains(recentTwo.id))
-        XCTAssertFalse(ids.contains(unrelatedOld.id))
-        XCTAssertEqual(retrieved.map(\.id), [relevant.id, recentOne.id, recentTwo.id])
-    }
-
-    @MainActor
-    func testAgentMemoryPersistsStructuredTasksAndUsesChronologicalPromptOrder() {
+    func testAgentMemoryPersistsStructuredTasksAcrossReloadAndClear() {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("OpenType-AgentMemory-\(UUID().uuidString).sqlite3")
         defer {
@@ -489,10 +409,6 @@ final class OpenTypeTests: XCTestCase {
         store.add(second)
 
         XCTAssertEqual(store.entries.map(\.request), ["再写第二条", "先写第一条"])
-        XCTAssertEqual(
-            store.entriesForPrompt().map(\.request),
-            ["先写第一条", "再写第二条"]
-        )
         XCTAssertEqual(store.eventCount, 2)
 
         store.updateOwnerProfile(

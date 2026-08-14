@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../../src/memory/db";
-import { MemoryStore, type EntityTerm } from "../../src/memory/MemoryStore";
+import {
+  CONSOLIDATION_EXCLUDED_MODES,
+  MemoryStore,
+  type EntityTerm,
+} from "../../src/memory/MemoryStore";
 import {
   rollbackRun,
   runConsolidation,
@@ -13,12 +17,23 @@ function makeStore() {
   return new MemoryStore(db);
 }
 
+/**
+ * Seeds `count` events that consolidation is allowed to read.
+ *
+ * The mode matters, and it is not arbitrary any more: `transcribe` events are
+ * deliberately excluded from every consolidation pass
+ * (`CONSOLIDATION_EXCLUDED_MODES`, a privacy contract — see
+ * "transcribe events are never consolidated" below). This helper existed long
+ * before that rule and used `"transcribe"` purely as a filler label, which
+ * quietly turned every test built on it into "consolidation ignores this
+ * material". Do not change this back.
+ */
 function seedEvents(store: MemoryStore, count: number): number[] {
   const ids: number[] = [];
   for (let i = 0; i < count; i++) {
     ids.push(
       store.recordEpisodicEvent({
-        mode: "transcribe",
+        mode: "agent",
         rawTranscript: `raw ${i}`,
         correctedTranscript: `corrected ${i}`,
         effectiveInput: null,
@@ -553,5 +568,154 @@ describe("rollbackRun", () => {
       .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
       .get(secondResult.ranRunId) as { rolledBackAt: number | null };
     expect(runRow.rolledBackAt).not.toBeNull();
+  });
+});
+
+/**
+ * The privacy contract, pinned.
+ *
+ * ## Why this block exists, and why deleting it is not a cleanup
+ *
+ * "Plain dictation never reaches an LLM" is a headline product promise, stated
+ * in `README.md`, `USER_GUIDE.md` §13 and `CLAUDE.md`'s mode table. It is the
+ * reason some people choose this product at all.
+ *
+ * Consolidation ("dreaming") is a real model call — it ships up to 200 events'
+ * `rawTranscript`/`correctedTranscript` to whatever provider the user
+ * configured, which is a cloud service by default. When P1-7 started recording
+ * an episodic event per dictation, that promise broke silently: nothing in the
+ * code said dictation was different, so a dictation became consolidation
+ * material like anything else and left the machine minutes after it was spoken.
+ * **Delayed transmission is still transmission**; "only during consolidation"
+ * is not an exemption.
+ *
+ * So `CONSOLIDATION_EXCLUDED_MODES` is a privacy contract, NOT a performance
+ * filter or a relevance heuristic. If a future change makes one of these tests
+ * fail, the correct response is almost never to update the test — it is to
+ * check whether the change just started sending users' dictation to a model.
+ *
+ * ## Why the assertion is on `callLLM`'s argument
+ *
+ * The guarantee is only real at the boundary where bytes leave for the
+ * provider. Asserting that a query returns the right rows, or that a prompt
+ * builder filters correctly, would pass just as happily if some later caller
+ * assembled the prompt a different way. The injected `callLLM` receives exactly
+ * what the model receives, so that is what these tests inspect.
+ */
+describe("transcribe events are never consolidated (privacy contract)", () => {
+  const DICTATION = "我的身份证号是 110101 开头，别念出来";
+
+  function seedDictation(store: MemoryStore, count: number): number[] {
+    const ids: number[] = [];
+    for (let i = 0; i < count; i++) {
+      ids.push(
+        store.recordEpisodicEvent({
+          mode: "transcribe",
+          rawTranscript: `${DICTATION} ${i}`,
+          correctedTranscript: `${DICTATION} ${i}`,
+          effectiveInput: null,
+          selectedContext: null,
+          result: null,
+          applicationName: "OpenType Transcribe",
+        })
+      );
+    }
+    return ids;
+  }
+
+  /** Runs one pass and hands back the exact prompt string the model was sent. */
+  async function capturePrompt(store: MemoryStore): Promise<string> {
+    let seen = "";
+    await runConsolidation(store, async (prompt) => {
+      seen = prompt;
+      return candidatesResponse([]);
+    });
+    return seen;
+  }
+
+  test("transcribe is the excluded mode", () => {
+    // Pinned so the constant has at least one reader outside the query itself:
+    // a rename or an accidental emptying of this list is a silent privacy
+    // regression, and would otherwise be caught by nothing.
+    expect(CONSOLIDATION_EXCLUDED_MODES).toContain("transcribe");
+  });
+
+  test("dictation text never appears in what the model is sent", async () => {
+    const store = makeStore();
+    seedDictation(store, 3);
+    seedEvents(store, 5);
+
+    const prompt = await capturePrompt(store);
+
+    // The whole point, stated the blunt way.
+    expect(prompt).not.toContain(DICTATION);
+    // And structurally, not just as a substring coincidence.
+    const events = (JSON.parse(prompt) as { events: Array<{ mode: string }> }).events;
+    expect(events.map((e) => e.mode)).not.toContain("transcribe");
+  });
+
+  test("the exclusion is narrow: ask and agent events still reach the model", async () => {
+    const store = makeStore();
+    store.recordEpisodicEvent({
+      mode: "ask",
+      rawTranscript: "PayPal 的费率是多少",
+      correctedTranscript: "PayPal 的费率是多少",
+      effectiveInput: "PayPal 的费率是多少",
+      selectedContext: null,
+      result: "It depends.",
+      applicationName: "OpenType Ask",
+      origin: "agent",
+    });
+    store.recordEpisodicEvent({
+      mode: "agent",
+      rawTranscript: "把 Rainbow 项目的记录整理一下",
+      correctedTranscript: "把 Rainbow 项目的记录整理一下",
+      effectiveInput: "把 Rainbow 项目的记录整理一下",
+      selectedContext: null,
+      result: "done",
+      applicationName: "OpenType Agent",
+      origin: "agent",
+    });
+
+    const prompt = await capturePrompt(store);
+
+    // Excluding dictation must not turn into "consolidation reads nothing" —
+    // that would void the feature instead of protecting one mode.
+    const events = (JSON.parse(prompt) as { events: Array<{ mode: string }> }).events;
+    expect(events.map((e) => e.mode).sort()).toEqual(["agent", "ask"]);
+    expect(prompt).toContain("PayPal 的费率是多少");
+    expect(prompt).toContain("把 Rainbow 项目的记录整理一下");
+  });
+
+  test("a store holding only dictation never opens the gate", () => {
+    const store = makeStore();
+    seedDictation(store, 20);
+
+    // Twenty dictations is four times MIN_UNCONSOLIDATED_EVENTS, and no run has
+    // ever happened, so the only thing keeping this shut is the mode filter.
+    expect(shouldConsolidate(store)).toBe(false);
+  });
+
+  test("excluded rows stay unconsolidated, and still do not re-open the gate", async () => {
+    const store = makeStore();
+    seedDictation(store, 8);
+    seedEvents(store, 5);
+
+    await runConsolidation(store, async () => candidatesResponse([]));
+
+    // The bookkeeping decision, pinned: excluded rows are NOT stamped
+    // consolidated. Marking them would be a lie (no run ever read them) and
+    // would destroy the material an explicit opt-in would later need.
+    expect(store.unconsolidatedEventCount()).toBe(8);
+    // But they are not eligible material, so the gate sees nothing to do...
+    expect(store.consolidationCandidateCount()).toBe(0);
+
+    // ...including on a later launch, once the 12-hour timer is no longer what
+    // is holding the gate shut. This is the regression that would otherwise
+    // burn one real LLM call per launch, forever, on an empty event set.
+    store.db.run("UPDATE memory_consolidation_runs SET ranAt = ?", [
+      Date.now() - 13 * 60 * 60 * 1000,
+    ]);
+    expect(shouldConsolidate(store)).toBe(false);
   });
 });

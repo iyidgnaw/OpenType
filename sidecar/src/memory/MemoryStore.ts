@@ -3,6 +3,46 @@ import type { Database } from "bun:sqlite";
 export type EventOrigin = "owner" | "agent" | "untrusted" | "system";
 export type EntityCategory = "person" | "project" | "term" | "org";
 
+/**
+ * Modes whose episodic events are recorded locally but must never be handed to
+ * a model.
+ *
+ * `transcribe` is on this list because "plain dictation never reaches an LLM"
+ * is a stated product guarantee, not an implementation detail — it is in the
+ * README, in `USER_GUIDE.md` §13, and in `CLAUDE.md`'s mode table. Consolidation
+ * is a real model call, so routing dictation through it would break that
+ * guarantee no matter how much later the call happens: delayed transmission is
+ * still transmission, and "only during consolidation" is not a defence to a
+ * user who chose this product because their dictation stays on the machine.
+ *
+ * Recording is deliberately *not* what gets suppressed. The rows stay, because
+ * they are local-only material for the stats panel, and because an explicit
+ * opt-in ("use my dictation to improve the dictionary — this sends recent
+ * transcripts to your configured model") is the honest way to offer this later.
+ * That opt-in only has something to work with if the material is still here.
+ *
+ * The high-signal half of learning from dictation is already covered without
+ * any of this: P0-2 turns every voice correction the user actually makes into a
+ * dictionary alias locally, with no model involved. What consolidation would
+ * add is discovery of terms the user never corrected — real value, but not
+ * worth silently voiding a promise to get it.
+ */
+export const CONSOLIDATION_EXCLUDED_MODES: readonly string[] = ["transcribe"];
+
+/**
+ * The SQL half of the rule above, written once so the gate's count and the
+ * consolidation pass's own SELECT cannot disagree.
+ *
+ * The mode list is a hardcoded constant, never user input, so interpolating it
+ * carries no injection risk — and inlining it keeps the predicate usable as a
+ * plain string by callers that also bind their own parameters, without forcing
+ * every one of them to splice a variable-length parameter list in the right
+ * order (the kind of detail that gets a filter dropped during a later edit).
+ */
+const CONSOLIDATION_CANDIDATE_PREDICATE = `consolidatedAt IS NULL AND mode NOT IN (${CONSOLIDATION_EXCLUDED_MODES.map(
+  (mode) => `'${mode}'`
+).join(", ")})`;
+
 export interface RecordEpisodicEventInput {
   mode: string;
   rawTranscript: string;
@@ -232,11 +272,61 @@ export class MemoryStore {
     return result.changes > 0;
   }
 
+  /**
+   * Every event no consolidation run has processed, regardless of whether a run
+   * would be *allowed* to read it. Deliberately left as a plain "how many rows
+   * are unprocessed" count — that is what the name says, and the stats/debug
+   * surfaces that want a row count want this one.
+   *
+   * The consolidation gate does NOT use this; see
+   * `consolidationCandidateCount` for why the distinction matters.
+   */
   unconsolidatedEventCount(): number {
     const row = this.db
       .query("SELECT COUNT(*) as count FROM episodic_events WHERE consolidatedAt IS NULL")
       .get() as { count: number };
     return row.count;
+  }
+
+  /**
+   * The subset of the above that a consolidation pass may actually read, i.e.
+   * excluding `CONSOLIDATION_EXCLUDED_MODES`. This is what `shouldConsolidate`
+   * counts.
+   *
+   * Keeping the gate on this number rather than on the raw count is what stops
+   * the excluded rows from wedging it permanently open: dictation is never
+   * consolidated, so it never gets a `consolidatedAt`, so under the raw count a
+   * single busy afternoon would hold the gate open forever and every launch
+   * would spend a real LLM call on a set that turns out to be empty once the
+   * mode filter is applied.
+   */
+  consolidationCandidateCount(): number {
+    const row = this.db
+      .query(
+        `SELECT COUNT(*) as count FROM episodic_events WHERE ${CONSOLIDATION_CANDIDATE_PREDICATE}`
+      )
+      .get() as { count: number };
+    return row.count;
+  }
+
+  /**
+   * The one query that selects consolidation material. It lives here rather
+   * than in `consolidator.ts` so that the gate's count above and the pass's
+   * actual read can never drift into disagreeing about what is eligible —
+   * which is the failure mode that would silently reintroduce excluded text
+   * into a model prompt.
+   *
+   * Returns raw rows; the consolidator casts them to its own row shape exactly
+   * as it did when it owned this query.
+   */
+  consolidationCandidates(limit: number): unknown[] {
+    return this.db
+      .query(
+        `SELECT * FROM episodic_events
+         WHERE ${CONSOLIDATION_CANDIDATE_PREDICATE}
+         ORDER BY createdAt DESC LIMIT ?`
+      )
+      .all(limit);
   }
 
   hoursSinceLastConsolidation(): number | null {

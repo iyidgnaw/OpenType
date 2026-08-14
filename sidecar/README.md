@@ -86,9 +86,22 @@ you're debugging packaging specifically.
   the write endpoint `POST /memory/consolidate-now` (runs consolidation
   immediately, same code path as the `consolidate_memory_now` agent tool),
   and owner-facts management `GET /memory/owner-facts` /
-  `DELETE /memory/owner-facts/:id`. Note: `shouldConsolidate` (the ≥12h
-  auto-consolidation gate) has **no caller** — consolidation is
-  manual-only (this route + the agent tool). Also
+  `DELETE /memory/owner-facts/:id`. `startupConsolidation.ts` is the
+  `shouldConsolidate` gate's automatic caller (P1-7): `main()` arms one check
+  5 minutes after the server starts serving, and if the gate opens (≥12h since
+  the last run, ≥5 unconsolidated events) it runs one pass. One check per
+  launch, never two at once, and any failure is logged and swallowed. The
+  route + agent tool above still force a pass regardless of the gate. Its raw
+  material is the `episodic_events` table, which `/agent/run`,
+  `/asr/transcribe` and `/oneshot/ask` all append to (best-effort — a memory
+  write must never fail the request that produced it) — **but `transcribe`
+  rows are recorded only, never consolidated**: "plain dictation never reaches
+  an LLM" is a product promise and consolidation is a real model call, so the
+  exclusion (`CONSOLIDATION_EXCLUDED_MODES`) is enforced in
+  `MemoryStore.consolidationCandidates()`, the single selection query, rather
+  than in the prompt builder. The gate counts `consolidationCandidateCount()`
+  (eligible rows only) so excluded material can't hold it permanently open.
+  Also
   `conversations.ts`/`conversationRoutes.ts` — a separate `conversations`/
   `conversation_messages` table pair (same SQLite file, different concern:
   turn-by-turn chat history, not a fact/term store) backing the macOS Q&A/

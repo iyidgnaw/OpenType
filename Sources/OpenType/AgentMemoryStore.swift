@@ -57,7 +57,6 @@ final class AgentMemoryStore: ObservableObject {
         guard databaseReady else { return }
         createSchema()
         migrateLegacyJSONIfNeeded()
-        backfillMissingEmbeddings(limit: 200)
         reloadPublishedState()
     }
 
@@ -210,67 +209,6 @@ final class AgentMemoryStore: ObservableObject {
         )
     }
 
-    func entriesForPrompt(
-        maximumEntries: Int = 12,
-        maximumCharacters: Int = 14_000
-    ) -> [AgentTaskMemory] {
-        guard maximumEntries > 0, maximumCharacters > 0 else { return [] }
-
-        var selected: [AgentTaskMemory] = []
-        var characterCount = 0
-
-        for entry in entries.prefix(maximumEntries) {
-            let nextCount = characterCount + entry.estimatedPromptCharacters
-            if !selected.isEmpty, nextCount > maximumCharacters {
-                break
-            }
-            selected.append(entry)
-            characterCount = nextCount
-        }
-
-        return Array(selected.reversed())
-    }
-
-    func memoriesForPrompt(
-        query: String,
-        selectedContext: String?,
-        applicationName: String,
-        maximumEntries: Int = 8,
-        maximumCharacters: Int = 14_000
-    ) -> [AgentTaskMemory] {
-        guard maximumEntries > 0, maximumCharacters > 0 else { return [] }
-
-        let retrieved = LocalMemoryRetriever.retrieve(
-            from: loadIndexedEvents(limit: 2_000),
-            query: query,
-            selectedContext: selectedContext,
-            applicationName: applicationName,
-            maximumEntries: maximumEntries
-        )
-
-        var selected: [AgentTaskMemory] = []
-        var characterCount = 0
-        for event in retrieved {
-            let entry = agentTaskMemory(from: event)
-            let nextCount = characterCount + entry.estimatedPromptCharacters
-            if !selected.isEmpty, nextCount > maximumCharacters { continue }
-            selected.append(entry)
-            characterCount = nextCount
-        }
-
-        return selected.sorted { lhs, rhs in
-            if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
-    }
-
-    func profileContextForPrompt() -> MemoryProfileContext {
-        MemoryProfileContext(
-            ownerProfile: ownerProfile,
-            insights: learnedPreferences
-        )
-    }
-
     private func openDatabase() {
         var connection: OpaquePointer?
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
@@ -321,13 +259,6 @@ final class AgentMemoryStore: ObservableObject {
 
             CREATE INDEX IF NOT EXISTS memory_events_mode
             ON memory_events(mode, created_at DESC);
-
-            CREATE TABLE IF NOT EXISTS memory_embeddings (
-                event_id TEXT PRIMARY KEY,
-                model_language TEXT NOT NULL,
-                vector_blob BLOB NOT NULL,
-                FOREIGN KEY(event_id) REFERENCES memory_events(id) ON DELETE CASCADE
-            );
 
             CREATE TABLE IF NOT EXISTS owner_profile (
                 id INTEGER PRIMARY KEY CHECK(id = 1),
@@ -466,84 +397,7 @@ final class AgentMemoryStore: ObservableObject {
             reportDatabaseError("Unable to append memory event")
             return false
         }
-        let didInsert = sqlite3_changes(database) > 0
-        if didInsert {
-            persistEmbedding(for: event)
-        }
-        return didInsert
-    }
-
-    private func persistEmbedding(for event: MemoryEvent) {
-        guard let vector = LocalMemoryEmbedding.vector(for: event) else { return }
-        let sql = """
-        INSERT INTO memory_embeddings (event_id, model_language, vector_blob)
-        VALUES (?, 'zh-Hans', ?)
-        ON CONFLICT(event_id) DO UPDATE SET
-            model_language = excluded.model_language,
-            vector_blob = excluded.vector_blob;
-        """
-        guard let statement = prepare(sql) else { return }
-        defer { sqlite3_finalize(statement) }
-        bind(event.id.uuidString, at: 1, to: statement)
-        bind(LocalMemoryEmbedding.encoded(vector), at: 2, to: statement)
-        if sqlite3_step(statement) != SQLITE_DONE {
-            reportDatabaseError("Unable to save local memory embedding")
-        }
-    }
-
-    private func backfillMissingEmbeddings(limit: Int) {
-        guard limit > 0 else { return }
-        let sql = """
-        SELECT e.id, e.created_at, e.mode, e.application_name,
-               e.bundle_identifier, e.raw_transcript, e.effective_input,
-               e.selected_context, e.result
-        FROM memory_events e
-        LEFT JOIN memory_embeddings x ON x.event_id = e.id
-        WHERE x.event_id IS NULL
-        ORDER BY e.sequence DESC
-        LIMIT ?;
-        """
-        guard let statement = prepare(sql) else { return }
-        sqlite3_bind_int(statement, 1, Int32(limit))
-        var events: [MemoryEvent] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            events.append(memoryEvent(from: statement))
-        }
-        sqlite3_finalize(statement)
-
-        execute("BEGIN IMMEDIATE TRANSACTION;")
-        for event in events {
-            persistEmbedding(for: event)
-        }
-        execute("COMMIT;")
-    }
-
-    private func loadIndexedEvents(limit: Int) -> [IndexedMemoryEvent] {
-        let sql = """
-        SELECT e.id, e.created_at, e.mode, e.application_name,
-               e.bundle_identifier, e.raw_transcript, e.effective_input,
-               e.selected_context, e.result, x.vector_blob
-        FROM memory_events e
-        LEFT JOIN memory_embeddings x ON x.event_id = e.id
-        ORDER BY e.sequence DESC
-        LIMIT ?;
-        """
-        guard let statement = prepare(sql) else { return [] }
-        defer { sqlite3_finalize(statement) }
-        sqlite3_bind_int(statement, 1, Int32(max(0, limit)))
-
-        var result: [IndexedMemoryEvent] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            let embedding = data(at: 9, from: statement)
-                .flatMap(LocalMemoryEmbedding.decoded)
-            result.append(
-                IndexedMemoryEvent(
-                    event: memoryEvent(from: statement),
-                    embedding: embedding
-                )
-            )
-        }
-        return result
+        return sqlite3_changes(database) > 0
     }
 
     private func loadEvents() -> [MemoryEvent] {
@@ -575,20 +429,6 @@ final class AgentMemoryStore: ObservableObject {
             effectiveInput: text(at: 6, from: statement) ?? "",
             selectedContext: text(at: 7, from: statement),
             result: text(at: 8, from: statement) ?? ""
-        )
-    }
-
-    private func agentTaskMemory(from event: MemoryEvent) -> AgentTaskMemory {
-        let effective = event.effectiveInput.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        return AgentTaskMemory(
-            id: event.id,
-            createdAt: event.createdAt,
-            request: effective.isEmpty ? event.rawTranscript : effective,
-            outcome: event.result,
-            applicationName: event.applicationName,
-            referencePreview: event.selectedContext
         )
     }
 
@@ -783,42 +623,12 @@ final class AgentMemoryStore: ObservableObject {
         }
     }
 
-    private func bind(
-        _ value: Data,
-        at index: Int32,
-        to statement: OpaquePointer
-    ) {
-        _ = value.withUnsafeBytes { bytes in
-            sqlite3_bind_blob(
-                statement,
-                index,
-                bytes.baseAddress,
-                Int32(bytes.count),
-                sqliteTransient
-            )
-        }
-    }
-
     private func text(
         at index: Int32,
         from statement: OpaquePointer
     ) -> String? {
         guard let raw = sqlite3_column_text(statement, index) else { return nil }
         return String(cString: raw)
-    }
-
-    private func data(
-        at index: Int32,
-        from statement: OpaquePointer
-    ) -> Data? {
-        guard sqlite3_column_type(statement, index) != SQLITE_NULL else {
-            return nil
-        }
-        let count = Int(sqlite3_column_bytes(statement, index))
-        guard count > 0, let bytes = sqlite3_column_blob(statement, index) else {
-            return nil
-        }
-        return Data(bytes: bytes, count: count)
     }
 
     private func execute(_ sql: String) {

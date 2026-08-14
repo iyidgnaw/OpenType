@@ -259,9 +259,36 @@ P0 落地后产品负责人决定跳过这一条。保留原设计于下方而�
   整个 `LocalMemoryRetriever.swift`、以及它们的测试。理由：零生产调用，且 sidecar 侧记忆才是这个设计里真正
   被注入的那份；留着两套只会让下一个读代码的人再判断一次。`AgentMemoryStore` 本身保留（任务历史 + 已学到的
   偏好仍在用）。
-- **补**：`transcribe` 与助理完成时也写 episodic 事件，consolidation 的原料不再只有 agent 任务。
+- **补**：`transcribe` 与 `ask` 完成时也写 episodic 事件，consolidation 的原料不再只有 agent 任务。
+
+  **`applicationName` 不需要协议变更（2026-08-14 核实后决定）。** sidecar 不知道前台应用是什么，这一度看起来
+  像是要让 Swift 侧开始传这个字段。核实后不必：（a）`/agent/run` 本来就写死占位符 `"OpenType Agent"`
+  （`agent/routes.ts:222`），所以 `"OpenType Transcribe"`/`"OpenType Ask"` 是沿用既有惯例而不是新发明；
+  （b）更要紧的是它**到不了模型**——`buildConsolidationPrompt` 只发 `id`/`mode`/`rawTranscript`/
+  `correctedTranscript` 四个字段，`applicationName` 从不参与 dreaming，因此占位符不会污染归纳输入。
+  真要按应用来源做记忆分层是另一个功能，那时再改协议，不是现在。
 - **接**：`shouldConsolidate` gate 真正接上——sidecar 启动后延迟一段时间检查一次，满足（≥12h 且 ≥5 条未整理）
   就跑一次。不做定时器轮询。
+
+- **排除（2026-08-14 复核时的产品决定，覆盖上面「补」的一半）**：`transcribe` 事件**照常记录，但永不进入
+  consolidation**。原因是上面的「补」在实现后触发了一个没预料到的后果：consolidation 是一次真实的模型调用，
+  于是听写文本会在说出后几分钟被自动送上云——而「纯听写完全不经过 LLM」是写在 README、`USER_GUIDE.md` §13 和
+  `CLAUDE.md` 模式表里的**产品承诺**。**延迟发送也是发送**，「只在整理时才发」不构成豁免；一个因为「听写不出本机」
+  才选择这个产品的用户，有权把这叫做背叛。
+
+  实现要点：排除点在 `MemoryStore.consolidationCandidates()`——**唯一**的选取查询，由
+  `CONSOLIDATION_EXCLUDED_MODES` 定义——而不是在 `buildConsolidationPrompt` 里过滤，这样被排除的文本根本
+  不会进入 `runConsolidation` 的作用域，下游任何改动都无法把它放回模型面前。`consolidatedAt` 的记账选择了
+  「只统计合格事件」（`consolidationCandidateCount()`）而不是「把排除的行标记成已整理」：后者是在数据里说谎
+  （没有任何一次 run 处理过它们），而且会烧掉将来那个 opt-in 的原料。
+
+  **为什么默认排除而不是给个开关**：P0-2 已经让词典**在本机**从听写里学——每一次用户真的做出的纠错都会
+  变成别名，全程不经过模型。consolidation 在这里的增量价值是「发现用户从没纠正过的词」，真实但不值得拿一条
+  已经写出去的承诺去换。
+
+- **后续（不在本批次做）**：显式 opt-in「用我的听写改进词典 —— 这会把最近的转写发给你配置的模型」。默认关，
+  文案必须把代价说清楚。原料已经留着了（听写事件照记，且永远保持 `consolidatedAt IS NULL`），所以这个开关
+  将来是纯增量，不需要回填。
 
 ---
 

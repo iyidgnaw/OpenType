@@ -207,12 +207,22 @@ function readDoubleQuoted(
   return null;
 }
 
-const REDIRECT_STOP = new Set([" ", "\t", "\r", "\n", ";", "&", "|", "<", ">"]);
+// `(` and `)` stop a target for the same reason they separate words: they are
+// shell metacharacters, so `cat <(rm -rf ~)` is a redirect with NO target
+// followed by a subshell, not a redirect to a file called `(rm`.
+const REDIRECT_STOP = new Set([" ", "\t", "\r", "\n", ";", "&", "|", "<", ">", "(", ")"]);
 
-/** Reads the word a redirection points at, starting after its operator. */
+/**
+ * Reads the word a redirection points at, starting after its operator.
+ *
+ * `substitutions` is the segment's list, not a throwaway: a `$(...)` in a
+ * redirect target runs exactly as it does anywhere else (`cat < "$(…)"`), so
+ * dropping it here would be a hole with no upside.
+ */
 function readRedirectTarget(
   line: string,
-  start: number
+  start: number,
+  substitutions: string[]
 ): { target: string | undefined; next: number } | null {
   let i = start;
   while (i < line.length && (line[i] === " " || line[i] === "\t")) i += 1;
@@ -236,7 +246,7 @@ function readRedirectTarget(
       continue;
     }
     if (c === '"') {
-      const read = readDoubleQuoted(line, i, []);
+      const read = readDoubleQuoted(line, i, substitutions);
       if (!read) return null;
       target += read.text;
       i = read.next;
@@ -265,6 +275,13 @@ function tokenize(line: string): Segment[] | null {
   let current = newSegment(false);
   let word = "";
   let quoted = false;
+
+  /** True while nothing of the current segment has been read yet. */
+  const segmentIsEmpty = (): boolean =>
+    current.words.length === 0 &&
+    current.redirects.length === 0 &&
+    word.length === 0 &&
+    !quoted;
 
   const endWord = (): void => {
     // An unquoted empty word is an expansion that produced nothing (`$(...)`

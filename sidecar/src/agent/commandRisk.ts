@@ -38,6 +38,14 @@
  * over-eager task destroying the user's files, not an adversary who controls
  * the command line. Do not read this module as a security boundary.
  *
+ * Two more, found by attacking this file during review and left open rather
+ * than left silent. `source ~/x.sh` and `. ~/x.sh` are the test file's gap 4
+ * ("a local script's contents") wearing a name that does not look like one --
+ * they run a file nobody read, in the current shell. And python indirection
+ * beyond one alias hop -- a module name assembled at runtime, `getattr` on
+ * something other than the three modules named below -- is bash's gap 2 in
+ * python's spelling: unreadable without running the program.
+ *
  * FAIL-CLOSED, BUT ONLY INSIDE THE EXECUTING TOOLS. For bash and python we
  * know arbitrary code is about to run, so a payload we cannot read (missing,
  * wrong-typed, empty, unbalanced quotes) classifies destructive -- guessing
@@ -104,11 +112,38 @@ const PYTHON_DESTRUCTIVE: readonly RegExp[] = [
   // match (`_` is a word character, and `execute` is not `exec`).
   /\b(?:exec|eval)\s*\(/,
   /\b__import__\s*\(/,
+  /\bimport_module\s*\(/,
   /\brunpy\s*\./,
+  // Reaching a module's attributes by string. Scoped to the three modules
+  // whose attributes this file has rules about, so `getattr(obj, "name")` --
+  // ordinary python -- is untouched.
+  /\bgetattr\s*\(\s*(?:os|shutil|subprocess)\b/,
 ];
 
+/**
+ * `import shutil as sh` + `sh.rmtree(...)`, rewritten back to `shutil.rmtree`
+ * so the dotted rules above see the name they were written for.
+ *
+ * Aliasing is the one indirection worth undoing here because it costs three
+ * lines and because the alternative -- matching `.remove(` or `.copy(` at any
+ * call site -- would fire on `list.remove(x)` and `dict.copy()`, i.e. on
+ * ordinary python. Deeper indirection (`getattr`, `importlib`) is caught on
+ * the indirection itself rather than by resolving it.
+ */
+const MODULE_ALIAS = /\bimport\s+(os|shutil|subprocess|pty|runpy)\s+as\s+([A-Za-z_]\w*)/g;
+
+function resolveModuleAliases(code: string): string {
+  let resolved = code;
+  for (const [, module, alias] of code.matchAll(MODULE_ALIAS)) {
+    if (!module || !alias || alias === module) continue;
+    resolved = resolved.replace(new RegExp(`\\b${alias}\\s*\\.`, "g"), `${module}.`);
+  }
+  return resolved;
+}
+
 function classifyPythonSource(code: string): CommandRisk {
-  return PYTHON_DESTRUCTIVE.some((pattern) => pattern.test(code)) ? "destructive" : "safe";
+  const resolved = resolveModuleAliases(code);
+  return PYTHON_DESTRUCTIVE.some((pattern) => pattern.test(resolved)) ? "destructive" : "safe";
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +821,14 @@ function segmentIsDestructive(segment: Segment, depth: number): boolean {
     readsProgramFromStdin(words, head)
   ) {
     return true;
+  }
+
+  // `trap 'rm -rf "$TMPDIR"' EXIT`: the first argument is code the shell runs
+  // later, so it is `-c`'s rule under another name -- and unlike `-c` it is
+  // something a model writes unprompted, as a cleanup handler. `trap - EXIT`
+  // and `trap '' INT` classify safe on their own contents, as they should.
+  if (headName === "trap") {
+    if (classifyBashCommand(textAt(words, head + 1), depth + 1) === "destructive") return true;
   }
 
   // `sh <<< 'rm -rf ~'`: a here-string is an inline payload spelled as a

@@ -3226,8 +3226,15 @@ final class AppModel: ObservableObject {
             seconds: DispatchConfirmation.windowSeconds
         )
         defer {
-            pendingDispatch = nil
-            overlay.hidePendingDispatch()
+            // Take down *this* window, not whatever is on screen. A superseded
+            // recording cancels this task and starts its own confirmation, and
+            // a defer that cleared unconditionally would hide the newer card
+            // and leave its Esc unheard (`recordPendingDispatchEscape` needs
+            // `pendingDispatch` to be non-nil).
+            if pendingDispatch == pending {
+                pendingDispatch = nil
+                overlay.hidePendingDispatch()
+            }
         }
 
         while !Task.isCancelled,
@@ -3254,7 +3261,14 @@ final class AppModel: ObservableObject {
     /// time; a keypress after the window closed leaves the dispatched run alone
     /// (stopping one that already started is `/agent/cancel`'s job).
     private func recordPendingDispatchEscape() {
-        guard pendingDispatch != nil else { return }
+        // First press wins. Two things reach here — the overlay's own key
+        // monitors and `cancelActiveVoiceSession()` — so a single Esc can
+        // arrive twice, and a second timestamp is never new information. It
+        // could, however, be *worse* information: a repeat press landing after
+        // the deadline but before the loop's next 30ms tick would overwrite an
+        // in-time cancellation with an out-of-window one, turning "cancelled"
+        // into "dispatched" for a user who pressed Esc twice.
+        guard pendingDispatch != nil, pendingDispatchEscapePressedAt == nil else { return }
         pendingDispatchEscapePressedAt = Date()
     }
 

@@ -815,6 +815,375 @@ final class UsageStatsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(summary.averageEndToEndLatency), 3.0, accuracy: 1e-6)
     }
 
+    // MARK: - Daily buckets (the 7-day bar strip)
+
+    // The redesign's statistics band
+    // (`design_handoff_opentype_redesign_v1/README.md` §6) puts a 7-bar strip
+    // beside the four figures, and a 「上周 2.1」 comparison under the fourth.
+    // Both are additions to `Summary`, computed in the same pass:
+    //
+    //     let dailyWords: [Int]                            // 7, oldest → newest
+    //     let previousCorrectionsPerHundredWords: Double?   // the prior 7 days
+    //
+    // ## Pinned decision — the buckets are rolling 24h slices, not calendar days
+    //
+    // `windowDuration` is deliberately rolling ("this week" must mean the same
+    // span of days whichever day the panel is opened on), and the buckets are
+    // slices of that same window: bucket 6 is the 24 hours ending at `now`,
+    // bucket 0 is the oldest. Three reasons, in order of weight:
+    //
+    // 1. **The strip has to add up to the number beside it.** Calendar days
+    //    would leave sessions inside the window that belong to no bucket (a
+    //    rolling 7-day window covers parts of 8 calendar days), so the bars
+    //    would sum to less than 「说出的字数」 on the same card. That is pinned
+    //    below as `dailyWords.reduce(0, +) == wordsDictated`.
+    // 2. **It keeps `UsageStats` pure.** Calendar days need a `Calendar` and a
+    //    time zone, which makes the summary depend on ambient system state that
+    //    tests cannot see and a traveller's laptop changes mid-week.
+    // 3. The 星期字 under each bar is a label the *view* draws, and it can draw
+    //    it from `now - k * 86_400` without the summary knowing what a week is.
+    //
+    // Attribution matches the rest of `summarize`: by the `.completed`
+    // timestamp, so a session is never split and never counted twice.
+
+    func testDailyWordsHasSevenBucketsOldestFirstAndSumsToTheWeeksTotal() {
+        let today = UUID()
+        let yesterday = UUID()
+        let sixDaysAgo = UUID()
+        let events = [
+            makeEvent(.recognized, requestId: today, at: now - 120,
+                      mode: .transcribe, rawTranscript: "今天说的话"),
+            makeEvent(.completed, requestId: today, at: now - 60,
+                      mode: .transcribe, rawTranscript: "今天说的话",
+                      result: "今天说的话"),
+            makeEvent(.recognized, requestId: yesterday, at: now - day - 3_700,
+                      mode: .transcribe, rawTranscript: "昨天"),
+            makeEvent(.completed, requestId: yesterday, at: now - day - 3_600,
+                      mode: .transcribe, rawTranscript: "昨天", result: "昨天"),
+            makeEvent(.recognized, requestId: sixDaysAgo, at: now - 6 * day - 3_700,
+                      mode: .transcribe, rawTranscript: "一周前说的"),
+            makeEvent(.completed, requestId: sixDaysAgo, at: now - 6 * day - 3_600,
+                      mode: .transcribe, rawTranscript: "一周前说的",
+                      result: "一周前说的"),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        // Oldest first: 5 characters six days ago, 2 yesterday, 5 today, and
+        // four untouched days in between printed as 0 rather than skipped.
+        XCTAssertEqual(summary.dailyWords, [5, 0, 0, 0, 0, 2, 5])
+        XCTAssertEqual(summary.dailyWords.reduce(0, +), summary.wordsDictated)
+    }
+
+    func testDailyWordsIsAlwaysSevenBucketsEvenWithNothingToShow() {
+        // A day with no dictation is a 0-height bar, not a missing one — and a
+        // week with none is seven of them, which is what the strip draws on
+        // first launch.
+        XCTAssertEqual(
+            UsageStats.summarize(events: [], now: now).dailyWords,
+            [0, 0, 0, 0, 0, 0, 0]
+        )
+        XCTAssertEqual(UsageStats.Summary.empty.dailyWords, [0, 0, 0, 0, 0, 0, 0])
+    }
+
+    func testTheBucketBoundaryIsExactlyTwentyFourHoursBeforeNow() {
+        // The one arithmetic that decides whether "today" is a full bar or a
+        // half-empty one.
+        let onBoundary = UUID()
+        let justInside = UUID()
+        let events = [
+            makeEvent(.recognized, requestId: onBoundary, at: now - day - 1,
+                      mode: .transcribe, rawTranscript: "整一天"),
+            makeEvent(.completed, requestId: onBoundary, at: now - day,
+                      mode: .transcribe, rawTranscript: "整一天", result: "整一天"),
+            makeEvent(.recognized, requestId: justInside, at: now - day,
+                      mode: .transcribe, rawTranscript: "刚"),
+            makeEvent(.completed, requestId: justInside, at: now - day + 1,
+                      mode: .transcribe, rawTranscript: "刚", result: "刚"),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        // Exactly 24h old is yesterday's bar; one second younger is today's.
+        XCTAssertEqual(summary.dailyWords, [0, 0, 0, 0, 0, 3, 1])
+    }
+
+    func testTheWindowStartInstantLandsInTheOldestBucket() {
+        // The window is inclusive at `now - 7d`
+        // (`testDeliveryExactlyAtTheWindowStartIsIncludedAndOneSecondEarlierIsNot`),
+        // so that instant must have a bar to live in — otherwise the session
+        // counts toward 「说出的字数」 while being invisible in the strip.
+        let onBoundary = UUID()
+        let justOutside = UUID()
+        let start = now - 7 * day
+        let events = [
+            makeEvent(.recognized, requestId: onBoundary, at: start,
+                      mode: .transcribe, rawTranscript: "边界"),
+            makeEvent(.completed, requestId: onBoundary, at: start,
+                      mode: .transcribe, rawTranscript: "边界", result: "边界"),
+            makeEvent(.recognized, requestId: justOutside, at: start - 1,
+                      mode: .transcribe, rawTranscript: "界外说的一大段话"),
+            makeEvent(.completed, requestId: justOutside, at: start - 1,
+                      mode: .transcribe, rawTranscript: "界外说的一大段话",
+                      result: "界外说的一大段话"),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        XCTAssertEqual(summary.dailyWords, [2, 0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(summary.dailyWords.reduce(0, +), summary.wordsDictated)
+    }
+
+    func testDailyWordsAttributesASessionToItsDeliveryNotItsRecording() {
+        // A session that starts before midnight-minus-24h and delivers after it
+        // belongs to one bar, the same way it belongs to one week
+        // (`testStraddlingSessionIsAttributedToItsCompletionTimestamp`).
+        let straddling = UUID()
+        let events = [
+            makeEvent(.recognized, requestId: straddling, at: now - day - 60,
+                      mode: .transcribe, rawTranscript: "跨过分界"),
+            makeEvent(.completed, requestId: straddling, at: now - day + 60,
+                      mode: .transcribe, rawTranscript: "跨过分界",
+                      result: "跨过分界"),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        XCTAssertEqual(summary.dailyWords, [0, 0, 0, 0, 0, 0, 4])
+    }
+
+    func testDailyWordsCountsNothingForCancelledFailedOrFutureSessions() {
+        let delivered = UUID()
+        let cancelled = UUID()
+        let failed = UUID()
+        let future = UUID()
+        let events = [
+            makeEvent(.recognized, requestId: delivered, at: now - 3 * day - 10,
+                      mode: .transcribe, rawTranscript: "交付了"),
+            makeEvent(.completed, requestId: delivered, at: now - 3 * day,
+                      mode: .transcribe, rawTranscript: "交付了", result: "交付了"),
+            makeEvent(.recognized, requestId: cancelled, at: now - 3 * day - 10,
+                      mode: .transcribe, rawTranscript: "取消掉的一大段话"),
+            makeEvent(.cancelled, requestId: cancelled, at: now - 3 * day,
+                      mode: .transcribe, rawTranscript: "取消掉的一大段话"),
+            makeEvent(.recognized, requestId: failed, at: now - day - 10,
+                      mode: .ask, rawTranscript: "this one failed"),
+            makeEvent(.failed, requestId: failed, at: now - day,
+                      mode: .ask, rawTranscript: "this one failed"),
+            makeEvent(.recognized, requestId: future, at: now + 60,
+                      mode: .transcribe, rawTranscript: "来自未来的一句话"),
+            makeEvent(.completed, requestId: future, at: now + 61,
+                      mode: .transcribe, rawTranscript: "来自未来的一句话",
+                      result: "来自未来的一句话"),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        XCTAssertEqual(summary.dailyWords, [0, 0, 0, 3, 0, 0, 0])
+        XCTAssertEqual(summary.dailyWords.reduce(0, +), summary.wordsDictated)
+    }
+
+    // MARK: - Last week's correction rate (the trend under the fourth figure)
+
+    // `previousCorrectionsPerHundredWords` is the same ratio over the *previous*
+    // 7 days: `[now - 14d, now - 7d)`. Half-open at the young end on purpose —
+    // the current window is inclusive at `now - 7d`, so a session delivered at
+    // exactly that instant belongs to this week and must not also be counted in
+    // last week's. Inclusive at the old end, mirroring the current window's own
+    // start rule, so the two windows tile with neither a gap nor an overlap.
+    //
+    // Optional, unlike `correctionsPerHundredWords`: 「上周 2.1」 is a comparison,
+    // and there is nothing to compare against in a user's first week. `nil`
+    // means "no prior week", which the panel prints as nothing at all — not as
+    // 「上周 0」, which would read as a week of flawless recognition.
+
+    func testPreviousCorrectionsPerHundredWordsMeasuresThePriorSevenDays() {
+        let thisWeek = UUID()
+        let lastWeek = UUID()
+        let thisWeekText = String(repeating: "字", count: 100)
+        let lastWeekText = String(repeating: "词", count: 200)
+        let events = [
+            makeEvent(.recognized, requestId: thisWeek, at: now - 2 * day - 30,
+                      mode: .transcribe, rawTranscript: thisWeekText),
+            makeEvent(.corrected, requestId: thisWeek, at: now - 2 * day - 20,
+                      mode: .transcribe, rawTranscript: "改一下",
+                      result: thisWeekText),
+            makeEvent(.corrected, requestId: thisWeek, at: now - 2 * day - 10,
+                      mode: .transcribe, rawTranscript: "再改一下",
+                      result: thisWeekText),
+            makeEvent(.completed, requestId: thisWeek, at: now - 2 * day,
+                      mode: .transcribe, rawTranscript: thisWeekText,
+                      result: thisWeekText),
+            makeEvent(.recognized, requestId: lastWeek, at: now - 10 * day - 10,
+                      mode: .transcribe, rawTranscript: lastWeekText),
+            makeEvent(.corrected, requestId: lastWeek, at: now - 10 * day - 5,
+                      mode: .transcribe, rawTranscript: "改一下",
+                      result: lastWeekText),
+            makeEvent(.completed, requestId: lastWeek, at: now - 10 * day,
+                      mode: .transcribe, rawTranscript: lastWeekText,
+                      result: lastWeekText),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        // 2 corrections over 100 words this week, 1 over 200 last week.
+        XCTAssertEqual(summary.correctionsPerHundredWords, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(
+            try XCTUnwrap(summary.previousCorrectionsPerHundredWords),
+            0.5,
+            accuracy: 1e-9
+        )
+        // Last week stays out of every figure the panel prints as "this week".
+        XCTAssertEqual(summary.wordsDictated, 100)
+        XCTAssertEqual(summary.corrections, 2)
+        XCTAssertEqual(summary.deliveries, 1)
+        XCTAssertEqual(summary.dailyWords, [0, 0, 0, 0, 100, 0, 0])
+    }
+
+    func testTheTwoWindowsShareNoSessionAtTheirBoundary() {
+        // A delivery at exactly `now - 7d` is this week's
+        // (`testDeliveryExactlyAtTheWindowStartIsIncludedAndOneSecondEarlierIsNot`).
+        // If it also landed in last week's figure it would be counted twice,
+        // and a heavily-corrected boundary session would make last week look
+        // worse than it was.
+        let boundary = UUID()
+        let lastWeek = UUID()
+        let start = now - 7 * day
+        let boundaryText = String(repeating: "字", count: 100)
+        let lastWeekText = String(repeating: "词", count: 100)
+        let events = [
+            makeEvent(.recognized, requestId: boundary, at: start - 30,
+                      mode: .transcribe, rawTranscript: boundaryText),
+            makeEvent(.corrected, requestId: boundary, at: start - 20,
+                      mode: .transcribe, rawTranscript: "改", result: boundaryText),
+            makeEvent(.corrected, requestId: boundary, at: start - 19,
+                      mode: .transcribe, rawTranscript: "改", result: boundaryText),
+            makeEvent(.corrected, requestId: boundary, at: start - 18,
+                      mode: .transcribe, rawTranscript: "改", result: boundaryText),
+            makeEvent(.corrected, requestId: boundary, at: start - 17,
+                      mode: .transcribe, rawTranscript: "改", result: boundaryText),
+            makeEvent(.corrected, requestId: boundary, at: start - 16,
+                      mode: .transcribe, rawTranscript: "改", result: boundaryText),
+            makeEvent(.completed, requestId: boundary, at: start,
+                      mode: .transcribe, rawTranscript: boundaryText,
+                      result: boundaryText),
+            makeEvent(.recognized, requestId: lastWeek, at: now - 9 * day - 10,
+                      mode: .transcribe, rawTranscript: lastWeekText),
+            makeEvent(.corrected, requestId: lastWeek, at: now - 9 * day - 5,
+                      mode: .transcribe, rawTranscript: "改", result: lastWeekText),
+            makeEvent(.completed, requestId: lastWeek, at: now - 9 * day,
+                      mode: .transcribe, rawTranscript: lastWeekText,
+                      result: lastWeekText),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        XCTAssertEqual(summary.correctionsPerHundredWords, 5.0, accuracy: 1e-9)
+        XCTAssertEqual(
+            try XCTUnwrap(summary.previousCorrectionsPerHundredWords),
+            1.0,
+            accuracy: 1e-9
+        )
+    }
+
+    func testThePreviousWindowStartsFourteenDaysBackInclusive() {
+        let onBoundary = UUID()
+        let tooOld = UUID()
+        let start = now - 14 * day
+        let text = String(repeating: "字", count: 100)
+        let events = [
+            makeEvent(.recognized, requestId: onBoundary, at: start - 30,
+                      mode: .transcribe, rawTranscript: text),
+            makeEvent(.corrected, requestId: onBoundary, at: start - 20,
+                      mode: .transcribe, rawTranscript: "改", result: text),
+            makeEvent(.corrected, requestId: onBoundary, at: start - 10,
+                      mode: .transcribe, rawTranscript: "改", result: text),
+            makeEvent(.completed, requestId: onBoundary, at: start,
+                      mode: .transcribe, rawTranscript: text, result: text),
+            makeEvent(.recognized, requestId: tooOld, at: start - 60,
+                      mode: .transcribe, rawTranscript: text),
+            makeEvent(.corrected, requestId: tooOld, at: start - 50,
+                      mode: .transcribe, rawTranscript: "改", result: text),
+            makeEvent(.corrected, requestId: tooOld, at: start - 45,
+                      mode: .transcribe, rawTranscript: "改", result: text),
+            makeEvent(.corrected, requestId: tooOld, at: start - 40,
+                      mode: .transcribe, rawTranscript: "改", result: text),
+            makeEvent(.corrected, requestId: tooOld, at: start - 35,
+                      mode: .transcribe, rawTranscript: "改", result: text),
+            makeEvent(.completed, requestId: tooOld, at: start - 1,
+                      mode: .transcribe, rawTranscript: text, result: text),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        // Only the boundary session: 2 corrections over 100 words. The session
+        // one second older is two weeks ago, which nothing on this panel shows.
+        XCTAssertEqual(
+            try XCTUnwrap(summary.previousCorrectionsPerHundredWords),
+            2.0,
+            accuracy: 1e-9
+        )
+    }
+
+    func testPreviousCorrectionsPerHundredWordsIsNilWithNoPriorWeek() {
+        // A user's first week: there is no 「上周」 to print.
+        let thisWeek = UUID()
+        let events = [
+            makeEvent(.recognized, requestId: thisWeek, at: now - 600,
+                      mode: .transcribe, rawTranscript: "只有这周"),
+            makeEvent(.corrected, requestId: thisWeek, at: now - 590,
+                      mode: .transcribe, rawTranscript: "改一下", result: "只有这周"),
+            makeEvent(.completed, requestId: thisWeek, at: now - 580,
+                      mode: .transcribe, rawTranscript: "只有这周", result: "只有这周"),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        XCTAssertNil(summary.previousCorrectionsPerHundredWords)
+        XCTAssertNil(UsageStats.Summary.empty.previousCorrectionsPerHundredWords)
+    }
+
+    func testAPriorWeekThatDeliveredNothingIsNilRatherThanZero() {
+        // Cancelled and failed sessions are not deliveries, here as everywhere
+        // else — a week the user threw away is a week with no rate, not a week
+        // with a perfect one.
+        let lastWeek = UUID()
+        let events = [
+            makeEvent(.recognized, requestId: lastWeek, at: now - 10 * day - 10,
+                      mode: .transcribe, rawTranscript: "上周取消掉的一段话"),
+            makeEvent(.corrected, requestId: lastWeek, at: now - 10 * day - 5,
+                      mode: .transcribe, rawTranscript: "改一下",
+                      result: "上周取消掉的一段话"),
+            makeEvent(.cancelled, requestId: lastWeek, at: now - 10 * day,
+                      mode: .transcribe, rawTranscript: "上周取消掉的一段话"),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        XCTAssertNil(summary.previousCorrectionsPerHundredWords)
+    }
+
+    func testAPriorWeekThatDeliveredOnlyEmptyTranscriptsIsZeroNotNaN() throws {
+        // Same divide-by-zero guard the current week's ratio has: it delivered,
+        // so there is a rate; the rate is 0.
+        let lastWeek = UUID()
+        let events = [
+            makeEvent(.recognized, requestId: lastWeek, at: now - 10 * day - 10,
+                      mode: .transcribe, rawTranscript: ""),
+            makeEvent(.corrected, requestId: lastWeek, at: now - 10 * day - 5,
+                      mode: .transcribe, rawTranscript: "改一下", result: ""),
+            makeEvent(.completed, requestId: lastWeek, at: now - 10 * day,
+                      mode: .transcribe, rawTranscript: "", result: ""),
+        ]
+
+        let summary = UsageStats.summarize(events: events, now: now)
+
+        let previous = try XCTUnwrap(summary.previousCorrectionsPerHundredWords)
+        XCTAssertEqual(previous, 0, accuracy: 1e-9)
+        XCTAssertFalse(previous.isNaN)
+        XCTAssertTrue(previous.isFinite)
+    }
+
     // MARK: - Fixtures
 
     private func makeEvent(

@@ -70,15 +70,24 @@ struct RootView: View {
                     // explicit tab switch is needed once that happens.
                     OnboardingWizardView(model: model)
                 } else {
+                    // Interim wiring: the four new destinations are served by
+                    // the existing views until the redesign's sidebar shell
+                    // replaces this whole `VStack` (phase B). `sessions` shows
+                    // the Q&A list for now — merging the two lists into one
+                    // screen is phase C — and `memory` is lifted out of
+                    // Settings in phase E. Kept deliberately dumb so this file
+                    // has exactly one job to undo later.
                     switch model.selectedTab {
-                    case .home:
-                        HomeView(model: model, configuration: model.configuration)
-                    case .history:
-                        HistoryView(model: model, history: model.history)
-                    case .qa:
+                    case .sessions:
                         QAConversationsView(model: model)
-                    case .agent:
-                        AgentConversationsView(model: model)
+                    case .dictation:
+                        HistoryView(model: model, history: model.history)
+                    case .memory:
+                        SettingsView(
+                            model: model,
+                            configuration: model.configuration,
+                            agentMemory: model.agentMemory
+                        )
                     case .settings:
                         SettingsView(
                             model: model,

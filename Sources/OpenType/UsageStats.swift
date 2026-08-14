@@ -25,6 +25,9 @@ enum UsageStats {
     /// number look like a collapse.
     static let windowDuration: TimeInterval = 7 * 86_400
 
+    /// Bars in the strip — one per rolling day of `windowDuration`.
+    static let bucketCount = 7
+
     /// One week's figures.
     ///
     /// Latency is `nil`-able rather than zero-defaulted throughout: "—" and
@@ -55,6 +58,22 @@ enum UsageStats {
         /// Kept beside the headline because for `ask`, which is in both, the
         /// *difference* between the two is what ASR cost.
         let averageResponseLatency: TimeInterval?
+        /// Seven rolling 24-hour buckets, oldest first, for the bar strip.
+        ///
+        /// Rolling rather than calendar days so this sums to `wordsDictated`
+        /// exactly. A calendar week touches parts of eight calendar days, so
+        /// calendar buckets would leave sessions inside the window belonging to
+        /// no bar and the strip would visibly fail to add up to the number
+        /// printed beside it — which costs more trust than precise weekday
+        /// labels buy. The view labels bar *i* from `now - (6 - i) * 86400`.
+        let dailyWords: [Int]
+        /// `correctionsPerHundredWords` for the *previous* seven days, or `nil`
+        /// when there is no prior week to compare against.
+        ///
+        /// Optional where the current-week figure is not, deliberately: a
+        /// trend with nothing behind it prints nothing (「空值印 — 不印 0」),
+        /// whereas a real week that dictated nothing is a genuine zero.
+        let previousCorrectionsPerHundredWords: Double?
 
         static let empty = Summary(
             wordsDictated: 0,
@@ -62,7 +81,9 @@ enum UsageStats {
             corrections: 0,
             correctionsPerHundredWords: 0,
             averageEndToEndLatency: nil,
-            averageResponseLatency: nil
+            averageResponseLatency: nil,
+            dailyWords: Array(repeating: 0, count: UsageStats.bucketCount),
+            previousCorrectionsPerHundredWords: nil
         )
     }
 
@@ -220,25 +241,60 @@ enum UsageStats {
         var corrections = 0
         var endToEndSpans: [TimeInterval] = []
         var responseSpans: [TimeInterval] = []
+        var dailyWords = Array(repeating: 0, count: bucketCount)
+        // The seven days before the current window, for the trend. Gathered in
+        // the same pass — a second walk over the file to compute one ratio
+        // would double the cost of a panel whose whole job is to be cheap
+        // enough to recompute on every appearance.
+        let previousWindowStart = windowStart.addingTimeInterval(-windowDuration)
+        var previousWords = 0
+        var previousCorrections = 0
+        var previousDeliveries = 0
 
         for (_, unordered) in sessions {
             let session = unordered.sorted { $0.createdAt < $1.createdAt }
-            guard let completed = session.first(where: { $0.status == .completed }),
-                  completed.createdAt >= windowStart,
+            guard let completed = session.first(where: { $0.status == .completed }) else {
+                continue
+            }
+            // The prior seven days, half-open at the young end so the boundary
+            // session the current window claims inclusively cannot be counted
+            // in both.
+            if completed.createdAt >= previousWindowStart,
+               completed.createdAt < windowStart {
+                previousDeliveries += 1
+                previousWords += wordCount(
+                    session.first { $0.status == .recognized }?.rawTranscript
+                        ?? completed.rawTranscript
+                )
+                previousCorrections += session.filter { $0.status == .corrected }.count
+            }
+            guard completed.createdAt >= windowStart,
                   completed.createdAt <= now else {
                 continue
             }
 
             let recognized = session.first { $0.status == .recognized }
             deliveries += 1
+
+            // Attributed to the delivery, not the recording: a session that
+            // started before midnight and finished after belongs to the day it
+            // produced something. Clamped because a `.completed` exactly at
+            // `now` computes to index 7.
+            let age = now.timeIntervalSince(completed.createdAt)
+            let bucket = min(
+                bucketCount - 1,
+                max(0, bucketCount - 1 - Int(age / 86_400))
+            )
             // The *dictated* text: what ASR heard at the top of the session,
             // falling back to the delivery's own copy of it. Never a
             // `.corrected` row's `rawTranscript` — that field holds the spoken
             // correction instruction — and never `result`, which for ask/agent
             // is the model's words rather than the user's.
-            wordsDictated += wordCount(
+            let sessionWords = wordCount(
                 recognized?.rawTranscript ?? completed.rawTranscript
             )
+            wordsDictated += sessionWords
+            dailyWords[bucket] += sessionWords
 
             let correctionRounds = session.filter { $0.status == .corrected }
             corrections += correctionRounds.count
@@ -299,7 +355,17 @@ enum UsageStats {
                 ? Double(corrections) * 100 / Double(wordsDictated)
                 : 0,
             averageEndToEndLatency: average(endToEndSpans),
-            averageResponseLatency: average(responseSpans)
+            averageResponseLatency: average(responseSpans),
+            dailyWords: dailyWords,
+            // `nil` when the prior week delivered nothing at all — there is no
+            // trend to draw, and printing 0 would claim an improvement that
+            // never happened. A week that delivered but dictated no words is a
+            // real 0, mirroring the current-week guard above.
+            previousCorrectionsPerHundredWords: previousDeliveries == 0
+                ? nil
+                : (previousWords > 0
+                    ? Double(previousCorrections) * 100 / Double(previousWords)
+                    : 0)
         )
     }
 

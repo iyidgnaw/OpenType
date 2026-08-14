@@ -76,7 +76,7 @@ final class AppModel: ObservableObject {
     /// "N running" affordance is used) so the app window's Task List panel
     /// can scroll to and briefly highlight that specific run.
     @Published var focusedAgentRunID: UUID?
-    @Published var selectedTab: AppTab = .home
+    @Published var selectedTab: AppTab = .sessions
     /// Past Ask/Agent conversations (`GET /conversations?kind=...`), backing
     /// the Q&A and Agent tabs (`Views.swift`) -- refreshed on tab appear and
     /// after each dispatch completes. The sidecar-persisted list, not
@@ -1087,7 +1087,7 @@ final class AppModel: ObservableObject {
            let conversationId = record.conversationId {
             openAgentConversation(conversationId)
         }
-        selectedTab = .agent
+        selectedTab = .sessions
         openMainWindow()
     }
 
@@ -1295,11 +1295,13 @@ final class AppModel: ObservableObject {
             if let state = agentPanelState, let runID = UUID(uuidString: state.runId) {
                 focusAgentRun(runID)
             } else {
-                selectedTab = .agent
+                selectedTab = .sessions
                 openMainWindow()
             }
         case .ask, .transcribe:
-            selectedTab = .qa
+            // One list now, so both kinds land in the same place. The row's
+            // type dot is what tells them apart, not which tab you are on.
+            selectedTab = .sessions
             openMainWindow()
         }
         hideVoiceSurface()
@@ -3734,31 +3736,43 @@ private struct InPlaceCorrectionSession {
     let supersedesEventId: UUID
 }
 
+/// The sidebar's four destinations (2026-08 redesign).
+///
+/// Down from five bottom tabs, and the reduction is the point rather than a
+/// side effect. `home` is gone entirely — it existed to pick a mode and show
+/// the last result, and the redesign moves mode selection back to the menu-bar
+/// popover and the sidebar's own mode card, where it does not cost a
+/// first-class destination. `qa` and `agent` merge into `sessions`: they were
+/// never two kinds of place, only two kinds of row in one list, and keeping
+/// them apart meant a user who asked a question and then gave a task had to
+/// remember which tab it landed in.
+///
+/// Note what this merge is **not**: the two *modes* stay separate. A session's
+/// `kind` still decides whether its next turn goes to `/oneshot/ask` or
+/// `/agent/run`. This is one list of conversations, not one kind of
+/// conversation.
 enum AppTab: String, CaseIterable, Identifiable {
-    case home
-    case history
-    case qa
-    case agent
+    case sessions
+    case dictation
+    case memory
     case settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .home: return OpenTypeL10n.text("输入", english: "Input")
-        case .history: return OpenTypeL10n.text("历史", english: "History")
-        case .qa: return OpenTypeL10n.text("问答", english: "Q&A")
-        case .agent: return OpenTypeL10n.text("Agent", english: "Agent")
+        case .sessions: return OpenTypeL10n.text("会话", english: "Sessions")
+        case .dictation: return OpenTypeL10n.text("听写", english: "Dictation")
+        case .memory: return OpenTypeL10n.text("记忆", english: "Memory")
         case .settings: return OpenTypeL10n.text("设置", english: "Settings")
         }
     }
 
     var symbol: String {
         switch self {
-        case .home: return "waveform"
-        case .history: return "clock.arrow.circlepath"
-        case .qa: return "questionmark.bubble.fill"
-        case .agent: return "wand.and.stars"
+        case .sessions: return "bubble.left.and.bubble.right.fill"
+        case .dictation: return "clock.arrow.circlepath"
+        case .memory: return "brain"
         case .settings: return "slider.horizontal.3"
         }
     }

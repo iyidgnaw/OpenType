@@ -829,9 +829,39 @@ final class AppModel: ObservableObject {
         overlay.show(state: .modeChanged, mode: mode)
     }
 
+    /// The mode-switch chord's landing point (hold the recording modifier, tap
+    /// Tab). `.listening` used to be refused here, which made the gesture dead:
+    /// holding the recording modifier is *what starts a recording*, so past the
+    /// 300ms long-press threshold every cycle was rejected. Now it is the
+    /// gesture's main case, and it **retargets the recording being captured**
+    /// rather than only the next-recording default — see `ModeCyclePolicy`.
     func cycleMode() {
-        guard state != .listening, !isBusy, !isStartingRecording else { return }
-        selectMode(configuration.selectedMode.next)
+        guard ModeCyclePolicy.allows(
+            state: state,
+            isBusy: isBusy,
+            isStartingRecording: isStartingRecording
+        ) else { return }
+
+        let outcome = ModeCyclePolicy.cycle(
+            selectedMode: configuration.selectedMode,
+            activeMode: activeMode,
+            state: state
+        )
+
+        guard state == .listening else {
+            selectMode(outcome.selectedMode)
+            return
+        }
+
+        // Deliberately not `selectMode(_:)`: its `.modeChanged` toast preempts
+        // the panel for 1.2s, which here would cover the live pill of the
+        // recording the user is still speaking into. Retargeting `activeMode`
+        // moves `voiceSurfaceMode`, so re-deriving the surface makes the pill
+        // itself show the new mode — the confirmation the toast would give,
+        // without taking the pill away to give it.
+        activeMode = outcome.activeMode
+        configuration.selectedMode = outcome.selectedMode
+        presentVoiceSurface()
     }
 
     func requestAccessibility() {

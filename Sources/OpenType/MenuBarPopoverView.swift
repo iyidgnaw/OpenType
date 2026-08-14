@@ -142,20 +142,21 @@ struct MenuBarPopoverView: View {
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
 
-            // Previously undiscoverable: the mode-cycle chord (hold the
-            // recording modifier, tap Shift or Tab) already existed in
-            // GlobalHotKey.swift but nothing in the UI ever mentioned it.
-            Label(
-                OpenTypeL10n.text(
-                    "按住时点 Shift 或 Tab 切换模式",
-                    english: "While holding, tap Shift or Tab to switch modes"
-                ),
-                systemImage: "arrow.triangle.2.circlepath"
-            )
-            .font(.system(size: 10.5))
-            .foregroundStyle(.secondary)
-            .lineLimit(2)
-            .fixedSize(horizontal: false, vertical: true)
+            // Previously undiscoverable, and then wrong: the hint used to
+            // promise "点 Shift 或 Tab" for every preset, naming a chord that
+            // no longer exists and a key half the presets do not record with.
+            // Driven off the preset now (`HotKeyPreset.modeSwitchHint`), and
+            // rendered only when that preset is the one actually installed —
+            // an Accessibility-less fallback is a Space chord, which has no
+            // Tab handling and so no hint.
+            if model.preferredShortcutActive,
+               let hint = configuration.hotKeyPreset.modeSwitchHint {
+                Label(hint, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if model.sidecarNeedsAttention {
                 HStack(spacing: 6) {

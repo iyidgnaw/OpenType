@@ -917,6 +917,51 @@ enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
         self == .leftOption || self == .fnKey
     }
 
+    /// The mode-cycle chord's one-line hint, derived from the preset rather
+    /// than hardcoded in the UI, so it always names the key the user is
+    /// actually holding — telling an `fn` user to hold left Option was the
+    /// copy-side half of the same hardcoding bug the Tab gate had.
+    ///
+    /// `nil` for the Space-chord presets: they register a Carbon hot key
+    /// instead of the modifier-only event tap, so there is no Tab handling
+    /// there at all and nothing to advertise. Presence tracks
+    /// `usesModifierOnlyEventTap` exactly.
+    ///
+    /// The old Shift half of the chord ("按住时点 Shift 或 Tab") is gone — Tab
+    /// is the only mode-switch key now — so no hint tells the user to *tap*
+    /// Shift; `.doubleShift` names Shift only as the key it asks them to hold.
+    var modeSwitchHint: String? {
+        switch self {
+        case .leftOption:
+            return OpenTypeL10n.text(
+                "按住左 Option 时点 Tab 切换模式",
+                english: "While holding left Option, tap Tab to switch modes"
+            )
+        case .fnKey:
+            return OpenTypeL10n.text(
+                "按住 fn 时点 Tab 切换模式",
+                english: "While holding fn, tap Tab to switch modes"
+            )
+        case .doubleControl:
+            return OpenTypeL10n.text(
+                "按住 Ctrl 时点 Tab 切换模式",
+                english: "While holding Ctrl, tap Tab to switch modes"
+            )
+        case .doubleOption:
+            return OpenTypeL10n.text(
+                "按住 Option 时点 Tab 切换模式",
+                english: "While holding Option, tap Tab to switch modes"
+            )
+        case .doubleShift:
+            return OpenTypeL10n.text(
+                "按住 Shift 时点 Tab 切换模式",
+                english: "While holding Shift, tap Tab to switch modes"
+            )
+        case .controlShiftSpace, .optionSpace, .controlSpace, .controlOptionSpace:
+            return nil
+        }
+    }
+
     var note: String {
         switch self {
         case .leftOption:
@@ -942,6 +987,67 @@ enum HotKeyBehavior: Equatable {
     case doubleTapThenAnyKey
     case pressThenAnyKey
     case holdToTalk
+}
+
+/// What one mode-cycle leaves behind: the mode the *next* recording will use,
+/// and the mode the recording currently in flight is being processed as (`nil`
+/// when there is none).
+struct ModeCycleOutcome: Equatable {
+    let selectedMode: InputMode
+    let activeMode: InputMode?
+}
+
+/// The mode-cycle chord's decisions, factored out of `AppModel.cycleMode()` so
+/// both halves are pure and testable (see `ModeSwitchChordTests`).
+///
+/// The chord is "hold the recording modifier, then tap Tab" — and holding the
+/// recording modifier is *what starts a recording*. So `.listening` is not an
+/// edge case the guard should reject, it is the state the user is in every time
+/// they use the gesture; rejecting it (which is what `cycleMode()` used to do)
+/// made mode switching dead past the 300ms long-press threshold. Cycling
+/// while listening therefore also **retargets the in-flight recording** rather
+/// than only moving the next-recording default — retargeting mid-flight is an
+/// established capability here, not a new concept (`VoiceModeRouter` already
+/// reassigns `activeMode` after transcription).
+enum ModeCyclePolicy {
+    /// The mid-pipeline states are the ones that stay closed: once the audio is
+    /// being recognized/transformed/inserted, the mode this run is processed as
+    /// has been committed and moving it would rewrite a decision already acted
+    /// on. `isBusy`/`isStartingRecording` keep refusing in every state.
+    static func allows(
+        state: ProcessingState,
+        isBusy: Bool,
+        isStartingRecording: Bool
+    ) -> Bool {
+        guard !isBusy, !isStartingRecording else { return false }
+        switch state {
+        case .transcribing, .transforming, .inserting:
+            return false
+        case .idle, .modeChanged, .listening, .success, .copied,
+             .dispatched, .cancelled, .failure:
+            return true
+        }
+    }
+
+    /// While listening, the mode being advanced is the one the recording locked
+    /// in (`activeMode`) — which is also what the voice surface is showing
+    /// (`AppModel.voiceSurfaceMode`) — and both it and the selected default land
+    /// on the new mode. Otherwise nothing is in flight, so only the default
+    /// moves; a finished run keeps the mode it ran as.
+    static func cycle(
+        selectedMode: InputMode,
+        activeMode: InputMode?,
+        state: ProcessingState
+    ) -> ModeCycleOutcome {
+        guard state == .listening, let inFlight = activeMode else {
+            return ModeCycleOutcome(
+                selectedMode: selectedMode.next,
+                activeMode: activeMode
+            )
+        }
+        let next = inFlight.next
+        return ModeCycleOutcome(selectedMode: next, activeMode: next)
+    }
 }
 
 struct CapturedContext {

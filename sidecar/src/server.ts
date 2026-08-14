@@ -7,7 +7,7 @@ import { connectConfiguredMcpServers } from "./agent/mcpClient";
 import { createBuiltInTools } from "./agent/builtInTools";
 import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
-import { buildAsrRoutes } from "./asr/routes";
+import { buildAsrRoutes, type TranscribeFn } from "./asr/routes";
 import { createRemoteWhisperClient } from "./asr/remoteWhisperClient";
 import { defaultWhisperClientFactories, WhisperClient } from "./asr/whisperClient";
 import { loadEnv } from "./env";
@@ -51,7 +51,7 @@ export function buildApp(
   tools: ToolSet,
   contextLogWriter: ContextUsageLogWriter,
   callLLM: CallLLM,
-  transcribe: (audio: Uint8Array) => Promise<string>,
+  transcribe: TranscribeFn,
   providerConfigStore: ProviderConfigStore,
   /**
    * Root for spilled oversized tool results (T2). Omitted -- as every
@@ -80,7 +80,10 @@ export function buildApp(
       runLogRoot
     ),
     ...buildConversationRoutes(conversations),
-    ...buildAsrRoutes(transcribe),
+    // P0-1: the entity dictionary feeds back into recognition -- read per
+    // request (not captured once) so a term taught mid-session applies to the
+    // very next utterance. See `asr/dictionaryBias.ts`.
+    ...buildAsrRoutes(transcribe, { listTerms: () => store.allTerms() }),
     ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),
   ]);
@@ -200,7 +203,10 @@ async function main() {
   // -- same "configured" precision as `resolveChat` above. The
   // request/response contract `asr/routes.ts` exposes stays identical
   // either way; only which backend actually serves the request changes.
-  const resolveTranscribe = async (audio: Uint8Array): Promise<string> => {
+  const resolveTranscribe = async (
+    audio: Uint8Array,
+    options: { initialPrompt?: string } = {}
+  ): Promise<string> => {
     const status = providerConfigStore.getStatus();
     const whisperConfig = providerConfigStore.getWhisperConfig();
     if (
@@ -214,10 +220,14 @@ async function main() {
         apiKey: whisperConfig.apiKey,
         model: whisperConfig.model,
       });
+      // The remote (OpenAI-shaped) transcription API has no equivalent of
+      // `initial_prompt`, so a remote user gets only the deterministic half of
+      // the dictionary feedback -- the alias rewrite `asr/routes.ts` applies to
+      // whatever comes back.
       return remoteClient.transcribe(audio);
     }
     await whisperReady;
-    return whisperClient.transcribe(audio);
+    return whisperClient.transcribe(audio, options.initialPrompt);
   };
 
   const fetch = buildApp(

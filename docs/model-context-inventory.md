@@ -25,7 +25,10 @@ sidecar 里一共只有三处向模型发请求。
 | `POST /agent/run` | `AGENT_SYSTEM_PROMPT` | 摘要成一段文本（`formatPriorTurns`） | 全量合并集 | 10 |
 | `POST /transcribe/correct` | `CORRECTION_SYSTEM_PROMPT` | 无 | 无 | 1（单次调用） |
 
-`transcribe` 模式的直接转写路径**完全不调模型**（纯 MLX-Whisper 透传），不在本清单内。
+`transcribe` 模式的直接转写路径**完全不调模型**，不在本清单内。注意它自 2026-08-14 的 P0-1 起
+不再是「纯透传」：`/asr/transcribe` 会读实体词典，给本地 Whisper 传一段 `initial_prompt`
+偏置解码，并对转写结果做确定性的 alias → canonical 替换（`src/asr/dictionaryBias.ts`）。
+这条路径因此**会消费**记忆库，但仍然一次模型请求都不发——本清单统计的是后者。
 
 ### 1.1 消息数组的实际装配
 

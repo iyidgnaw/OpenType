@@ -66,6 +66,25 @@ P1/P2 是围绕这个环的收敛与体感。
 - ASCII 匹配忽略大小写，替换成 canonical 的原始大小写。
 - 替换结果不再参与后续匹配（一遍扫描，不迭代，避免互相触发的死循环）。
 - 返回 `replacements` 便于测试和将来在 UI 里显示「自动修正了 N 处」。
+- **同名别名的胜者要确定**（实现阶段补的一条）：两个词条声明同一个别名是可达的——P0-2 自动写入，
+  用户先把「呸泡」改成 PayPal、后来又改成「贝宝」，两条就都挂着「呸泡」。原设计只按长度排序，
+  长度相同时靠数组到达顺序决定，而 `allTerms()` 是不带 `ORDER BY` 的 `SELECT *`：等于把这个选择交给
+  SQLite 的行序，同一句话在一次无关写入之后就可能转写成另一个词，界面上还没有任何东西能解释。
+  排序键改为 别名长度 → confidence → updatedAt → canonical 字典序，与 `buildInitialPrompt` 的偏好一致，
+  最后一个键保证是全序而不是「通常能定下来」。
+
+### 已核实：prompt 回显是真的（2026-08-14 实测）
+
+`dictionaryBias.ts` 的文档注释原本把「Whisper 会把 prompt 泄进输出」写成传闻式的风险提示，并说
+「真出现了就去看 `condition_on_previous_text`」。实测把两句都修正了：
+
+- 泄漏是真的：2 秒**数字静音**，不带 prompt 转写出 `""`，带 prompt 转写出把 prompt 里的词拼回来的一段乱码。
+- 但需要真正的全零采样才会触发。用真实麦克风噪声底（约 -55 dBFS）测，prompt 不回显，Whisper 原有的
+  近静音幻觉（`Thank you.`）带不带 prompt 都一样出现——也就是说这条不是正常录音会遇到的失败模式，
+  而是麦克风被静音/设备无输入时才会露头。
+- `condition_on_previous_text=False` **不管用**（实测过）。回显发生在第一个解码窗口内，而 prompt 永远
+  条件化第一个窗口。真要压住得按 `no_speech_prob`/`avg_logprob` 丢段，那要动的阈值同时管着「轻声说话」，
+  是产品决定不是局部改动，本批没做。长度上限和「只放 canonical」是目前唯一在限制损害面的东西。
 
 ### 接线
 
@@ -159,6 +178,19 @@ P1/P2 是围绕这个环的收敛与体感。
 
 窗口立即失效的情形：开始新录音、按 Esc、前台应用改变、自然到期、以及这一轮就地纠错本身完成（改完就结束，
 想再改就再选一次——但纠错成功后窗口**重新计时**，因为连改两处是很常见的）。
+
+#### 实现注意：`OverlayHideBehavior` 新增 case 的两个消费点
+
+给 `OverlayHideBehavior` 加 `.scheduleHideWithCorrectionHint(after:)` 时，`OverlayController.swift` 里有两处消费它，
+**只有一处会被编译器拦住**：
+
+1. `presentLegacy` 内的穷尽 `switch Self.hideBehavior(for: state)`（约 248 行）——不处理新 case 编译不过，安全。
+2. `presentToast` 内的 `guard ... case .scheduleHide(let seconds) = ...`（约 276 行）——这是 `if case` 模式匹配，
+   **不处理新 case 编译照样通过**，但行为会静默出错：新 case 不匹配 `.scheduleHide`，于是 guard 直接 return，
+   被抢占的统一语音面板**永远不会被恢复**。
+
+第二处今天大概率走不到（`presentToast` 目前只用于失败提示和模式切换提示，`.success`/`.copied` 不走它），
+但「今天走不到」不是不处理的理由——这正是那种以后加一个调用点就变成幽灵 bug 的地方。两处都要处理。
 
 只对 `transcribe` + Direct 生效。ask/助理 的卡片已经有「卡片还在就继续会话」的语义（`eaa03f3`），不能抢同一个热键。
 

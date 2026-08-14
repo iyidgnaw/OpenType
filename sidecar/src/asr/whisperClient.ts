@@ -31,7 +31,16 @@ export interface SpawnedProcess {
 export interface WhisperClientFactories {
   spawnProcess: (env: NodeJS.ProcessEnv) => SpawnedProcess;
   checkHealth: (socketPath: string) => Promise<boolean>;
-  postAudio: (socketPath: string, audio: Uint8Array) => Promise<{ text: string }>;
+  /**
+   * `initialPrompt` is the entity-dictionary bias (see `dictionaryBias.ts`).
+   * Optional and omitted rather than empty when there is nothing to bias with,
+   * so the decoder falls back to its own default instead of being handed "".
+   */
+  postAudio: (
+    socketPath: string,
+    audio: Uint8Array,
+    initialPrompt?: string
+  ) => Promise<{ text: string }>;
   sleep: (ms: number) => Promise<void>;
 }
 
@@ -184,9 +193,17 @@ export class WhisperClient {
     this.process = null;
   }
 
-  /** Sends raw WAV bytes to the running whisper server and returns the transcript. */
-  async transcribe(audio: Uint8Array): Promise<string> {
-    const { text } = await this.factories.postAudio(this.socketPath, audio);
+  /**
+   * Sends raw WAV bytes to the running whisper server and returns the
+   * transcript. `initialPrompt`, when given, is passed to
+   * `mlx_whisper.transcribe(..., initial_prompt=...)` as decoding bias.
+   */
+  async transcribe(audio: Uint8Array, initialPrompt?: string): Promise<string> {
+    const { text } = await this.factories.postAudio(
+      this.socketPath,
+      audio,
+      initialPrompt
+    );
     return text;
   }
 }
@@ -278,8 +295,17 @@ export function defaultWhisperClientFactories(
         return false;
       }
     },
-    postAudio: async (socketPath, audio) => {
-      const response = await fetch("http://localhost/transcribe", {
+    postAudio: async (socketPath, audio, initialPrompt) => {
+      // The prompt travels as a percent-encoded query parameter rather than a
+      // header because headers must be latin-1 safe and the dictionary is full
+      // of CJK terms. `serve.py`'s `_path_only()` already strips the query
+      // before routing, so this doesn't disturb path matching. Absent prompt
+      // means no query string at all -- `?initial_prompt=` would reach
+      // mlx_whisper as "" instead of the default None.
+      const url = initialPrompt
+        ? `http://localhost/transcribe?initial_prompt=${encodeURIComponent(initialPrompt)}`
+        : "http://localhost/transcribe";
+      const response = await fetch(url, {
         method: "POST",
         body: audio,
         unix: socketPath,

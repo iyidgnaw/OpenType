@@ -10,6 +10,8 @@ it can be spawned once by the TypeScript sidecar (see
 Endpoints:
   GET  /health      -> {"status": "ok"}
   POST /transcribe   -> body is the raw bytes of a WAV file; returns {"text": "..."}
+                        optional query parameter `initial_prompt` (URL-encoded)
+                        biases decoding toward known proper nouns.
 
 Deliberately dependency-light: only the standard library plus `mlx_whisper`
 itself (`http.server` + `socketserver.UnixStreamServer` for the Unix-socket
@@ -24,7 +26,7 @@ import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import mlx_whisper
@@ -83,6 +85,14 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
         # forms match the same way.
         return urlparse(self.path).path
 
+    def _initial_prompt(self) -> str:
+        # Sent as a query parameter rather than a header because a header value
+        # must be latin-1 safe and these terms are routinely CJK. Absent or
+        # empty means "no bias": mlx_whisper must receive the default (None),
+        # never initial_prompt="".
+        values = parse_qs(urlparse(self.path).query).get("initial_prompt", [])
+        return values[0].strip() if values else ""
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib method name
         if self._path_only() == "/health":
             self._send_json(200, {"status": "ok"})
@@ -105,14 +115,20 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "empty request body"})
             return
 
+        initial_prompt = self._initial_prompt()
+
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
                 tmp_file.write(audio_bytes)
                 tmp_path = tmp_file.name
 
+            options = {"path_or_hf_repo": MODEL}
+            if initial_prompt:
+                options["initial_prompt"] = initial_prompt
+
             with _transcribe_lock:
-                result = mlx_whisper.transcribe(tmp_path, path_or_hf_repo=MODEL)
+                result = mlx_whisper.transcribe(tmp_path, **options)
             text = (result.get("text") or "").strip()
             self._send_json(200, {"text": text})
         except Exception as exc:  # noqa: BLE001 - report any failure to the caller

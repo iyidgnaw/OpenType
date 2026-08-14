@@ -64,6 +64,42 @@ describe("AGENT_SYSTEM_PROMPT (open_file, open-file design §1)", () => {
   });
 });
 
+/**
+ * Showing the file is the deliverable, not an extra.
+ *
+ * The earlier guidance triggered off a verb allowlist ("asks you to open,
+ * preview, play, or look at"), so the phrasings people actually use --
+ * "帮我找一下那个文件", "那个 PDF 在哪", "给我看看" -- fell outside it and the
+ * agent answered with a path. A path is not what was wanted: the user is
+ * speaking BECAUSE they want the thing in front of them.
+ *
+ * These tests pin the widened trigger and the restraint that has to come with
+ * it, so a later edit cannot quietly narrow either one back.
+ */
+describe("AGENT_SYSTEM_PROMPT (preview-first)", () => {
+  test("covers finding and locating a file, not only being told to open one", () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/找/);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/看/);
+  });
+
+  test("states that showing the file is the outcome, so a path alone is not an answer", () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/path/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/open_file/);
+  });
+
+  test("routes an ambiguous match to ask_user instead of opening everything", () => {
+    // Without this the widened trigger turns "find my invoice" into a screen
+    // full of Preview windows -- the failure mode of being MORE eager.
+    expect(AGENT_SYSTEM_PROMPT).toContain("ask_user");
+  });
+
+  test("keeps a boundary so questions answerable in text stay in text", () => {
+    // "how many PDFs are on my desktop" is a question, not a request to see
+    // one; opening files to answer it would be worse than not opening any.
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/count|list|question/i);
+  });
+});
+
 describe("ASK_SYSTEM_PROMPT (web, ask-web design §2)", () => {
   test("mentions the web search capability", () => {
     expect(ASK_SYSTEM_PROMPT).toMatch(/web/i);

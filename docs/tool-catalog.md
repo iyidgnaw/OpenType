@@ -85,7 +85,7 @@ List a directory's entries; subdirectories are marked with a trailing "/". Defau
 
 ## `opentype__open_file`
 
-Open a file on screen with the user's macOS default application (Preview for PDFs and images, QuickTime for audio/video, Word/Pages for documents). Use this when the user asks to open, preview, play, or look at a file -- opening it for them is the action itself, not just reporting the path. ~ is expanded.
+Show a file to the user by opening it with their macOS default application (Preview for PDFs and images, QuickTime for audio/video, Word/Pages for documents). Use this whenever the point of the task is for the user to SEE a file -- being asked to find or locate one counts, not just being told to open it. Opening it is the deliverable; reporting the path alone is not. ~ is expanded.
 
 ```json
 {

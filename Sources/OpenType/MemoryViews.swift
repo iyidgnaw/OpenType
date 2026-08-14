@@ -49,6 +49,7 @@ struct MemoryColumn: View {
                         .padding(.horizontal, pagePadding)
                         .padding(.bottom, pagePadding)
                     }
+                    .scrollIndicators(.hidden)
                 } else {
                     // Two independent scrollers, one per column: a 34-term
                     // dictionary must not push 「整理记录」 off the bottom of a
@@ -65,6 +66,7 @@ struct MemoryColumn: View {
                                 consolidationRuns
                             }
                         }
+                        .scrollIndicators(.hidden)
                         .frame(maxWidth: .infinity)
                     }
                     .padding(.horizontal, pagePadding)

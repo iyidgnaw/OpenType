@@ -8,6 +8,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+
     var title: String {
         switch self {
         case .transcribe: return OpenTypeL10n.text("听写", english: "Transcribe")
@@ -933,6 +934,25 @@ enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    /// The recording gesture in as few characters as fit under a mode name.
+    ///
+    /// Distinct from `note` (a full paragraph) and from `modeSwitchHint` (about
+    /// Tab). The sidebar's mode card answers "how do I start talking", which is
+    /// the one thing someone looking at that card wants.
+    var holdHint: String {
+        switch self {
+        case .leftOption: return OpenTypeL10n.text("按住 ⌥ 说话", english: "Hold ⌥ to talk")
+        case .fnKey: return OpenTypeL10n.text("按住 fn 说话", english: "Hold fn to talk")
+        case .doubleControl: return OpenTypeL10n.text("双击 ⌃ 开始", english: "Double-tap ⌃")
+        case .doubleOption: return OpenTypeL10n.text("双击 ⌥ 开始", english: "Double-tap ⌥")
+        case .doubleShift: return OpenTypeL10n.text("双击 ⇧ 开始", english: "Double-tap ⇧")
+        case .controlShiftSpace: return OpenTypeL10n.text("⌃⇧Space 开始", english: "⌃⇧Space")
+        case .optionSpace: return OpenTypeL10n.text("⌥Space 开始", english: "⌥Space")
+        case .controlSpace: return OpenTypeL10n.text("⌃Space 开始", english: "⌃Space")
+        case .controlOptionSpace: return OpenTypeL10n.text("⌃⌥Space 开始", english: "⌃⌥Space")
+        }
+    }
+
     var title: String {
         switch self {
         case .leftOption: return OpenTypeL10n.text("左 Option", english: "Left Option")
@@ -1528,6 +1548,15 @@ struct ConversationSummary: Decodable, Identifiable, Equatable {
     let title: String
     let createdAt: Int
     let updatedAt: Int
+    /// The newest message in the thread, for the row's second line.
+    ///
+    /// Optional because a conversation can exist with no messages yet, and
+    /// because older sidecars do not send it — an absent preview draws a
+    /// single-line row rather than an empty second line.
+    ///
+    /// Defaulted so the many existing constructions of this type, none of
+    /// which are about previews, do not have to state one.
+    var preview: String? = nil
 }
 
 /// Mirrors the sidecar's `ConversationMessage`.

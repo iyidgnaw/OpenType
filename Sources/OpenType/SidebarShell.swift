@@ -253,7 +253,7 @@ private struct SidebarModeCard: View {
                         Text(model.configuration.selectedMode.title)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.primary)
-                        Text(model.shortcutHintText)
+                        Text(model.configuration.hotKeyPreset.holdHint)
                             .font(DS.Text.mono(10))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -268,7 +268,12 @@ private struct SidebarModeCard: View {
                 .padding(.bottom, 8)
                 .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
+            // `.borderlessButton` restyles a custom label: it tints the whole
+            // thing with the accent and centres it, which is why this card
+            // rendered as one blue centred word instead of the two-line row
+            // the design specifies. `.button` + `.plain` leaves the label alone.
+            .menuStyle(.button)
+            .buttonStyle(.plain)
             .menuIndicator(.hidden)
             .fixedSize(horizontal: false, vertical: true)
 
@@ -276,7 +281,7 @@ private struct SidebarModeCard: View {
                 Circle()
                     .fill(model.sidecarNeedsAttention ? DS.Colour.warning : DS.Colour.ok)
                     .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
-                Text(model.sidecarStatusText)
+                Text(model.localRecognitionStatusText)
                     .font(DS.Text.mono(10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

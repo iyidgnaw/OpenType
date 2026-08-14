@@ -850,11 +850,20 @@ private struct SessionRow: View {
                         .font(DS.Text.mono())
                         .foregroundStyle(.tertiary)
                 }
-                // The handoff's second line is a message preview.
-                // `GET /conversations` returns id/kind/title/createdAt/updatedAt
-                // and nothing else, so there is nothing truthful to put here
-                // yet; the row collapses to one line rather than inventing a
-                // preview out of the title it already shows.
+                // The second line: the newest message, whoever wrote it.
+                // Without it every row read as an unanswered question, which
+                // is the opposite of what a session list is for. Absent for a
+                // thread with no messages yet, and the row collapses to one
+                // line rather than reserving empty space.
+                if let preview = conversation.preview, !preview.isEmpty {
+                    Text(preview)
+                        .font(DS.Text.caption())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.leading, 12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
             .padding(.horizontal, DS.Space.rowH)
             .padding(.vertical, DS.Space.rowV)

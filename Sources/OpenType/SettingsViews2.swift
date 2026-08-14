@@ -535,16 +535,7 @@ struct SettingsDetailColumn: View {
         case .languageModel:
             SettingsPageScroll { LLMProviderSetupContent(model: model) }
         case .agentTools:
-            // Phase H builds 7A–7D here (built-in tool catalogue + the MCP
-            // server list, add/edit sheets and their failure states).
-            SettingsPageScroll {
-                Text(OpenTypeL10n.text(
-                    "内置工具与 MCP 服务器配置即将在这里。",
-                    english: "The built-in tool catalogue and MCP server configuration land here."
-                ))
-                .font(DS.Text.caption())
-                .foregroundStyle(.secondary)
-            }
+            AgentToolsPage(model: model) { model.settingsRoute = nil }
         case .auditLog:
             AuditLogPage()
         case .clearLocalData:

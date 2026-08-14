@@ -183,6 +183,7 @@ struct AgentToolsPage: View {
                         .padding(.horizontal, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
                         .padding(.bottom, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
                 }
+                .scrollIndicators(.hidden)
             }
         }
         .background(DS.Colour.canvas)
@@ -982,6 +983,7 @@ struct McpServerSheet: View {
                 }
             )
         }
+        .scrollIndicators(.hidden)
         // Sized to the content up to a cap, so a two-field http server isn't a
         // half-empty panel and a long argument list still scrolls instead of
         // running off the screen.

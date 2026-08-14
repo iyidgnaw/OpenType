@@ -54,6 +54,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         // one exists, this line is what it replaces.
         NSApp.appearance = NSAppearance(named: .aqua)
         NSApp.setActivationPolicy(.accessory)
+        restoreMainWindowIfItWasOpen()
         configurePopover()
         configureStatusItem()
         observeStatusPresentation()
@@ -173,6 +174,21 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     /// gear button. 300pt wide per the redesign handoff (§05) — the mode cards
     /// that needed 320 are one row of three cells now, and the space went to
     /// the 进行中 / 最近 sections instead.
+    /// Reopens the main window if it was open when the app last quit.
+    ///
+    /// Standard macOS behaviour, and the app did not have it: because the app
+    /// is `.accessory`, quitting with the window open and relaunching left the
+    /// user with only a menu-bar icon and no sign of where their window went.
+    /// Restoring it is also what makes an update-and-relaunch cycle
+    /// non-disruptive — the window comes back where it was rather than
+    /// requiring a trip through the popover.
+    private func restoreMainWindowIfItWasOpen() {
+        guard UserDefaults.standard.bool(forKey: Self.mainWindowOpenKey) else { return }
+        showMainWindow()
+    }
+
+    static let mainWindowOpenKey = "mainWindowWasOpen"
+
     private func configurePopover() {
         popover.behavior = .transient
         popover.animates = true
@@ -203,6 +219,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         } else {
             controller = MainWindowController(model: model)
             controller.onWindowWillClose = {
+                UserDefaults.standard.set(false, forKey: Self.mainWindowOpenKey)
                 // Deferred: the window is still on screen during
                 // `windowWillClose`, and flipping the policy mid-close can
                 // leave a stale Dock icon behind.
@@ -214,6 +231,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         }
 
         NSApp.setActivationPolicy(.regular)
+        UserDefaults.standard.set(true, forKey: Self.mainWindowOpenKey)
         controller.show()
     }
 

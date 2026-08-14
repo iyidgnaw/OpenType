@@ -383,6 +383,30 @@ final class AppModel: ObservableObject {
     }
 
     /// Human-readable, localized rendering of `sidecarStatus` for the UI.
+    /// The sidebar mode card's second line: which recogniser is in force and
+    /// whether it is up.
+    ///
+    /// 「Sidecar 已就绪」 named an implementation detail — a user has no reason
+    /// to know the app spawns a child process, and 「Sidecar」 is not a word
+    /// the product uses anywhere else. The design asks 「本机识别 · 就绪」:
+    /// where recognition runs, which is a thing they chose, and whether it is
+    /// working.
+    var localRecognitionStatusText: String {
+        let engine = whisperConfigSummary?.mode == .remote
+            ? OpenTypeL10n.text("远程识别", english: "Remote recognition")
+            : OpenTypeL10n.text("本机识别", english: "On-device recognition")
+        let state: String
+        switch sidecarStatus {
+        case .starting:
+            state = OpenTypeL10n.text("启动中", english: "starting")
+        case .ready:
+            state = OpenTypeL10n.text("就绪", english: "ready")
+        case .degraded, .failed:
+            state = OpenTypeL10n.text("不可用", english: "unavailable")
+        }
+        return "\(engine) · \(state)"
+    }
+
     var sidecarStatusText: String {
         switch sidecarStatus {
         case .starting:

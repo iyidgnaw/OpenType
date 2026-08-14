@@ -144,25 +144,13 @@ struct DictationColumn: View {
                     .font(DS.Text.title())
                     .tracking(DS.Tracking.title)
 
-                if narrow {
-                    Spacer(minLength: 0)
-                } else {
-                    // 「248 条 · 全部保存在本机」 — the count and where it lives,
-                    // in one line. `maxWidth: .infinity` is the mock's `flex:1`:
-                    // the count takes the slack, so the search field sits at the
-                    // right edge. Dropped in the narrow layout: at 460pt the
-                    // search field is the thing the user came to the header for,
-                    // and a count that truncates to 「248 条 · 全部保…」 tells
-                    // them less than the list under it already does.
-                    Text(OpenTypeL10n.text(
-                        "\(displayedCount) 条 · 全部保存在本机",
-                        english: "\(displayedCount) entries · all kept on this Mac"
-                    ))
-                    .font(DS.Text.mono())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                // The mockup's header is 「听写」 and the controls, nothing
+                // between them. The count and 「全部保存在本机」 were an
+                // addition — true, but the storage claim is already made in
+                // the stats band's disclaimer right below, and the count is
+                // in the sidebar badge two columns to the left. Saying it
+                // three times is what made the header feel padded.
+                Spacer(minLength: 0)
 
                 searchField(narrow: narrow)
                 sourceFilter

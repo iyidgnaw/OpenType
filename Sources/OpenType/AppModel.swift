@@ -178,6 +178,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// This week's figures for the statistics panel (P2-12).
+    ///
+    /// Derived, never accumulated: `refreshUsageStats()` recomputes it from the
+    /// audit trail on demand, so there is no counter to drift out of step with
+    /// the log and nothing extra to persist. Starts empty, which is also what a
+    /// user with no deliveries this week correctly sees.
+    @Published private(set) var usageSummary: UsageStats.Summary = .empty
+
+    /// Recomputes `usageSummary` from `audit-events.v1.jsonl`.
+    ///
+    /// The read and the decode happen off the main actor: the trail is
+    /// append-only and never trimmed, so for a heavy user it is the one file in
+    /// this app large enough that parsing it on the main thread would be felt
+    /// as a hitch when the tab opens. Only the `URL` and the finished `Summary`
+    /// cross the boundary, both value types.
+    func refreshUsageStats() {
+        let url = auditStore.fileURL
+        let now = Date()
+        Task.detached(priority: .utility) {
+            let summary = UsageStats.summarizeLog(at: url, now: now)
+            await MainActor.run { [weak self] in
+                self?.usageSummary = summary
+            }
+        }
+    }
+
     private let sidecarClient = SidecarClient()
     private let audioRecorder = AudioRecorder()
     private let liveSpeechTranscriber = LiveSpeechTranscriber()
@@ -1861,6 +1887,14 @@ final class AppModel: ObservableObject {
         liveSpeechTranscriber.stop()
         do {
             let audioURL = try audioRecorder.stop()
+            // The instant the recording stopped, which is the instant the user
+            // started waiting. Stamped here rather than derived later because
+            // nothing downstream can reconstruct it: the `.recognized` event is
+            // written *after* ASR returns, so a timestamp taken there has
+            // already lost the recording and the decode. `recordingStartedAt`
+            // is the other end of the same recording, not this one, and the
+            // clock that owns it has already been stopped by `setState`.
+            let recordingEndedAt = Date()
             playFeedbackSound(.release)
             if isCorrectionRecording {
                 processingTask = Task { [weak self] in
@@ -1868,7 +1902,10 @@ final class AppModel: ObservableObject {
                 }
             } else {
                 processingTask = Task { [weak self] in
-                    await self?.process(audioURL: audioURL)
+                    await self?.process(
+                        audioURL: audioURL,
+                        recordingEndedAt: recordingEndedAt
+                    )
                 }
             }
         } catch {
@@ -2380,7 +2417,11 @@ final class AppModel: ObservableObject {
         return text
     }
 
-    private func process(audioURL: URL) async {
+    /// - Parameter recordingEndedAt: When the recording this audio came from
+    ///   stopped (`finishRecording()`). Recorded on the `.recognized` event so
+    ///   the statistics panel can measure the span the user actually waits
+    ///   through — see `UsageStats` and `ImmutableAuditEvent.recordingEndedAt`.
+    private func process(audioURL: URL, recordingEndedAt: Date? = nil) async {
         let startingMode = activeMode ?? configuration.selectedMode
         let practice = isPracticeSession
         let auditRequestID = UUID()
@@ -2399,7 +2440,8 @@ final class AppModel: ObservableObject {
             result: String? = nil,
             error: String? = nil,
             provider: String? = nil,
-            model: String? = nil
+            model: String? = nil,
+            recordingEndedAt: Date? = nil
         ) -> UUID {
             let eventId = UUID()
             recordAuditEvent(
@@ -2414,7 +2456,8 @@ final class AppModel: ObservableObject {
                     result: result,
                     provider: provider,
                     model: model,
-                    error: error
+                    error: error,
+                    recordingEndedAt: recordingEndedAt
                 )
             )
             return eventId
@@ -2441,9 +2484,12 @@ final class AppModel: ObservableObject {
             activeMode = mode
             auditMode = mode
             auditEffectiveInput = transcript
+            // The only event that carries it: it describes the recording, and
+            // the recording happens once per session.
             let recognizedEventId = appendAudit(
                 status: .recognized,
-                provider: sidecarASRProvider
+                provider: sidecarASRProvider,
+                recordingEndedAt: recordingEndedAt
             )
 
             if mode.requiresSelection,

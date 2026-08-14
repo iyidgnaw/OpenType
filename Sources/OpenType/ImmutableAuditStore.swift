@@ -37,6 +37,23 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
     let model: String?
     let error: String?
     let supersedesEventId: UUID?
+    /// When the recording that produced this session stopped — the instant the
+    /// user let go of the hotkey, captured in `AppModel.finishRecording()`.
+    ///
+    /// Only the `.recognized` event carries it, and it exists for exactly one
+    /// reason: `.recognized` is stamped *after* ASR returns, so without this
+    /// the trail has no trace of how long recording and transcription took,
+    /// and the only latency it can express is the post-ASR remainder. The
+    /// end-to-end figure a user actually feels — release the key, see the text
+    /// — is `completed.createdAt − recognized.recordingEndedAt`
+    /// (`UsageStats.summarize(events:now:)`).
+    ///
+    /// Optional because this file is append-only and never rewritten: rows
+    /// written before the field existed simply lack the key and decode as
+    /// `nil`, so there is no migration. Readers must **exclude** those rows
+    /// from timing figures rather than treat `nil` as zero — averaging a
+    /// missing measurement in as 0s would quietly flatter the number forever.
+    let recordingEndedAt: Date?
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -54,6 +71,7 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         case model
         case error
         case supersedesEventId
+        case recordingEndedAt
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -73,7 +91,8 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         provider: String?,
         model: String?,
         error: String?,
-        supersedesEventId: UUID? = nil
+        supersedesEventId: UUID? = nil,
+        recordingEndedAt: Date? = nil
     ) {
         schemaVersion = 1
         self.id = id
@@ -90,6 +109,7 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         self.model = model
         self.error = error
         self.supersedesEventId = supersedesEventId
+        self.recordingEndedAt = recordingEndedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -124,6 +144,10 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         supersedesEventId = try container.decodeIfPresent(
             UUID.self,
             forKey: .supersedesEventId
+        )
+        recordingEndedAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .recordingEndedAt
         )
     }
 }

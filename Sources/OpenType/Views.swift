@@ -712,6 +712,10 @@ private struct HistoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            UsageStatsPanel(summary: model.usageSummary)
+                .padding(.horizontal, 16)
+                .padding(.top, 13)
+
             if model.history.entries.isEmpty {
                 VStack(spacing: 10) {
                     ZStack {
@@ -752,6 +756,144 @@ private struct HistoryView: View {
                 .scrollIndicators(.hidden)
             }
         }
+        // Recomputed from the audit trail on open rather than kept live: the
+        // figures are a week's worth, so they never change while the user is
+        // looking at them except by dictating — which is what the newest-entry
+        // watch below catches.
+        .onAppear { model.refreshUsageStats() }
+        // Keyed on the newest entry's identity, not on `entries.count`:
+        // `HistoryStore` caps at 100 and drops the oldest, so past that cap the
+        // count never changes again and a count-watch would silently stop
+        // refreshing for exactly the users who dictate most.
+        .onChange(of: model.history.entries.first?.id) { _ in
+            model.refreshUsageStats()
+        }
+    }
+}
+
+/// The local statistics panel (P2-12): one week of this app's own numbers,
+/// computed by `UsageStats` from the audit trail that was already on disk.
+///
+/// It sits at the top of History rather than on Home or in Settings because it
+/// is the same thing History already is — a look back at deliveries that have
+/// happened — only aggregated. Home is the pre-flight surface (is the shortcut
+/// live, which mode am I in, what did I just say), and putting a week's
+/// retrospective above the mode picker would push the one control the user came
+/// for further down. Settings is for things you change; nothing here is
+/// changeable.
+private struct UsageStatsPanel: View {
+    let summary: UsageStats.Summary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 6) {
+                Text(OpenTypeL10n.text("最近 7 天", english: "Last 7 days"))
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer(minLength: 0)
+                Text(OpenTypeL10n.text(
+                    "\(summary.deliveries) 次交付",
+                    english: "\(summary.deliveries) deliveries"
+                ))
+                .font(.system(size: 10))
+                .foregroundStyle(OpenTypeTheme.subtleText)
+            }
+
+            HStack(alignment: .top, spacing: 0) {
+                UsageStatsFigure(
+                    value: "\(summary.wordsDictated)",
+                    label: OpenTypeL10n.text("说出的字数", english: "Words dictated"),
+                    note: OpenTypeL10n.text(
+                        "中文按字、英文按词",
+                        english: "CJK by character, Latin by word"
+                    )
+                )
+                UsageStatsFigure(
+                    value: Self.latencyText(summary.averageEndToEndLatency),
+                    label: OpenTypeL10n.text("平均等待", english: "Average wait"),
+                    note: OpenTypeL10n.text(
+                        "松开快捷键到出字",
+                        english: "Key release to delivered text"
+                    )
+                )
+                // Named as a rate, and paired with the reason it is on the
+                // panel at all: it is the number that should keep falling as
+                // the entity dictionary learns what this user says (P0-1/P0-2).
+                // A bare ratio would read as a static property of the app.
+                UsageStatsFigure(
+                    value: Self.rateText(summary),
+                    label: OpenTypeL10n.text(
+                        "每 100 字纠错",
+                        english: "Corrections per 100 words"
+                    ),
+                    note: OpenTypeL10n.text(
+                        "词典学得越多应越低",
+                        english: "Should fall as the dictionary learns"
+                    )
+                )
+            }
+
+            Text(OpenTypeL10n.text(
+                "全部由本机审计日志算出，不联网、不上传。中英混说时字数是两种单位的合计，适合和自己过去比，不适合跨语言比较。",
+                english: """
+                    Computed on this Mac from the local audit log — nothing is \
+                    uploaded. For mixed Chinese/English speech the word total \
+                    blends two units, so compare it with your own past numbers \
+                    rather than across languages.
+                    """
+            ))
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .openTypeSurface(cornerRadius: 14)
+    }
+
+    /// "—" for an absent measurement, never "0.0 秒": a week whose sessions all
+    /// predate `ImmutableAuditEvent.recordingEndedAt` has nothing to report,
+    /// and "0.0 秒" would read as "instant".
+    private static func latencyText(_ latency: TimeInterval?) -> String {
+        guard let latency else { return "—" }
+        return OpenTypeL10n.text(
+            String(format: "%.1f 秒", latency),
+            english: String(format: "%.1fs", latency)
+        )
+    }
+
+    /// "—" when the week has no denominator at all. `Summary` reports the rate
+    /// as `0` in that case (nothing was dictated, so nothing was corrected),
+    /// but "0.0" printed under 「每 100 字纠错」 next to 「0 字」 reads as a perfect
+    /// score rather than as an empty week — the one reading the panel must not
+    /// invite.
+    private static func rateText(_ summary: UsageStats.Summary) -> String {
+        guard summary.wordsDictated > 0 else { return "—" }
+        return String(format: "%.1f", summary.correctionsPerHundredWords)
+    }
+}
+
+private struct UsageStatsFigure: View {
+    let value: String
+    let label: String
+    let note: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+            Text(label)
+                .font(.system(size: 10.5))
+                // Three columns share a 420pt-minimum window, so 「Corrections
+                // per 100 words」 has to wrap rather than truncate — a metric
+                // labelled 「Corrections per 100…」 is a metric nobody can read.
+                .fixedSize(horizontal: false, vertical: true)
+            Text(note)
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

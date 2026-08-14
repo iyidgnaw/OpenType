@@ -950,8 +950,15 @@ final class VoiceSurfaceTests: XCTestCase {
         XCTAssertEqual(VoiceSurfacePanelLayout.size(for: .processing), pill)
     }
 
-    func testWorkingIsSlightlyTallerForTheStepTicker() {
-        let working = CGSize(width: 388, height: 120)
+    func testWorkingUsesTheSamePillSizeAsEverythingBeforeTheCard() {
+        // Superseded the old "working is slightly taller for the step ticker".
+        // `.processing` and `.working` render the SAME view, so the extra 24pt
+        // was never room for anything — it was dead space in one of them, and
+        // resizing between two identical-looking pills read as a twitch. The
+        // panel now holds one size from the first word until it morphs into
+        // the card, which is the single transition worth animating.
+        // `VoiceSurfacePillSizeTests` states the invariant directly.
+        let pill = CGSize(width: 388, height: 96)
 
         XCTAssertEqual(
             VoiceSurfacePanelLayout.size(
@@ -959,7 +966,7 @@ final class VoiceSurfaceTests: XCTestCase {
                     VoiceSurfaceState.WorkingDetail(kind: .ask, currentStep: nil)
                 )
             ),
-            working
+            pill
         )
         XCTAssertEqual(
             VoiceSurfacePanelLayout.size(
@@ -970,7 +977,7 @@ final class VoiceSurfaceTests: XCTestCase {
                     )
                 )
             ),
-            working
+            pill
         )
     }
 

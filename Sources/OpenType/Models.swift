@@ -152,6 +152,13 @@ struct AskPanelState: Equatable {
     var kind: Kind
     var query: String
     var answer: String?
+    /// The sidecar conversation this exchange belongs to, once known.
+    ///
+    /// Carried on the SURFACE, not just on the tab, because the surface is
+    /// what the user is looking at when they speak again: as long as the card
+    /// is still up, the next utterance continues this thread rather than
+    /// starting another one. See `VoiceFollowUp`.
+    var conversationId: Int?
 }
 
 /// One step of the Agent progress panel's live feed — the display-side
@@ -238,6 +245,10 @@ struct AgentProgressPanelState: Equatable {
     /// The final answer once the run succeeds, or the error text once it
     /// fails; `nil` while `phase == .running`.
     var result: String?
+    /// The sidecar conversation this run belongs to, once known. Same role as
+    /// `AskPanelState.conversationId`: it makes the visible surface the thing
+    /// that decides what a follow-up follows. See `VoiceFollowUp`.
+    var conversationId: Int?
     /// The question this run is currently waiting on (T5), or `nil`. Set from
     /// the same ~0.7s poll that drives `steps`, so asking needs no second
     /// polling loop.
@@ -268,6 +279,31 @@ struct AgentProgressPanelState: Equatable {
     /// while the displayed run is still `.running`.
     static func shouldContinuePolling(for phase: Phase) -> Bool {
         phase == .running
+    }
+}
+
+/// Which conversation the next voice dispatch continues.
+///
+/// Before this existed, a thread could only be continued by opening it in the
+/// main window first; speaking again at the overlay always opened a new one.
+/// That split what was obviously one conversation into a pile of one-turn
+/// threads, because the natural way to follow up on an answer you are looking
+/// at is to keep talking, not to go find it in a list.
+///
+/// The rule is the surface's own lifetime: **while a card is still on screen,
+/// the next thing you say continues it.** Dismissing the card ends the
+/// thread — an explicit, visible act, rather than a hidden timeout.
+enum VoiceFollowUp {
+    /// - Parameters:
+    ///   - surface: the conversation the live overlay is showing, if any.
+    ///   - focusedTab: the thread opened in the main window, if any.
+    /// - Returns: the conversation to continue, or `nil` to start a new one.
+    static func conversationId(surface: Int?, focusedTab: Int?) -> Int? {
+        // The surface wins. Both can be set at once — opening a thread in the
+        // main window and then speaking leaves the surface showing that same
+        // thread — but where they differ, the surface is the more recent
+        // statement of what the user is working on.
+        surface ?? focusedTab
     }
 }
 
@@ -506,11 +542,13 @@ enum VoiceSurfacePanelLayout {
         switch state {
         case .hidden:
             return .zero
-        case .listening, .processing:
+        // One size for every pre-result state. `.processing` and `.working`
+        // render the SAME view, so the 24pt `.working` used to add was dead
+        // space rather than room for anything, and resizing between two
+        // identical-looking pills read as a twitch. The panel now holds still
+        // from the first word until it morphs into the card.
+        case .listening, .processing, .working:
             return CGSize(width: 388, height: 96)
-        case .working:
-            // Slightly taller than the pill: room for the step-ticker line.
-            return CGSize(width: 388, height: 120)
         case .asking:
             // Wide enough to read a question and its choices, but well short
             // of the result card: this is a prompt, not a document.

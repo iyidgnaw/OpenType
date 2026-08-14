@@ -635,9 +635,15 @@ private struct WorkingPill: View {
                 Spacer(minLength: 4)
 
                 if let onStop {
+                    // Plain rather than bordered: a bordered control is ~24pt
+                    // tall and forced this whole row taller than the text it
+                    // sits beside, which is what made the working pill look
+                    // padded and crowded at once. The HUD's register is text,
+                    // not chrome.
                     Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Color.accentColor)
                 }
             }
 

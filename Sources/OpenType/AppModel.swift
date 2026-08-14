@@ -1875,13 +1875,25 @@ final class AppModel: ObservableObject {
                 // cancels the task so no "ghost answer" can arrive after the
                 // user moved on.
                 effectiveTextModel = sidecarTextModel
-                askPanelState = AskPanelState(kind: .ask, query: transcript, answer: nil)
+                // Read the thread off the CURRENT panel before replacing it:
+                // the card still on screen is what the user is following up
+                // on, and overwriting the state first would lose it.
+                let askThread = VoiceFollowUp.conversationId(
+                    surface: askPanelState?.conversationId,
+                    focusedTab: focusedAskConversationId
+                )
+                askPanelState = AskPanelState(
+                    kind: .ask,
+                    query: transcript,
+                    answer: nil,
+                    conversationId: askThread
+                )
                 dispatchAskRun(
                     transcript: transcript,
                     context: capturedContext,
                     practice: practice,
                     requestID: auditRequestID,
-                    conversationId: focusedAskConversationId,
+                    conversationId: askThread,
                     model: sidecarTextModel
                 )
                 result = nil
@@ -1903,7 +1915,10 @@ final class AppModel: ObservableObject {
                     context: capturedContext,
                     practice: practice,
                     requestID: auditRequestID,
-                    conversationId: focusedAgentConversationId
+                    conversationId: VoiceFollowUp.conversationId(
+                        surface: agentPanelState?.conversationId,
+                        focusedTab: focusedAgentConversationId
+                    )
                 )
                 result = nil
             }
@@ -2138,6 +2153,7 @@ final class AppModel: ObservableObject {
                current.query == transcript,
                current.answer == nil {
                 current.answer = result
+                current.conversationId = response.conversationId
                 askPanelState = current
             }
             await refreshAskConversations()
@@ -2288,7 +2304,11 @@ final class AppModel: ObservableObject {
             task: transcript,
             steps: [],
             phase: .running,
-            result: nil
+            result: nil,
+            // Carried forward so a THIRD utterance continues the same thread:
+            // the id is known before the run finishes only when this is
+            // already a follow-up.
+            conversationId: conversationId
         )
         startAgentProgressPolling(runId: runID.uuidString)
 
@@ -2414,6 +2434,7 @@ final class AppModel: ObservableObject {
             updateAgentPanel(runId: runID.uuidString) { state in
                 state.phase = .succeeded
                 state.result = response.result
+                state.conversationId = response.conversationId
                 let finalSteps = AgentProgressPanelState.steps(
                     fromProgressEvents: response.steps.map {
                         SidecarAgentProgressEvent(type: $0.type, detail: $0.detail)

@@ -88,11 +88,17 @@ you're debugging packaging specifically.
   Agent tabs' multi-turn continuation via `GET /conversations?kind=ask|agent`
   and `GET /conversations/:id`, and an optional `conversationId` accepted by
   `/oneshot/ask` and `/agent/run` to continue a specific thread.
-- `src/transcribe/` — `POST /transcribe/correct`, a pure/dependency-light
-  endpoint (no `MemoryStore`) backing macOS's Review transcribe-mode: takes
-  the full current text, a UTF-16 offset selection range, and a spoken
-  correction instruction, returns only the replacement for that span (the
-  caller splices it back in by offset).
+- `src/transcribe/` — `POST /transcribe/correct`, backing macOS's Review
+  transcribe-mode: takes the full current text, a UTF-16 offset selection
+  range, and a spoken correction instruction, returns the replacement for
+  that span (the caller splices it back in by offset). Takes an **optional**
+  `MemoryStore` — without it this is the same pure correction logic it has
+  always been; with it (as `server.ts` wires it), a correction that looks
+  like a term fix rather than a prose rewrite is also learned into
+  `entity_terms` as `alias → canonicalTerm` and echoed back as `learned`, so
+  the next transcription gets that term right. `learnCorrection.ts` is the
+  pure gate deciding which corrections qualify; learning is best-effort and
+  can never fail the correction itself.
 - `src/provider/` — the LLM provider abstraction: `deepseek.ts` (the
   original, still-used env-based zero-config default client),
   `openaiCompatible.ts`/`anthropic.ts` (the two provider types a user can

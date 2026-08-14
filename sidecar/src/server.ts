@@ -81,7 +81,7 @@ export function buildApp(
     ),
     ...buildConversationRoutes(conversations),
     ...buildAsrRoutes(transcribe),
-    ...buildTranscribeRoutes(chat),
+    ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),
   ]);
 }

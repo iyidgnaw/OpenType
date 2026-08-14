@@ -99,7 +99,7 @@ agent 就回一个路径了事。用户开口就是因为想让东西出现在�
 ### 2.3 `CORRECTION_SYSTEM_PROMPT`（`src/transcribe/prompts.ts:14`）
 
 **模型看到什么**：923 字符的固定文本，指导它替换一段选中文本。
-user 消息由 `buildUserContent`（`src/transcribe/routes.ts:38`）拼成五个块、`\n\n` 分隔：
+user 消息由 `buildUserContent`（`src/transcribe/routes.ts:110`）拼成五个块、`\n\n` 分隔：
 
 ```
 Full text:

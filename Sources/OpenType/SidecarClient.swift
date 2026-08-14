@@ -302,6 +302,43 @@ final class SidecarClient {
 
     // MARK: - Lifecycle
 
+    /// Every sidecar path that must be WRITABLE, pinned next to the socket.
+    ///
+    /// The sidecar's own defaults for these are relative to its source
+    /// checkout (`sidecar/.data/...`), which is only correct under a
+    /// `bun run` dev launch. A Process spawned without an explicit
+    /// `currentDirectoryURL` inherits the app's cwd — often `/`, a read-only
+    /// volume — so a packaged launch would fail to create them. Pinning is
+    /// what makes both launch modes behave the same.
+    ///
+    /// One function rather than five assignments scattered through `start()`
+    /// so the list is a single thing to keep complete, and so a test can
+    /// assert that completeness. That test exists because two of these
+    /// (spill and run-log roots) shipped unpinned: both features write
+    /// best-effort and swallow their own failures, so in the packaged app
+    /// they simply did nothing, silently.
+    ///
+    /// - Parameter socketURL: the sidecar's Unix socket; its directory is the
+    ///   data directory.
+    /// - Returns: environment entries to merge into the spawn environment.
+    nonisolated static func dataDirectoryEnvironment(socketURL: URL) -> [String: String] {
+        let dataDirectory = socketURL.deletingLastPathComponent()
+        func path(_ component: String) -> String {
+            dataDirectory.appendingPathComponent(component).path
+        }
+        return [
+            "OPENTYPE_SIDECAR_DB_PATH": path("opentype.sqlite3"),
+            // Proof-of-context-usage log (`contextDebugLog.ts`).
+            "OPENTYPE_CONTEXT_LOG_PATH": path("context-debug.log"),
+            // Socket for the local MLX-Whisper server the sidecar manages.
+            "OPENTYPE_WHISPER_SOCKET": path("whisper.sock"),
+            // Oversized tool results moved out of context (`agent/spill.ts`).
+            "OPENTYPE_SPILL_ROOT": path("spill"),
+            // Durable per-run agent step logs (`agent/runLog.ts`).
+            "OPENTYPE_RUN_LOG_ROOT": path("run-logs"),
+        ]
+    }
+
     /// Spawns the sidecar and blocks (asynchronously) until it responds
     /// healthily on its Unix socket, or throws after a short timeout.
     func start() async throws {
@@ -324,36 +361,9 @@ final class SidecarClient {
             environment[key] = value
         }
         environment["OPENTYPE_SIDECAR_SOCKET"] = socketURL.path
-        // The sidecar's default db path ("sidecar/.data/...") is relative to
-        // its own source checkout and assumes that's the working directory —
-        // true only for `bun run` dev-mode invocations. A Process spawned
-        // without an explicit currentDirectoryURL inherits the parent app's
-        // cwd (often "/", a read-only volume), so the bundled-binary launch
-        // crashed on startup with EROFS trying to mkdir a relative path
-        // there. Always pin this to an absolute, writable location next to
-        // the socket, for both launch modes.
-        environment["OPENTYPE_SIDECAR_DB_PATH"] = socketURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("opentype.sqlite3")
-            .path
-        // Proof-of-context-usage log (`contextDebugLog.ts`): same
-        // Application-Support-adjacent convention as the db path above, so
-        // it survives being read from a launched (non-Terminal) app
-        // instance the same way `debugLog(_:)` below does for sidecar
-        // startup diagnostics.
-        environment["OPENTYPE_CONTEXT_LOG_PATH"] = socketURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("context-debug.log")
-            .path
-        // Same rationale as OPENTYPE_SIDECAR_DB_PATH above: the sidecar's own
-        // default for the local MLX-Whisper server's socket
-        // ("sidecar/.data/whisper.sock") is relative and assumes a `bun run`
-        // dev-mode cwd. Pin it to an absolute, writable path next to the
-        // sidecar's own socket for both launch modes.
-        environment["OPENTYPE_WHISPER_SOCKET"] = socketURL
-            .deletingLastPathComponent()
-            .appendingPathComponent("whisper.sock")
-            .path
+        for (key, value) in Self.dataDirectoryEnvironment(socketURL: socketURL) {
+            environment[key] = value
+        }
 
         let bundledBinaryPath = (Bundle.main.resourcePath ?? "")
             .appending("/opentype-sidecar")

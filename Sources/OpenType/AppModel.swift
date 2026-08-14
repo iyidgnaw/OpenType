@@ -345,7 +345,10 @@ final class AppModel: ObservableObject {
             self.updateAgentPanel(runId: runId) { state in state.question = nil }
             Task { [weak self] in
                 guard let self else { return }
-                try? await self.sidecarClient.answerAgentQuestion(
+                // Delivery is best-effort: the run's own timeout is the
+                // backstop if the answer never lands, so there is nothing
+                // useful to do with a failure here.
+                _ = try? await self.sidecarClient.answerAgentQuestion(
                     runId: runId,
                     answers: [answer]
                 )

@@ -16,6 +16,30 @@ private final class ReviewPanelPresentation: ObservableObject {
     @Published var correctionHint: String?
 }
 
+/// Where the Review panel sits inside a chosen screen's usable area: centred.
+///
+/// Deliberately *not* `VoiceSurfacePanelLayout`, which anchors the HUD 54pt up
+/// from the bottom edge so it can morph in place. The two panels are laid out
+/// differently on purpose — the HUD is a peripheral status surface, Review is a
+/// modal editing surface you are meant to look straight at — and one shared
+/// layout that just forwarded to the other would quietly slide the Review panel
+/// down to the bottom of the screen.
+///
+/// A pure namespace enum for the same reason `VoiceSurfacePanelLayout` is one:
+/// with the arithmetic inline in `ReviewPanelController.position(_:)` there was
+/// no assertion any test could make about it, so 「Review 面板同理」 (P2-10)
+/// rested entirely on someone remembering.
+enum ReviewPanelLayout {
+    static func frame(for size: CGSize, visibleFrame: CGRect) -> CGRect {
+        CGRect(
+            x: visibleFrame.midX - size.width / 2,
+            y: visibleFrame.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+}
+
 /// A floating panel for Review mode (`TranscribeVariant.review`): stashes a
 /// transcription for the user to read, edit, or voice-correct before
 /// committing it into the originally-focused field. Follows the same
@@ -208,12 +232,16 @@ final class ReviewPanelController {
         return panel
     }
 
+    /// Centres the panel on whichever display the pointer is on, falling back to
+    /// `NSScreen.main` (P2-10 — 「Review 面板同理」, see `ScreenPlacement`).
+    /// Voice-correcting a transcript while working on an external display must
+    /// not throw the editable panel onto the built-in screen.
     private func position(_ panel: NSPanel) {
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        guard let frame = screen?.visibleFrame else { return }
-        let x = frame.midX - panelSize.width / 2
-        let y = frame.midY - panelSize.height / 2
-        panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: panelSize), display: false)
+        guard let frame = ScreenPlacement.currentVisibleFrame() else { return }
+        panel.setFrame(
+            ReviewPanelLayout.frame(for: panelSize, visibleFrame: frame),
+            display: false
+        )
     }
 
     private func installClickOutsideMonitor() {

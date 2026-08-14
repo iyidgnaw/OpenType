@@ -212,6 +212,16 @@ final class AppModel: ObservableObject {
     /// panel dismissal.
     private var agentProgressPollTask: Task<Void, Never>?
     private var accessibilityPollTimer: Timer?
+    /// The half-second tick that drives the pill's elapsed-time readout and the
+    /// two/five-minute limits (P2-10, `RecordingLimits`). Runs for exactly as
+    /// long as one recording does — see `startRecordingClock()`.
+    private var recordingClockTimer: Timer?
+    /// When the recording currently being timed started. `nil` when none is.
+    private var recordingStartedAt: Date?
+    /// The one bit of history `RecordingLimits.action(...)` needs to make the
+    /// warning fire once. Owned by the session and cleared when one starts, so
+    /// a long recording gets one warning rather than one every half-second.
+    private var didWarnAboutRecordingLength = false
     private var activeMode: InputMode?
     private var didStart = false
     /// One-shot guard for the first-run provider-setup wizard auto-open —
@@ -1741,6 +1751,111 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Recording clock and duration limits (P2-10)
+
+    /// Starts timing the recording that just began: the pill's `m:ss` readout,
+    /// the two-minute warning, and the five-minute auto-stop
+    /// (`RecordingClock`/`RecordingLimits`).
+    ///
+    /// Half-second ticks: fast enough that neither threshold can be stepped
+    /// over, slow enough to cost nothing. The readout is pushed immediately so
+    /// the pill reads `0:00` from the first frame rather than appearing a
+    /// second later and jogging the layout sideways.
+    private func startRecordingClock() {
+        stopRecordingClock()
+        recordingStartedAt = Date()
+        didWarnAboutRecordingLength = false
+        overlay.updateRecordingElapsed(RecordingClock.elapsedText(seconds: 0))
+        recordingClockTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.5,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tickRecordingClock()
+            }
+        }
+    }
+
+    private func stopRecordingClock() {
+        guard recordingClockTimer != nil || recordingStartedAt != nil else { return }
+        recordingClockTimer?.invalidate()
+        recordingClockTimer = nil
+        recordingStartedAt = nil
+        didWarnAboutRecordingLength = false
+        overlay.clearRecordingElapsed()
+    }
+
+    /// One tick: ask `RecordingLimits` what this instant means, act on it, and
+    /// otherwise just move the readout along.
+    ///
+    /// `isHotKeyHeld` is passed through and makes no difference by design — a
+    /// stuck or repeating modifier is indistinguishable from a held key here,
+    /// and is exactly the case the cap exists for. See `RecordingLimits.action`.
+    private func tickRecordingClock() {
+        guard state == .listening, let startedAt = recordingStartedAt else {
+            stopRecordingClock()
+            return
+        }
+
+        let elapsed = Date().timeIntervalSince(startedAt)
+        let action = RecordingLimits.action(
+            elapsed: elapsed,
+            alreadyWarned: didWarnAboutRecordingLength,
+            hotKeyHeld: isHotKeyHeld
+        )
+
+        if action == .warn {
+            didWarnAboutRecordingLength = true
+            overlay.showRecordingWarning(RecordingLimits.warningText)
+        }
+
+        guard let termination = RecordingLimits.termination(for: action) else {
+            overlay.updateRecordingElapsed(
+                RecordingClock.elapsedText(seconds: elapsed)
+            )
+            return
+        }
+
+        switch termination {
+        case .finishAndDeliver:
+            finishRecordingAtDurationLimit()
+        case .discard:
+            // Unreachable: `RecordingLimits.termination(for:)` only ever
+            // returns `.finishAndDeliver`, and `RecordingLimitsTests` sweeps
+            // the whole input space to keep it that way. Handled the same way
+            // on purpose — this call site is deliberately not capable of
+            // throwing away a recording, because the file the user has spent
+            // five minutes filling is the one thing the safety net must not
+            // destroy. Making the auto-stop able to discard means changing this
+            // branch, in the open, rather than inheriting it by accident.
+            finishRecordingAtDurationLimit()
+        }
+    }
+
+    /// The five-minute cap firing.
+    ///
+    /// Goes through `hotKeyReleased()` — the *exact* path letting go of the
+    /// hotkey takes — and pointedly not through `cancel()` /
+    /// `cancelActiveVoiceSession()`, which call `audioRecorder.cancel()` and
+    /// delete the audio file. 「5 分钟自动停止并正常交付（不是丢弃）」: losing
+    /// five minutes of someone's dictation to the safety net meant to protect
+    /// them is the worst outcome this feature can produce, so the recording is
+    /// stopped, transcribed and delivered exactly as if the user had released
+    /// the key themselves.
+    ///
+    /// The clock is stopped first: `hotKeyReleased()` can decline to finish
+    /// (its `guard state == .listening`), and a tick that stopped nothing would
+    /// come round again half a second later and try to stop a recording that is
+    /// already being transcribed.
+    ///
+    /// Clearing `isHotKeyHeld` is what `hotKeyReleased()` does anyway; the
+    /// physical modifier may well still be down, and the real release that
+    /// follows lands on the same `guard` and does nothing.
+    private func finishRecordingAtDurationLimit() {
+        stopRecordingClock()
+        hotKeyReleased()
+    }
+
     private func finishRecording() {
         hotKey.setRecordingActive(false)
         liveSpeechTranscriber.stop()
@@ -3153,12 +3268,25 @@ final class AppModel: ObservableObject {
     }
 
     private func setState(_ newState: ProcessingState) {
+        let wasListening = state == .listening
         state = newState
         hotKey.setRecordingActive(newState == .listening)
         // One entry point: the reducer decides whether this is a voice-surface
         // moment (ask/agent) or a legacy HUD/toast moment (transcribe, and
         // ask/agent with no live run).
         presentVoiceSurface()
+        // P2-10: the recording clock lives exactly as long as a recording does.
+        // Hung off the one state transition every recording path goes through
+        // rather than off each `beginRecording`/`finishRecording` pair, so no
+        // exit — hotkey release, Esc, a failed start, an auto-stop — can leave
+        // a timer running behind it. Started *after* `presentVoiceSurface()`,
+        // since the pill only accepts an elapsed readout once it knows it is
+        // listening.
+        if newState == .listening {
+            if !wasListening { startRecordingClock() }
+        } else {
+            stopRecordingClock()
+        }
     }
 
     private func fail(_ error: Error) {
@@ -3171,6 +3299,9 @@ final class AppModel: ObservableObject {
         shortcutBehavior = hotKey.behavior
         hotKey.setRecordingActive(false)
         liveSpeechTranscriber.stop()
+        // Assigns `state` directly rather than going through `setState`, so the
+        // recording clock has to be stopped by hand here (P2-10).
+        stopRecordingClock()
         state = .failure(message)
         // Same reducer-first routing as `setState`, but with the mode this
         // recording actually ran as (`activeMode` has just been cleared) and

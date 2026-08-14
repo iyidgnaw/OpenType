@@ -13,6 +13,18 @@ private final class OverlayPresentation: ObservableObject {
     /// Non-nil while the toast on screen *is* the correction-window affordance
     /// (P0-3) rather than a plain success toast.
     @Published var correctionHint: CorrectionHint?
+    /// The `m:ss` readout on the listening pill (P2-10), non-nil for exactly as
+    /// long as a recording is being timed. `AppModel`'s recording tick is the
+    /// only writer — the controller never reads a clock of its own.
+    @Published var elapsedText: String?
+    /// The two-minute warning's sentence, shown for a few seconds in place of
+    /// the caption. Separate from the flag below because the sentence is
+    /// transient and the fact that it fired is not.
+    @Published var recordingWarning: String?
+    /// Sticks for the rest of the recording once the warning has fired, so the
+    /// elapsed readout stays tinted after the sentence has gone: the user is
+    /// still in the stretch that ends by itself.
+    @Published var pastWarningThreshold = false
 
     /// The visible half of an armed correction window.
     struct CorrectionHint: Equatable {
@@ -115,6 +127,10 @@ final class OverlayController {
     /// and went.
     private var legacyOnScreen: (state: ProcessingState, mode: InputMode)?
     private var clickOutsideMonitor: Any?
+    /// Takes the two-minute warning's sentence back off the pill (P2-10).
+    private var recordingWarningWorkItem: DispatchWorkItem?
+    /// How long that sentence stays up.
+    private let recordingWarningSeconds: TimeInterval = 4.5
 
     /// Whether a post-delivery correction window is open right now (P0-3).
     /// `AppModel` sets it *before* pushing the delivery state, since it is
@@ -286,6 +302,44 @@ final class OverlayController {
         presentation.liveTranscript = text
     }
 
+    /// The elapsed-time readout, pushed by `AppModel`'s recording tick (P2-10).
+    /// Formatting is the tick's job (`RecordingClock.elapsedText(seconds:)`) —
+    /// what arrives here is already the string to draw.
+    func updateRecordingElapsed(_ text: String) {
+        guard presentation.state == .listening else { return }
+        presentation.elapsedText = text
+    }
+
+    /// The one-time two-minute warning (P2-10). The sentence takes the pill's
+    /// caption line for a few seconds — long enough to read, short enough that
+    /// someone mid-thought gets their live transcript back — while the tint on
+    /// the elapsed readout stays for the rest of the recording.
+    func showRecordingWarning(_ text: String) {
+        guard presentation.state == .listening else { return }
+        presentation.pastWarningThreshold = true
+        presentation.recordingWarning = text
+
+        recordingWarningWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.recordingWarningWorkItem = nil
+            self?.presentation.recordingWarning = nil
+        }
+        recordingWarningWorkItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + recordingWarningSeconds,
+            execute: item
+        )
+    }
+
+    /// Called when the recording ends, however it ends.
+    func clearRecordingElapsed() {
+        recordingWarningWorkItem?.cancel()
+        recordingWarningWorkItem = nil
+        presentation.elapsedText = nil
+        presentation.recordingWarning = nil
+        presentation.pastWarningThreshold = false
+    }
+
     func updateAudioLevel(_ level: Double) {
         guard presentation.state == .listening else { return }
         presentation.audioLevel = level
@@ -295,6 +349,7 @@ final class OverlayController {
         dismissWorkItem?.cancel()
         cancelToastOverride()
         removeClickOutsideMonitor()
+        clearRecordingElapsed()
         legacyOnScreen = nil
         surfaceState = .hidden
         presentation.surface = .hidden
@@ -506,8 +561,12 @@ final class OverlayController {
         return panel
     }
 
+    /// The screen the panel is laid out on: whichever display the pointer is on,
+    /// falling back to `NSScreen.main` (P2-10 — see `ScreenPlacement`). Called
+    /// on every `presentSurface`/`position`, never cached, so an already-open
+    /// panel follows the user to another display.
     private func visibleFrame() -> CGRect? {
-        (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+        ScreenPlacement.currentVisibleFrame()
     }
 
     private func position(_ panel: NSPanel) {
@@ -635,6 +694,21 @@ private struct OverlayView: View {
                     .padding(.vertical, 3)
                     .background(Color.primary.opacity(0.055), in: Capsule())
 
+                // How long this recording has been running (P2-10). Monospaced
+                // digits so the pill's contents don't shuffle sideways once a
+                // second; tinted for the rest of the recording once the
+                // two-minute warning has fired.
+                if let elapsed = presentation.elapsedText {
+                    Text(elapsed)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(
+                            presentation.pastWarningThreshold
+                                ? Color.orange
+                                : Color.secondary
+                        )
+                }
+
                 Spacer(minLength: 4)
 
                 LiveWaveform(level: presentation.audioLevel)
@@ -642,11 +716,7 @@ private struct OverlayView: View {
 
             Text(captionText)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(
-                    presentation.liveTranscript.isEmpty
-                        ? Color.secondary
-                        : Color.primary
-                )
+                .foregroundStyle(captionColor)
                 .lineLimit(2)
                 .truncationMode(.head)
                 .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
@@ -719,7 +789,18 @@ private struct OverlayView: View {
         .frame(width: 392, height: 84, alignment: .leading)
     }
 
+    /// The pill's second line: the two-minute warning while it is up, then the
+    /// live transcript, then the mode's own invitation to speak.
+    ///
+    /// The warning deliberately preempts the live caption rather than being
+    /// squeezed in beside it — the pill is two lines tall by design, and a
+    /// warning the user has to notice while reading their own words back is a
+    /// warning half of them will miss. It hands the line back after a few
+    /// seconds (`OverlayController.recordingWarningSeconds`).
     private var captionText: String {
+        if let warning = presentation.recordingWarning {
+            return warning
+        }
         if !presentation.liveTranscript.isEmpty {
             return presentation.liveTranscript
         }
@@ -740,6 +821,11 @@ private struct OverlayView: View {
                 english: "Describe the task for the Agent Runtime…"
             )
         }
+    }
+
+    private var captionColor: Color {
+        if presentation.recordingWarning != nil { return .orange }
+        return presentation.liveTranscript.isEmpty ? .secondary : .primary
     }
 
     private var modeBadgeTitle: String {

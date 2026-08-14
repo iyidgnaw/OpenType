@@ -28,6 +28,17 @@ export interface StoredMcpServer {
   /** http only. */
   url?: string;
   headers?: Record<string, string>;
+  /**
+   * Whether this server is offered to the boot path at all.
+   *
+   * Exists so a server that fails its connection test can still be **saved**
+   * rather than forcing the user to throw away the token they just typed —
+   * saved disabled, and left out of the next start. Defaults to `true` when
+   * absent, which is what every config already on a user's disk looks like:
+   * defaulting to `false` would silently switch off everyone's working servers
+   * on upgrade.
+   */
+  enabled: boolean;
 }
 
 export interface McpConfigStatus {
@@ -39,7 +50,15 @@ export type McpConfigSource = "saved" | "env";
 
 export interface ResolvedMcpServers {
   source: McpConfigSource;
+  /** Only the enabled ones -- this is what the boot path connects. */
   servers: StoredMcpServer[];
+  /**
+   * Everything from the resolved source, disabled included, so the Settings
+   * panel can list a disabled server and offer to switch it back on. A UI that
+   * could only see `servers` would make a disabled server invisible and
+   * therefore unrecoverable, which defeats the point of saving it disabled.
+   */
+  allServers: StoredMcpServer[];
 }
 
 /**
@@ -137,6 +156,24 @@ export function normalizeMcpServer(input: unknown): StoredMcpServer {
     throw new McpConfigError("server must be an object");
   }
   const name = normalizeName(input.name);
+  // Absent (or null) means enabled: configs written before this field existed,
+  // and every hand-written env entry, must keep working rather than silently
+  // going dark. Anything else that is not a boolean is refused rather than
+  // coerced -- `enabled: "false"` coerced to `true` would quietly connect a
+  // server the user believed was off, which is the one direction of this
+  // mistake that has consequences.
+  if (
+    input.enabled !== undefined &&
+    input.enabled !== null &&
+    typeof input.enabled !== "boolean"
+  ) {
+    throw new McpConfigError(
+      `enabled must be a boolean, got: ${String(input.enabled)}`,
+    );
+  }
+  const enabled = input.enabled === undefined || input.enabled === null
+    ? true
+    : input.enabled;
   const rawTransport = input.transport ?? "stdio";
   if (rawTransport !== "stdio" && rawTransport !== "http") {
     throw new McpConfigError(
@@ -165,6 +202,7 @@ export function normalizeMcpServer(input: unknown): StoredMcpServer {
       transport: "http",
       url,
       headers: normalizeStringMap(input.headers, "headers"),
+      enabled,
     };
   }
 
@@ -190,6 +228,7 @@ export function normalizeMcpServer(input: unknown): StoredMcpServer {
     command: command.trim(),
     args,
     env: normalizeStringMap(input.env, "env"),
+    enabled,
   };
 }
 
@@ -433,8 +472,21 @@ export function resolveMcpServers(
   store: McpConfigStore,
   envJson: string | undefined,
 ): ResolvedMcpServers {
+  // Disabled servers are filtered out here rather than skipped at connect
+  // time, so "disabled" means the boot path never learns about them at all --
+  // no transport spawned, no budget spent, nothing to hang on.
   if (store.getStatus().mcpConfigured) {
-    return { source: "saved", servers: store.listServers() };
+    const allServers = store.listServers();
+    return {
+      source: "saved",
+      servers: allServers.filter((server) => server.enabled !== false),
+      allServers,
+    };
   }
-  return { source: "env", servers: parseEnvServers(envJson) };
+  const allServers = parseEnvServers(envJson);
+  return {
+    source: "env",
+    servers: allServers.filter((server) => server.enabled !== false),
+    allServers,
+  };
 }

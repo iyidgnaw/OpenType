@@ -51,6 +51,48 @@
  * appended to it; an MCP endpoint URL is used whole and its path is
  * server-defined, so it is validated (parseable, http/https only) and stored
  * byte-for-byte as given.
+ *
+ * ---------------------------------------------------------------------------
+ * ADDED: `enabled` (MCP boot-resilience batch)
+ * ---------------------------------------------------------------------------
+ *
+ * `StoredMcpServer` gains a required `enabled: boolean`, and
+ * `ResolvedMcpServers` gains `allServers`:
+ *
+ *   export interface StoredMcpServer { ...; enabled: boolean; }
+ *
+ *   export interface ResolvedMcpServers {
+ *     source: McpConfigSource;
+ *     servers: StoredMcpServer[];      // ENABLED only -- what gets connected
+ *     allServers: StoredMcpServer[];   // everything -- what the UI lists
+ *   }
+ *
+ * WHY. A server that fails "Test Connection" must be storable in a disabled
+ * state ("停用并保存" in the redesign handoff, §7C) rather than forcing the user
+ * to throw away the token they just typed. Disabled servers are skipped at
+ * connect time, so a known-bad server costs nothing at boot.
+ *
+ * DEFAULT `true`. Two reasons, and both point the same way. (1) Records already
+ * on users' disks carry no `enabled` field; defaulting to `false` would
+ * silently disable every server anyone has already configured, on upgrade, with
+ * no user action. Same for the `OPENTYPE_MCP_SERVERS` entries, which have no
+ * such field and never will. (2) Adding a server is itself the act of enabling
+ * it -- disabling is the exception the user opts into on a failed test, not a
+ * second confirmation step every successful add has to pass. The field is
+ * MATERIALIZED at normalization (not left undefined and read as truthy), so the
+ * stored JSON is explicit and the type stays a plain required boolean.
+ *
+ * WHY `allServers` EXISTS. Filtering inside `resolveMcpServers` is what keeps a
+ * disabled server off the boot path -- but `GET /config/mcp` answers from the
+ * same function, so filtering alone would also erase disabled servers from the
+ * Settings list, leaving the user unable to see or re-enable the thing they
+ * just saved. That is the same "no way to recover" shape as the bug this batch
+ * exists to close, so the resolved value carries both views and the caller
+ * picks: `main()` connects `servers`, the route lists `allServers`.
+ *
+ * The two helpers below therefore build servers with `enabled: true` -- that is
+ * now part of what a stored server IS. The default is exercised separately, by
+ * submitting objects with no `enabled` key at all.
  */
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import {
@@ -66,6 +108,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
   McpConfigStore,
+  normalizeMcpServer,
   resolveMcpServers,
   type StoredMcpServer,
 } from "../../src/agent/mcpConfigStore";
@@ -96,6 +139,7 @@ const stdioServer = (over: Partial<StoredMcpServer> = {}): StoredMcpServer => ({
   transport: "stdio",
   command: "npx",
   args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+  enabled: true,
   ...over,
 });
 
@@ -103,6 +147,7 @@ const httpServer = (over: Partial<StoredMcpServer> = {}): StoredMcpServer => ({
   name: "linear",
   transport: "http",
   url: "https://mcp.linear.app/mcp",
+  enabled: true,
   ...over,
 });
 
@@ -461,7 +506,11 @@ describe("resolveMcpServers precedence", () => {
   test("with nothing saved and no env var, nothing resolves", () => {
     const store = new McpConfigStore(storePath());
 
-    expect(resolveMcpServers(store, undefined)).toEqual({ source: "env", servers: [] });
+    expect(resolveMcpServers(store, undefined)).toEqual({
+      source: "env",
+      servers: [],
+      allServers: [],
+    });
   });
 
   test("unparseable env JSON resolves to nothing rather than throwing", () => {
@@ -510,6 +559,221 @@ describe("resolveMcpServers precedence", () => {
 
     expect(store.getStatus()).toEqual({ mcpConfigured: false });
     expect(store.listServers()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `enabled`: saving a known-bad server without handing it the boot path
+// ---------------------------------------------------------------------------
+
+/**
+ * The recovery half of the MCP boot-resilience batch. A server that fails
+ * "Test Connection" is saved disabled ("停用并保存", handoff §7C) instead of
+ * being thrown away, and a disabled server is never connected -- so it costs
+ * nothing at boot, and the user keeps the token they typed.
+ */
+describe("normalizeMcpServer: the enabled field", () => {
+  test("defaults to true when the submitted server omits it", () => {
+    // Records already on disk, and every OPENTYPE_MCP_SERVERS entry, have no
+    // such field. Defaulting to false would disable them all on upgrade.
+    expect(
+      normalizeMcpServer({ name: "filesystem", transport: "stdio", command: "npx" }).enabled
+    ).toBe(true);
+    expect(
+      normalizeMcpServer({ name: "linear", transport: "http", url: "https://x.test/mcp" })
+        .enabled
+    ).toBe(true);
+  });
+
+  test("defaults to true for the transport-less env-var format too", () => {
+    expect(normalizeMcpServer({ name: "envserver", command: "node" }).enabled).toBe(true);
+  });
+
+  test("passes an explicit false through", () => {
+    expect(
+      normalizeMcpServer({
+        name: "filesystem",
+        transport: "stdio",
+        command: "npx",
+        enabled: false,
+      }).enabled
+    ).toBe(false);
+  });
+
+  test("passes an explicit true through", () => {
+    expect(
+      normalizeMcpServer({
+        name: "filesystem",
+        transport: "stdio",
+        command: "npx",
+        enabled: true,
+      }).enabled
+    ).toBe(true);
+  });
+
+  test("rejects a non-boolean enabled rather than coercing it", () => {
+    // "false" and 0 are exactly the values a hand-edited file or a sloppy
+    // client would produce, and coercion would silently pick the wrong one.
+    for (const bad of ["false", "true", 0, 1]) {
+      expect(() =>
+        normalizeMcpServer({
+          name: "filesystem",
+          transport: "stdio",
+          command: "npx",
+          enabled: bad,
+        })
+      ).toThrow();
+    }
+  });
+
+  test("null reads as absent, not as an error", () => {
+    // Matches `normalizeStringMap`'s existing treatment of null in this module,
+    // and it is the right direction on the load path: a rejected field drops
+    // the whole row (see the loader's per-entry catch), losing a server and its
+    // credentials over a field that was never the point.
+    expect(
+      normalizeMcpServer({
+        name: "filesystem",
+        transport: "stdio",
+        command: "npx",
+        enabled: null,
+      }).enabled
+    ).toBe(true);
+  });
+});
+
+describe("McpConfigStore: storing a disabled server", () => {
+  test("addServer persists enabled: false and reloads it from disk", () => {
+    const path = storePath();
+    const first = new McpConfigStore(path);
+    first.addServer(stdioServer({ enabled: false, env: { TOKEN: "ghp_realsecretvalue" } }));
+
+    const second = new McpConfigStore(path);
+
+    expect(second.getServer("filesystem")?.enabled).toBe(false);
+    // The point of saving it at all: the credential survives, so re-enabling
+    // is one click rather than re-typing the token.
+    expect(second.getServer("filesystem")?.env).toEqual({ TOKEN: "ghp_realsecretvalue" });
+  });
+
+  test("a server added without enabled reloads as enabled", () => {
+    const path = storePath();
+    new McpConfigStore(path).addServer({
+      name: "filesystem",
+      transport: "stdio",
+      command: "npx",
+    });
+
+    expect(new McpConfigStore(path).getServer("filesystem")?.enabled).toBe(true);
+  });
+
+  test("a stored record with no enabled field loads as enabled", () => {
+    // The upgrade path: a file written before this field existed.
+    const path = storePath();
+    writeFileSync(
+      path,
+      JSON.stringify({
+        mcpConfigured: true,
+        servers: [{ name: "filesystem", transport: "stdio", command: "npx", args: [] }],
+      }),
+      "utf8"
+    );
+
+    expect(new McpConfigStore(path).getServer("filesystem")?.enabled).toBe(true);
+  });
+
+  test("updateServer can disable a server, and re-enable it again", () => {
+    const store = new McpConfigStore(storePath());
+    store.addServer(stdioServer());
+
+    store.updateServer("filesystem", stdioServer({ enabled: false }));
+    expect(store.getServer("filesystem")?.enabled).toBe(false);
+
+    store.updateServer("filesystem", stdioServer({ enabled: true }));
+    expect(store.getServer("filesystem")?.enabled).toBe(true);
+  });
+
+  test("listServers still returns disabled servers -- Settings has to show them", () => {
+    const store = new McpConfigStore(storePath());
+    store.addServer(stdioServer({ enabled: false }));
+    store.addServer(httpServer());
+
+    expect(store.listServers().map((s) => [s.name, s.enabled])).toEqual([
+      ["filesystem", false],
+      ["linear", true],
+    ]);
+  });
+
+  test("saving a disabled server still counts as taking ownership of MCP config", () => {
+    const store = new McpConfigStore(storePath());
+    store.addServer(stdioServer({ enabled: false }));
+
+    expect(store.getStatus()).toEqual({ mcpConfigured: true });
+  });
+});
+
+describe("resolveMcpServers: disabled servers never reach the boot path", () => {
+  const envJson = JSON.stringify([
+    { name: "envserver", command: "node", args: ["env-server.js"] },
+  ]);
+
+  test("a disabled server is filtered out of what gets connected", () => {
+    const store = new McpConfigStore(storePath());
+    store.addServer(stdioServer({ enabled: false }));
+    store.addServer(httpServer());
+
+    expect(resolveMcpServers(store, undefined).servers.map((s) => s.name)).toEqual([
+      "linear",
+    ]);
+  });
+
+  test("but it is still present in allServers, so the UI can show and re-enable it", () => {
+    // Without this the user saves a failing server, it vanishes from Settings,
+    // and there is no way back -- the same dead end the boot loop created.
+    const store = new McpConfigStore(storePath());
+    store.addServer(stdioServer({ enabled: false }));
+    store.addServer(httpServer());
+
+    const resolved = resolveMcpServers(store, undefined);
+
+    expect(resolved.allServers.map((s) => [s.name, s.enabled])).toEqual([
+      ["filesystem", false],
+      ["linear", true],
+    ]);
+  });
+
+  test("with everything enabled, servers and allServers agree", () => {
+    const store = new McpConfigStore(storePath());
+    store.addServer(stdioServer());
+    store.addServer(httpServer());
+
+    const resolved = resolveMcpServers(store, undefined);
+
+    expect(resolved.servers).toEqual(resolved.allServers);
+  });
+
+  test("a saved store whose only server is disabled connects nothing -- and still ignores the env var", () => {
+    // "Saved wins entirely" is unchanged: disabling the last server must not
+    // quietly reinstate the env servers, for the same reason removing it does
+    // not.
+    const store = new McpConfigStore(storePath());
+    store.addServer(stdioServer({ enabled: false }));
+
+    const resolved = resolveMcpServers(store, envJson);
+
+    expect(resolved.source).toBe("saved");
+    expect(resolved.servers).toEqual([]);
+    expect(resolved.allServers.map((s) => s.name)).toEqual(["filesystem"]);
+  });
+
+  test("env servers resolve as enabled and are not filtered", () => {
+    const store = new McpConfigStore(storePath());
+
+    const resolved = resolveMcpServers(store, envJson);
+
+    expect(resolved.servers.map((s) => s.name)).toEqual(["envserver"]);
+    expect(resolved.servers[0]?.enabled).toBe(true);
+    expect(resolved.allServers).toEqual(resolved.servers);
   });
 });
 

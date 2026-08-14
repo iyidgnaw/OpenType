@@ -234,7 +234,13 @@ export function withApproval(
   }
 
   return {
-    openAiTools: tools.openAiTools,
+    // A getter, not a copy: MCP tools arrive after this wrapper is built
+    // (`startMcpConnections` returns a usable set before its servers have
+    // answered), and a snapshot here would silently hide every one of them
+    // from the model while looking perfectly healthy.
+    get openAiTools() {
+      return tools.openAiTools;
+    },
     callTool: async (name, args, signal) => {
       const requestId = `approval-${(nextRequestId += 1)}`;
       report({ type: "approval_asked", requestId, toolName: name });

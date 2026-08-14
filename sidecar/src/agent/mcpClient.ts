@@ -83,7 +83,14 @@ export interface McpClientLike {
  */
 export interface McpConnectionFactories {
   createTransport: (config: McpServerConfig) => unknown;
-  createClient: () => McpClientLike;
+  /**
+   * Takes the config it is building a client for. Once connections run
+   * concurrently (`startMcpConnections`) a fake can no longer infer which
+   * server a bare `createClient()` belongs to from call order. Widening a
+   * parameter is backward compatible, so existing zero-arg fakes still satisfy
+   * this.
+   */
+  createClient: (config: McpServerConfig) => McpClientLike;
 }
 
 function defaultCreateTransport(config: McpServerConfig): unknown {
@@ -184,34 +191,199 @@ function stringifyToolResultContent(content: unknown): string {
  */
 export async function connectConfiguredMcpServers(
   configJson: string | McpServerConfig[] | undefined,
-  factories: McpConnectionFactories = defaultMcpConnectionFactories
+  factories: McpConnectionFactories = defaultMcpConnectionFactories,
+  options: Omit<McpConnectOptions, "factories"> = {}
 ): Promise<McpToolSet> {
-  const configs = parseServerConfigs(configJson);
+  const set = startMcpConnections(parseServerConfigs(configJson), {
+    ...options,
+    factories,
+  });
+  await set.ready;
+  return set;
+}
+
+/**
+ * How long one server gets to finish its whole handshake -- transport, MCP
+ * `initialize`, and `listTools` -- before it is abandoned.
+ *
+ * Twelve seconds is chosen against the two clocks that already exist rather
+ * than picked for feel: the MCP SDK's own `initialize` timeout is 60s, which
+ * is far past the point where a user decides the app is broken, and
+ * `SidecarClient.waitUntilReady` gives the whole sidecar 5s. Since connections
+ * no longer block serving, this budget no longer competes with that 5s -- it
+ * only bounds how long a dead server keeps a slot open before its tools are
+ * declared absent. Long enough for a cold `npx` fetch on a slow link, short
+ * enough that a user who mistyped a command sees "failed" within one glance at
+ * the panel.
+ */
+export const MCP_CONNECT_TIMEOUT_MS = 12_000;
+
+export type McpServerConnectionState = "connecting" | "connected" | "failed" | "timedOut";
+
+export interface McpServerConnectionStatus {
+  name: string;
+  state: McpServerConnectionState;
+  /** 0 unless `connected`. */
+  toolCount: number;
+  /** Present for `failed` / `timedOut`. */
+  error?: string;
+}
+
+export interface McpConnectionReport {
+  /** Configured order, so a UI can line these up against the user's list. */
+  servers: McpServerConnectionStatus[];
+}
+
+export interface McpConnectOptions {
+  factories?: McpConnectionFactories;
+  connectTimeoutMs?: number;
+  /**
+   * Injected timer resolving when a server's budget is spent. Default is
+   * `setTimeout`-backed; injected for the same reason `startupConsolidation`
+   * injects `schedule` -- so no test has to sleep.
+   */
+  delay?: (ms: number) => Promise<void>;
+}
+
+export interface LazyMcpToolSet extends McpToolSet {
+  /** Settles when every server has connected, failed or timed out. Never rejects. */
+  readonly ready: Promise<McpConnectionReport>;
+  status(): McpConnectionReport;
+}
+
+const TIMED_OUT = Symbol("mcp-connect-timed-out");
+
+function defaultDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Starts connecting to every configured MCP server and returns a tool set
+ * **synchronously**, before any of them has answered.
+ *
+ * This shape is the fix for a bug that could brick the app. `server.ts` used to
+ * `await` the connect loop before `Bun.serve`, the loop was serial, and nothing
+ * bounded it, so one hung server meant the voice service never started;
+ * `SidecarClient.waitUntilReady` gave up after 5s and the supervisor restarted
+ * into the same hang. The Settings panel that would remove the bad server is
+ * served by the sidecar that will not start, so there was no way out from
+ * inside the product. Returning immediately means MCP can only ever cost its
+ * own tools, never the app.
+ *
+ * Three properties follow from that and are each pinned by tests:
+ *
+ * - **Serving never waits.** The set is usable at once; `openAiTools` fills in
+ *   as servers answer. A model that asks for a tool that has not arrived gets
+ *   a rejection it can read, not a hang.
+ * - **Connections run concurrently**, so ten servers cost one budget, not ten.
+ * - **Each server gets its own budget**, covering `connect` *and* `listTools`:
+ *   a server that completes the handshake and then stalls listing its tools is
+ *   the same failure from the user's side.
+ *
+ * An abandoned connection is orphaned rather than cancelled -- the SDK's
+ * `connect` has no cancellation channel, so the promise is left to settle into
+ * nothing. That is deliberate and worth knowing: a hung `npx` child is reaped
+ * when the sidecar exits, not when its budget runs out.
+ */
+export function startMcpConnections(
+  servers: McpServerConfig[],
+  options: McpConnectOptions = {}
+): LazyMcpToolSet {
+  const factories = options.factories ?? defaultMcpConnectionFactories;
+  const budgetMs = options.connectTimeoutMs ?? MCP_CONNECT_TIMEOUT_MS;
+  const delay = options.delay ?? defaultDelay;
+
   const openAiTools: OpenAiFunctionTool[] = [];
   const routes = new Map<string, { client: McpClientLike; originalName: string }>();
+  const statuses: McpServerConnectionStatus[] = servers.map((config) => ({
+    name: config.name,
+    state: "connecting",
+    toolCount: 0,
+  }));
 
-  for (const config of configs) {
+  function snapshot(): McpConnectionReport {
+    return { servers: statuses.map((status) => ({ ...status })) };
+  }
+
+  async function handshake(
+    config: McpServerConfig,
+    // Handed back so an abandoned server's client can still be closed. Without
+    // it a timed-out stdio server leaves its child process alive for the
+    // lifetime of the sidecar -- the timeout would stop us waiting on `npx`
+    // while letting `npx` keep running, which is half a fix.
+    publish: (client: McpClientLike) => void
+  ): Promise<McpToolDescriptor[]> {
+    const transport = factories.createTransport(config);
+    const client = factories.createClient(config);
+    publish(client);
+    await client.connect(transport);
+    const { tools } = await client.listTools();
+    // The client is only published once the whole handshake succeeded, so a
+    // half-connected server can never be routed to.
+    return tools.map((tool) => {
+      const namespacedName = `${config.name}__${tool.name}`;
+      routes.set(namespacedName, { client, originalName: tool.name });
+      openAiTools.push({
+        type: "function",
+        function: {
+          name: namespacedName,
+          description: tool.description ?? "",
+          parameters: tool.inputSchema ?? { type: "object", properties: {} },
+        },
+      });
+      return tool;
+    });
+  }
+
+  async function connectOne(config: McpServerConfig, index: number): Promise<void> {
+    let started: McpClientLike | undefined;
     try {
-      const transport = factories.createTransport(config);
-      const client = factories.createClient();
-      await client.connect(transport);
-      const { tools } = await client.listTools();
-      for (const tool of tools) {
-        const namespacedName = `${config.name}__${tool.name}`;
-        routes.set(namespacedName, { client, originalName: tool.name });
-        openAiTools.push({
-          type: "function",
-          function: {
-            name: namespacedName,
-            description: tool.description ?? "",
-            parameters: tool.inputSchema ?? { type: "object", properties: {} },
-          },
-        });
+      // `createTransport`/`createClient` can throw synchronously (a bad command
+      // is discovered at spawn time), which inside an async function becomes a
+      // rejection this catch owns -- it must never escape as an unhandled one.
+      const outcome = await Promise.race([
+        handshake(config, (client) => {
+          started = client;
+        }),
+        delay(budgetMs).then(() => TIMED_OUT as typeof TIMED_OUT),
+      ]);
+      if (outcome === TIMED_OUT) {
+        statuses[index] = {
+          name: config.name,
+          state: "timedOut",
+          toolCount: 0,
+          error: `No response within ${budgetMs}ms.`,
+        };
+        console.warn(
+          `MCP server "${config.name}" did not answer within ${budgetMs}ms; continuing without its tools.`
+        );
+        // Closing is what actually ends a hung stdio server's child process.
+        // Best-effort: a client stuck mid-handshake may reject or hang here
+        // too, and this path must not become the new way to block startup.
+        void Promise.resolve()
+          .then(() => started?.close?.())
+          .catch(() => {});
+        return;
       }
+      statuses[index] = {
+        name: config.name,
+        state: "connected",
+        toolCount: outcome.length,
+      };
     } catch (err) {
+      statuses[index] = {
+        name: config.name,
+        state: "failed",
+        toolCount: 0,
+        error: err instanceof Error ? err.message : String(err),
+      };
       console.warn(`Skipping MCP server "${config.name}": failed to connect or list tools.`, err);
     }
   }
+
+  // Started here, deliberately not awaited: the whole point is that the caller
+  // gets its tool set before this settles.
+  const ready = Promise.all(servers.map(connectOne)).then(snapshot);
 
   async function callTool(
     name: string,
@@ -236,7 +408,7 @@ export async function connectConfiguredMcpServers(
     return { content: stringifyToolResultContent(result.content) };
   }
 
-  return { openAiTools, callTool };
+  return { openAiTools, callTool, ready, status: snapshot };
 }
 
 /** What a server would hand the agent, as reported by "Test Connection". */
@@ -260,7 +432,7 @@ export async function probeMcpServer(
   factories: McpConnectionFactories = defaultMcpConnectionFactories
 ): Promise<McpProbeResult> {
   const transport = factories.createTransport(config);
-  const client = factories.createClient();
+  const client = factories.createClient(config);
   await client.connect(transport);
   try {
     const { tools } = await client.listTools();

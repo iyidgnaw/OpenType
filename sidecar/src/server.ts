@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { buildAgentRoutes } from "./agent/routes";
 import { withApproval, yoloApprovalPolicy } from "./agent/approval";
 import type { AgentChatFn } from "./agent/loop";
-import { connectConfiguredMcpServers } from "./agent/mcpClient";
+import { startMcpConnections } from "./agent/mcpClient";
 import { McpConfigStore, resolveMcpServers } from "./agent/mcpConfigStore";
 import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
@@ -168,7 +168,17 @@ async function main() {
     mcpConfigStore,
     process.env.OPENTYPE_MCP_SERVERS
   );
-  const mcpTools = await connectConfiguredMcpServers(resolvedMcpServers.servers);
+  // NOT awaited, and that is the whole point. Connecting used to block this
+  // line until every configured server had answered, so one server that hung
+  // on `initialize` meant the voice service never started -- and since
+  // `SidecarClient.waitUntilReady` gives up after 5s, the supervisor restarted
+  // into the same hang forever. The Settings panel that would delete the bad
+  // server is served by this process, so there was no way out from inside the
+  // product. MCP can now cost its own tools and nothing else: the set is
+  // usable immediately and fills in as servers answer, each bounded by its own
+  // budget. `mcpBootResilience.test.ts` reads this file and fails if an await
+  // ever reappears above `Bun.serve`.
+  const mcpTools = startMcpConnections(resolvedMcpServers.servers);
   const builtInTools = createBuiltInTools({ store, callLLM });
   const coreTools = createCoreTools({});
   // The approval seam wraps the *merged* set so built-in memory tools, core

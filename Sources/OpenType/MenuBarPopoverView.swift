@@ -45,7 +45,13 @@ struct MenuBarPopoverView: View {
         // The handoff's 300pt. `configurePopover()` in `OpenTypeApp.swift`
         // sets the matching `NSPopover.contentSize`.
         .frame(width: 300)
-        .background(Color(nsColor: .windowBackgroundColor))
+        // The handoff's `rgba(250,250,248,.94)` — a warm off-white, not the
+        // system's `.windowBackgroundColor` (#ECECEC in light mode), which is
+        // a full step greyer than every other surface in the redesign. The
+        // nearest token is `canvas` (#F5F5F3); the 5/255 difference is below
+        // what is visible against the popover's own material, and inventing a
+        // fifth neutral to close it would cost more than it buys.
+        .background(DS.Colour.canvas)
         .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
     }
@@ -76,7 +82,7 @@ struct MenuBarPopoverView: View {
 
             Button(action: onOpenMainWindow) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 22, height: 22)
                     .contentShape(Rectangle())

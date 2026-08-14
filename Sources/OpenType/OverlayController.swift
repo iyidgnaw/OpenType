@@ -1281,7 +1281,7 @@ private struct OverlayView: View {
                 // case, and colouring it spends attention on the expected
                 // outcome (handoff §Design Tokens).
                 Image(systemName: "checkmark")
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.secondary)
 
                 Text(deliveryHeadline)
@@ -1300,6 +1300,8 @@ private struct OverlayView: View {
             if !presentation.deliveryBody.isEmpty {
                 Text(presentation.deliveryBody)
                     .font(DS.Text.caption())
+                    // 1.55 line height at 12pt.
+                    .lineSpacing(4)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .truncationMode(.tail)
@@ -1503,6 +1505,7 @@ private struct WorkingPill: View {
                     Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
                         .buttonStyle(.plain)
                         .font(DS.Text.caption())
+                        .fontWeight(.medium)
                         .foregroundStyle(DS.Colour.accent)
                 }
             }
@@ -1521,10 +1524,10 @@ private struct WorkingPill: View {
             // between a run started with live captions on and one without.
             Spacer(minLength: 0)
 
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Image(systemName: "wrench.and.screwdriver")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(DS.Colour.agent)
                     Text(toolLine.map { "\($0.tool) · \($0.summary)" } ?? fallbackLine)
                         .font(DS.Text.mono())
@@ -1747,11 +1750,14 @@ private struct AgentQuestionCard: View {
                 Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
                     .buttonStyle(.plain)
                     .font(DS.Text.caption())
+                    .fontWeight(.medium)
                     .foregroundStyle(.secondary)
             }
 
             Text(detail.question.question)
                 .font(DS.Text.body())
+                // 1.55 line height at 13pt.
+                .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineLimit(2)
 
@@ -1830,7 +1836,7 @@ private struct AgentQuestionCard: View {
     private var answerRow: some View {
         HStack(spacing: 9) {
             Image(systemName: "mic.fill")
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(DS.Colour.accent)
 
             TextField(
@@ -1965,6 +1971,14 @@ private struct VoiceSurfaceCard: View {
     @State private var stepsExpanded = false
     @State private var draft = ""
 
+    /// The handoff's `max-width:78%` for the user's bubble, resolved against
+    /// the card's own content width — the card is a fixed 640 with 18pt of
+    /// padding either side and 4pt reserved for the scroll indicator, so the
+    /// percentage has a single answer rather than needing a `GeometryReader`.
+    /// Same 78% the session thread uses (`SessionsViews.SessionTurn`).
+    private static let bubbleMaxWidth: CGFloat =
+        (VoiceSurfacePanelMetrics.card.width - 18 * 2 - 4) * 0.78
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -2041,7 +2055,7 @@ private struct VoiceSurfaceCard: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 15, weight: .medium))
+                .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
@@ -2054,14 +2068,18 @@ private struct VoiceSurfaceCard: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if !card.query.isEmpty {
-                    HStack {
-                        Spacer(minLength: 40)
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
                         Text(card.query)
-                            .font(DS.Text.body())
+                            .font(DS.Text.caption())
+                            // 1.55 line height at 12pt.
+                            .lineSpacing(4)
                             .foregroundStyle(.white)
                             .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                             .padding(.horizontal, 13)
                             .padding(.vertical, 9)
+                            .frame(maxWidth: Self.bubbleMaxWidth, alignment: .leading)
                             .background(DS.Colour.accent, in: UserBubbleShape())
                     }
                 }
@@ -2089,7 +2107,7 @@ private struct VoiceSurfaceCard: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: stepsExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.tertiary)
                         .frame(width: 12)
                     Text(OpenTypeL10n.text(
@@ -2143,8 +2161,13 @@ private struct VoiceSurfaceCard: View {
                 .dsHairline(.top)
             }
         }
+        // Translucent white rather than the recessed grey the other inset
+        // blocks use: on the card this row sits *above* the answer rather than
+        // inside it, and the handoff lifts it off the material accordingly
+        // (`rgba(255,255,255,.5)`) — the same treatment the question card's
+        // option list gets.
         .background(
-            DS.Colour.inset,
+            DS.Colour.card.opacity(0.5),
             in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
         )
         .overlay(
@@ -2235,28 +2258,30 @@ private struct VoiceSurfaceCard: View {
             .font(DS.Text.body())
             .lineLimit(1...3)
             .onSubmit(submitDraft)
-            .padding(.bottom, 4)
+            .padding(.bottom, 5)
 
             Button(action: onFollowUpByVoice) {
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(DS.Colour.accent)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        DS.Colour.card,
-                        in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
-                            .strokeBorder(DS.Colour.border, lineWidth: 0.75)
-                    )
+                DS.Shadow.control(
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(DS.Colour.accent)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            DS.Colour.card,
+                            in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                        )
+                )
             }
             .buttonStyle(.plain)
             .help(OpenTypeL10n.text("口述追问", english: "Dictate a follow-up"))
 
             Button(action: submitDraft) {
                 Image(systemName: "arrow.up")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 28, height: 28)
                     .background(
@@ -2339,22 +2364,35 @@ private struct UserBubbleShape: Shape {
 
 /// Five bars at the handoff's 2.5pt, reacting to level. The pill's only
 /// non-textual element, and the one that makes it obvious the mic is live.
+///
+/// `peaks` are the handoff's literal bar heights (§04 4A), read as the profile
+/// at full level rather than as a static picture: the bar the design draws
+/// tallest is the one that reaches the container's 16pt, and none of them ever
+/// exceeds it. The previous mapping topped out at 27pt, so a loud syllable
+/// pushed the waveform out of its own 16pt row and into the tag beside it —
+/// `normalizedLevel` maps −55…−10 dBFS onto 0…1, and ordinary speech sits
+/// around 0.6, which is well past where the old curve overflowed.
 private struct LiveWaveform: View {
     let level: Double
-    private let weights = [0.44, 0.86, 1.0, 0.62, 0.32]
+    private let peaks: [CGFloat] = [7, 14, 16, 10, 5]
+    /// What the bars settle to in silence — short enough to read as "waiting",
+    /// tall enough to still read as five bars.
+    private let resting: CGFloat = 4
 
     var body: some View {
         HStack(alignment: .center, spacing: 3) {
-            ForEach(Array(weights.enumerated()), id: \.offset) { _, weight in
+            ForEach(Array(peaks.enumerated()), id: \.offset) { _, peak in
                 Capsule()
                     .fill(DS.Colour.accent)
-                    .frame(
-                        width: 2.5,
-                        height: 5 + max(level, 0.1) * 22 * weight
-                    )
+                    .frame(width: 2.5, height: height(for: peak))
             }
         }
-        .frame(width: 26, height: 18)
+        .frame(width: 24.5, height: 16)
         .animation(.interactiveSpring(response: 0.12), value: level)
+    }
+
+    private func height(for peak: CGFloat) -> CGFloat {
+        let reach = CGFloat(min(max(level, 0.15), 1))
+        return resting + (peak - resting) * reach
     }
 }

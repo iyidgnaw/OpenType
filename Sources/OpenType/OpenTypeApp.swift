@@ -153,13 +153,13 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     /// switcher (`MenuBarPopoverView`), not the full-featured `RootView` it
     /// used to host. Settings/History/Memory/Agent history all moved to
     /// `mainWindowController`'s real window instead, opened from this view's
-    /// gear button. Widened/heightened from the original 264x246 (see
-    /// `MenuBarPopoverView`'s own sizing note) so the now vertically-stacked
-    /// mode cards have room and don't wrap their subtitle text.
+    /// gear button. 300pt wide per the redesign handoff (§05) — the mode cards
+    /// that needed 320 are one row of three cells now, and the space went to
+    /// the 进行中 / 最近 sections instead.
     private func configurePopover() {
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 320, height: 384)
+        popover.contentSize = NSSize(width: 300, height: 384)
         popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView(model: model) { [weak self] in

@@ -108,7 +108,13 @@ you're debugging packaging specifically.
   the write endpoint `POST /memory/consolidate-now` (runs consolidation
   immediately, same code path as the `consolidate_memory_now` agent tool),
   and owner-facts management `GET /memory/owner-facts` /
-  `DELETE /memory/owner-facts/:id`. `startupConsolidation.ts` is the
+  `PATCH /memory/owner-facts/:id` / `DELETE /memory/owner-facts/:id`. The
+  `PATCH` is "the user read this and vouches for it": it promotes the fact's
+  `origin` to `owner` and takes no arguments beyond the id, so it can only ever
+  move provenance one way — a body naming any other origin is a 400, not a
+  demotion. Without it, the panel's only answer to a flagged-but-correct fact
+  was to delete it, and a provenance flag the user can never clear is noise
+  they learn to ignore. `startupConsolidation.ts` is the
   `shouldConsolidate` gate's automatic caller (P1-7): `main()` arms one check
   5 minutes after the server starts serving, and if the gate opens (≥12h since
   the last run, ≥5 unconsolidated events) it runs one pass. One check per

@@ -196,6 +196,11 @@ What you know about the user: The owner's name is Diyi; The owner prefers concis
 经 agent/context 流程记录的事实（origin `untrusted`/`agent`/`system`）**永不注入**——
 它们可能源自不可信上下文，逐字注入每一次 prompt 正是要封堵的投毒路径。
 它们仍可在 `GET /memory/owner-facts` 管理面上看到并删除。
+用户读过并认可之后，也可以通过 `PATCH /memory/owner-facts/:id`（记忆页的「确认」）
+把 origin 提升成 `owner`，此后这条事实才开始参与注入——**提升是单向的**，
+这个接口没有降级路径，所以 agent 无法借它把自己写的东西标成用户亲口说的。
+留这条出口是因为：标记的意义在于让人复核，而复核之后清不掉的标记就只是噪音，
+用户很快会学会无视它——那正好抵消了当初记录来源的全部收益。
 
 **Token 成本**：**无条件注入全部** owner 事实（不做相关性匹配——单用户场景下事实数量少，
 v1 判断不值得为自由文本建相关性系统）。成本随事实条数线性增长且**没有上限**。

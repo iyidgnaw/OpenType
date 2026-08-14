@@ -323,7 +323,10 @@ struct ColumnHeader<Content: View>: View {
         HStack(spacing: 8) {
             content()
         }
-        .padding(.horizontal, narrow ? DS.Space.pageNarrow : DS.Space.content)
+        // The design's page padding, so a header and the cards under it share
+        // one left edge. Was `content` (16) — a transcription slip that every
+        // column then matched, which is how a wrong value becomes a convention.
+        .padding(.horizontal, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
         .frame(height: DS.Size.headerHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
     }

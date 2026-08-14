@@ -1714,10 +1714,16 @@ struct McpServerSummary: Decodable, Identifiable, Equatable {
     let url: String?
     let envMasked: [String: String]?
     let headersMasked: [String: String]?
+    /// Absent reads as enabled — the value every config written before this
+    /// field existed implies, and the same default `normalizeMcpServer` applies
+    /// on the other side of the wire.
+    let enabled: Bool?
 
     /// The name is what `PUT`/`DELETE /config/mcp/:name` address, so it is also
     /// the row identity — there is no separate id to key on.
     var id: String { name }
+
+    var isEnabled: Bool { enabled ?? true }
 }
 
 /// Mirrors `GET /config/mcp`.
@@ -1753,6 +1759,17 @@ struct McpServerRequest: Encodable, Equatable {
     let env: [String: String]?
     let url: String?
     let headers: [String: String]?
+    /// `nil` omits the key, letting the sidecar apply its own `true` default —
+    /// so every existing call site keeps behaving exactly as it did. Sent as
+    /// `false` by 停用并保存, which is the whole reason this is expressible: a
+    /// server whose test failed can be kept without being handed to the next
+    /// start.
+    ///
+    /// Defaulted rather than required: a caller with no opinion about whether a
+    /// server should boot is exactly the caller that should not have to state
+    /// one, and requiring it would have meant editing call sites — including a
+    /// test — that have nothing to do with this field.
+    var enabled: Bool? = nil
 }
 
 /// One tool an MCP server exposes, as reported by `POST /config/mcp/test`.

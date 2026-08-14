@@ -273,6 +273,41 @@ export class MemoryStore {
   }
 
   /**
+   * The other half of reviewing a fact: the user read it and vouches for it.
+   * Sets `origin` to `"owner"` and returns the row as it now stands, or `null`
+   * when no such id exists so the route can answer 404.
+   *
+   * **One-way, by construction.** There is no target-origin parameter, so this
+   * method cannot express a demotion no matter what a caller passes — the same
+   * shape as `promoteOrigin` in `consolidator.ts`, which resolves every merge
+   * as "incoming `owner` wins, an existing `owner` is never downgraded". The
+   * reasoning is the same too, and it is the reason this method exists at all:
+   * provenance is here so a user can review what an agent planted from
+   * untrusted context (P1-12), and a flag the user cannot clear after
+   * reviewing is noise. A user who learns the label never goes away learns to
+   * ignore it — which costs exactly the signal it was added for.
+   *
+   * Every non-owner origin is promotable, not just `"untrusted"`: the panel's
+   * "needs attention" dot lights for anything that is not `"owner"`, so an
+   * `"agent"` or `"system"` fact the user has read has to be clearable too, or
+   * the dot becomes permanent and stops meaning anything.
+   *
+   * Confirming an already-`"owner"` fact is deliberately a no-op that still
+   * returns the row rather than an error. It is the same end state, and a
+   * double-click or a stale list should not read as a failure.
+   *
+   * `content` and `createdAt` are never touched: this records a judgement
+   * about a fact, not an edit to it.
+   */
+  confirmOwnerFact(id: number): OwnerFact | null {
+    this.db.run("UPDATE owner_facts SET origin = 'owner' WHERE id = ?", [id]);
+    const row = this.db
+      .query("SELECT * FROM owner_facts WHERE id = ?")
+      .get(id) as OwnerFact | null;
+    return row ?? null;
+  }
+
+  /**
    * Every event no consolidation run has processed, regardless of whether a run
    * would be *allowed* to read it. Deliberately left as a plain "how many rows
    * are unprocessed" count — that is what the name says, and the stats/debug

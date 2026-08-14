@@ -163,6 +163,46 @@ export function buildMemoryRoutes(store: MemoryStore, callLLM: CallLLM): Route[]
       handler: () => Response.json({ ownerFacts: store.allOwnerFacts() }),
     },
     {
+      // "I read this and I vouch for it" — the action that lets a user *clear*
+      // a provenance flag rather than only delete the fact carrying it.
+      //
+      // Provenance exists so the user can review what an agent planted from
+      // untrusted context (P1-12). A label the user cannot clear after
+      // reviewing is noise, and a user who learns the label never goes away
+      // learns to ignore it — which costs exactly the signal it was added for.
+      // Until this route existed the panel's only answer to a fact that was
+      // flagged but *correct* was to delete it, which throws away something
+      // true to silence a warning.
+      //
+      // The direction is fixed: this route only ever writes `"owner"`.
+      // `store.confirmOwnerFact` has no target-origin parameter to demote
+      // through, and a body that names some other origin is refused outright
+      // rather than ignored — a caller stating an intent this route will not
+      // honour should hear about it, not be silently given a different one.
+      // Same rule, same reason as `promoteOrigin` in consolidator.ts.
+      method: "PATCH",
+      path: "/memory/owner-facts/:id",
+      handler: async (req) => {
+        const id = parseIdParam(req);
+
+        // The body is optional — the route has exactly one effect, so naming it
+        // is redundant. When it *is* named it has to agree.
+        const raw = await req.text();
+        if (raw.trim().length > 0) {
+          const body = JSON.parse(raw) as Record<string, unknown>;
+          if (body.origin !== undefined && body.origin !== "owner") {
+            throw new ApiError("origin_must_be_owner", 400);
+          }
+        }
+
+        const ownerFact = store.confirmOwnerFact(id);
+        if (!ownerFact) {
+          throw new ApiError("owner_fact_not_found", 404);
+        }
+        return Response.json({ ownerFact });
+      },
+    },
+    {
       method: "DELETE",
       path: "/memory/owner-facts/:id",
       handler: (req) => {

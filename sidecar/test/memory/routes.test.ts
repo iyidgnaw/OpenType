@@ -36,6 +36,17 @@ function del(path: string): Request {
   return new Request(`http://sidecar${path}`, { method: "DELETE" });
 }
 
+function patch(path: string, body?: unknown): Request {
+  if (body === undefined) {
+    return new Request(`http://sidecar${path}`, { method: "PATCH" });
+  }
+  return new Request(`http://sidecar${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 function seedTerm(
   store: MemoryStore,
   overrides: Partial<{
@@ -593,5 +604,136 @@ describe("POST /memory/consolidate-now", () => {
     expect(body.result.aborted).toBe(true);
     const runs = store.db.query("SELECT * FROM memory_consolidation_runs").all();
     expect(runs).toHaveLength(0);
+  });
+});
+
+describe("PATCH /memory/owner-facts/:id", () => {
+  test("promotes an untrusted fact to owner and returns it", async () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("团队周会固定在周一上午十点。", "untrusted");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(patch(`/memory/owner-facts/${id}`));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ownerFact: Record<string, unknown> };
+    expect(body.ownerFact).toMatchObject({ id, origin: "owner" });
+    expect(body.ownerFact.content).toBe("团队周会固定在周一上午十点。");
+  });
+
+  test("the promotion is visible on the next GET /memory/owner-facts", async () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("Planted from a web page.", "untrusted");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    await router(patch(`/memory/owner-facts/${id}`));
+
+    const listed = await router(get("/memory/owner-facts"));
+    const body = (await listed.json()) as { ownerFacts: Array<Record<string, unknown>> };
+    expect(body.ownerFacts).toHaveLength(1);
+    expect(body.ownerFacts[0]?.origin).toBe("owner");
+  });
+
+  test("an already-owner fact is a 200 no-op, not an error", async () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("The owner prefers formal English.", "owner");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(patch(`/memory/owner-facts/${id}`));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { ownerFact: Record<string, unknown> };
+    expect(body.ownerFact.origin).toBe("owner");
+  });
+
+  test("promotes agent- and system-origin facts too", async () => {
+    const store = makeStore();
+    const agentId = store.recordOwnerFact("Written by the agent.", "agent");
+    const systemId = store.recordOwnerFact("Auto-consolidated.", "system");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    expect((await router(patch(`/memory/owner-facts/${agentId}`))).status).toBe(200);
+    expect((await router(patch(`/memory/owner-facts/${systemId}`))).status).toBe(200);
+
+    expect(store.allOwnerFacts().every((f) => f.origin === "owner")).toBe(true);
+  });
+
+  test("an unknown id is a 404", async () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("A real fact.", "untrusted");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(patch(`/memory/owner-facts/${id + 999}`));
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("owner_fact_not_found");
+    expect(store.allOwnerFacts()[0]?.origin).toBe("untrusted");
+  });
+
+  test("a malformed id is a 400, matching the delete route", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(patch("/memory/owner-facts/not-an-id"));
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("invalid_id");
+  });
+
+  test("an explicit { origin: 'owner' } body is accepted", async () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("Planted.", "untrusted");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(patch(`/memory/owner-facts/${id}`, { origin: "owner" }));
+
+    expect(response.status).toBe(200);
+    expect(store.allOwnerFacts()[0]?.origin).toBe("owner");
+  });
+
+  test("refuses to demote: a body naming any other origin is a 400", async () => {
+    // The one that matters. Provenance only means anything if it can move in
+    // exactly one direction -- towards "the user personally vouched for this".
+    // A route that accepted an arbitrary origin would let anything holding the
+    // socket relabel its own writes as owner-authored, or quietly re-flag a
+    // fact the user already cleared.
+    const store = makeStore();
+    const id = store.recordOwnerFact("The owner's name is Diyi.", "owner");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    for (const origin of ["untrusted", "agent", "system"]) {
+      const response = await router(patch(`/memory/owner-facts/${id}`, { origin }));
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: string };
+      expect(body.error).toBe("origin_must_be_owner");
+      expect(store.allOwnerFacts()[0]?.origin).toBe("owner");
+    }
+  });
+
+  test("a rejected demotion does not touch an untrusted fact either", async () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("Planted.", "untrusted");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(patch(`/memory/owner-facts/${id}`, { origin: "system" }));
+
+    expect(response.status).toBe(400);
+    expect(store.allOwnerFacts()[0]?.origin).toBe("untrusted");
+  });
+
+  test("confirming one fact leaves the others alone", async () => {
+    const store = makeStore();
+    const confirmed = store.recordOwnerFact("Confirm me.", "untrusted");
+    store.recordOwnerFact("Leave me untrusted.", "untrusted");
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    await router(patch(`/memory/owner-facts/${confirmed}`));
+
+    const byContent = new Map(store.allOwnerFacts().map((f) => [f.content, f.origin]));
+    expect(byContent.get("Confirm me.")).toBe("owner");
+    expect(byContent.get("Leave me untrusted.")).toBe("untrusted");
   });
 });

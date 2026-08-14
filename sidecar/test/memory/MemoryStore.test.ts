@@ -395,6 +395,91 @@ describe("MemoryStore.recordOwnerFact / allOwnerFacts", () => {
   });
 });
 
+describe("MemoryStore.confirmOwnerFact", () => {
+  test("promotes an untrusted fact to owner and returns the updated row", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("团队周会固定在周一上午十点。", "untrusted");
+
+    const fact = store.confirmOwnerFact(id);
+
+    expect(fact).not.toBeNull();
+    expect(fact?.id).toBe(id);
+    expect(fact?.origin).toBe("owner");
+    expect(store.allOwnerFacts()[0]?.origin).toBe("owner");
+  });
+
+  test("returns null for an unknown id", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("A real fact.", "untrusted");
+
+    expect(store.confirmOwnerFact(id + 999)).toBeNull();
+    // The real row is untouched by the miss.
+    expect(store.allOwnerFacts()[0]?.origin).toBe("untrusted");
+  });
+
+  test("is a no-op on a fact that is already owner, not an error", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("The owner prefers formal English.", "owner");
+    const before = store.allOwnerFacts()[0];
+
+    const fact = store.confirmOwnerFact(id);
+
+    expect(fact).not.toBeNull();
+    expect(fact?.origin).toBe("owner");
+    expect(fact?.content).toBe(before?.content);
+    expect(fact?.createdAt).toBe(before?.createdAt);
+  });
+
+  test("promotes agent- and system-origin facts too", () => {
+    // The sidebar's "needs attention" dot lights for every origin that is not
+    // "owner", so every one of them has to be clearable from the panel --
+    // otherwise the dot is permanent and stops meaning anything.
+    const store = makeStore();
+    const agentId = store.recordOwnerFact("Written by the agent.", "agent");
+    const systemId = store.recordOwnerFact("Auto-consolidated.", "system");
+
+    expect(store.confirmOwnerFact(agentId)?.origin).toBe("owner");
+    expect(store.confirmOwnerFact(systemId)?.origin).toBe("owner");
+  });
+
+  test("is one-way: confirming again keeps it owner, never demotes", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("团队周会固定在周一上午十点。", "untrusted");
+
+    store.confirmOwnerFact(id);
+    store.confirmOwnerFact(id);
+    store.confirmOwnerFact(id);
+
+    expect(store.allOwnerFacts()[0]?.origin).toBe("owner");
+  });
+
+  test("leaves content and createdAt exactly as they were", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("主力机是 M3 Max 的 MacBook Pro。", "untrusted");
+    const before = store.allOwnerFacts()[0];
+
+    store.confirmOwnerFact(id);
+
+    const after = store.allOwnerFacts()[0];
+    expect(after?.content).toBe("主力机是 M3 Max 的 MacBook Pro。");
+    expect(after?.createdAt).toBe(before?.createdAt);
+  });
+
+  test("confirming one fact leaves every other fact's origin alone", () => {
+    const store = makeStore();
+    const confirmed = store.recordOwnerFact("Confirm me.", "untrusted");
+    store.recordOwnerFact("Leave me untrusted.", "untrusted");
+    store.recordOwnerFact("Leave me agent.", "agent");
+
+    store.confirmOwnerFact(confirmed);
+
+    const byContent = new Map(store.allOwnerFacts().map((f) => [f.content, f.origin]));
+    expect(byContent.get("Confirm me.")).toBe("owner");
+    expect(byContent.get("Leave me untrusted.")).toBe("untrusted");
+    expect(byContent.get("Leave me agent.")).toBe("agent");
+  });
+});
+
 describe("MemoryStore.listConsolidationRuns", () => {
   test("returns an empty array when no runs have happened", () => {
     const store = makeStore();

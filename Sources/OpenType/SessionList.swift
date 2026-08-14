@@ -153,3 +153,30 @@ extension VoiceFollowUp {
         )
     }
 }
+
+/// The second-level Settings pages the redesign pushes into the detail column.
+///
+/// The rows that lead here used to be inline forms in a single scrolling
+/// Settings tab, which is why that tab had nine sections: everything was on one
+/// page because there was nowhere else to put it. A row that shows the provider
+/// and model currently in force, and pushes to configure them, answers the
+/// common question ("what is it using?") without opening anything.
+enum SettingsRoute: String, Identifiable, Equatable {
+    case speechRecognition
+    case languageModel
+    case agentTools
+    case auditLog
+    case clearLocalData
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .speechRecognition: return OpenTypeL10n.text("语音识别", english: "Speech recognition")
+        case .languageModel: return OpenTypeL10n.text("AI 模型", english: "AI model")
+        case .agentTools: return OpenTypeL10n.text("Agent 工具", english: "Agent tools")
+        case .auditLog: return OpenTypeL10n.text("审计记录", english: "Audit log")
+        case .clearLocalData: return OpenTypeL10n.text("清除本地数据", english: "Clear local data")
+        }
+    }
+}

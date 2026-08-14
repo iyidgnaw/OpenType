@@ -103,10 +103,31 @@ final class AppModel: ObservableObject {
         memoryOwnerFacts.contains { $0.origin != "owner" }
     }
 
+    /// Which chip the 会话 list is filtered by. Rendering only — it never
+    /// touches the fetched lists, so switching chips costs no refetch and can
+    /// never lose a row.
+    @Published var sessionFilter: SessionFilter = .all
+
+    /// The conversation whose thread is open in the main window, with the kind
+    /// that decides where its next turn goes. Stored together deliberately —
+    /// see `VoiceFollowUp.continuation` for why an id alone lets the thread and
+    /// the endpoint disagree.
+    @Published var focusedConversation: FocusedConversation?
+
+    /// Which second-level Settings page is pushed, if any.
+    @Published var settingsRoute: SettingsRoute?
+
     /// Whether the right-hand column has something in it — a thread open, a
     /// settings sub-page pushed. Drives the narrow layout's push.
     var hasOpenDetail: Bool {
-        focusedAskConversationId != nil || focusedAgentConversationId != nil
+        switch selectedTab {
+        case .sessions:
+            return focusedConversation != nil
+        case .settings:
+            return settingsRoute != nil
+        case .dictation, .memory:
+            return false
+        }
     }
 
     /// The hotkey gesture, for the sidebar's mode card.
@@ -2258,6 +2279,50 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Promotes a remembered fact from `untrusted` to `owner` — the user
+    /// vouching for something an agent wrote.
+    ///
+    /// The counterpart to the one-way promotion `upsertEntityTerm` already
+    /// applies to dictionary terms, and it exists for the same reason.
+    /// Provenance was recorded (P1-12) so a user could find and review what an
+    /// agent planted, possibly from a web page. A label that cannot be cleared
+    /// after review is not a signal, it is decoration — and a user who learns
+    /// the label never goes away learns to stop reading it, which costs exactly
+    /// what recording it bought.
+    ///
+    /// One-way by construction: the sidecar has no path from `owner` back to
+    /// `untrusted`, so nothing here can downgrade a fact the user already
+    /// confirmed.
+    @discardableResult
+    func confirmMemoryOwnerFact(id: Int) async -> Bool {
+        do {
+            // The body states the target origin even though the route only has
+            // one: a caller naming an intent the endpoint will not honour gets
+            // a 400 rather than a different outcome, so the wire says what this
+            // call means instead of relying on the path to imply it.
+            let response: MemoryOwnerFactMutationResponseBody = try await sidecarClient.request(
+                method: "PATCH",
+                path: "/memory/owner-facts/\(id)",
+                body: MemoryOwnerFactPatchBody(origin: "owner")
+            )
+            // Splicing the row rather than refetching also updates the
+            // sidebar's "needs attention" dot, which is computed off this same
+            // list (`hasUnconfirmedMemory`).
+            if let index = memoryOwnerFacts.firstIndex(where: { $0.id == id }) {
+                memoryOwnerFacts[index] = response.ownerFact
+            }
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("owner-fact confirm", error)
+            return false
+        }
+    }
+
+    private struct MemoryOwnerFactPatchBody: Encodable { let origin: String }
+
+    private struct MemoryOwnerFactMutationResponseBody: Decodable { let ownerFact: OwnerFactSummary }
+
     private struct MemoryDeletionResponseBody: Decodable { let deleted: Bool }
 
     /// Records a failed dictionary edit: a readable line for the panel (via the
@@ -3050,6 +3115,52 @@ final class AppModel: ObservableObject {
     /// (P1-11). The `/oneshot/ask` call is tracked in `askTask` (never awaited
     /// by `process(audioURL:)`), so a slow answer can't hold the recording
     /// pipeline busy and dismissing the surface can abort it cleanly.
+    /// Sends a typed turn into an existing conversation.
+    ///
+    /// The redesign's thread has a text field, which the app never had before —
+    /// every dispatch until now began with a recording, so the two dispatchers
+    /// take a transcript and are private. Typing is the same act with a
+    /// different input device, so this reuses them rather than growing a
+    /// parallel path: the conversation's own kind picks the endpoint, exactly
+    /// as it does for a spoken continuation.
+    ///
+    /// The captured context is a placeholder rather than a real
+    /// `contextBridge.capture()`: a typed turn originates in OpenType's own
+    /// window, so there is no other app's selection to read and nothing that
+    /// should be treated as one.
+    func submitTypedTurn(_ text: String, in conversation: FocusedConversation) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isBusy else { return }
+
+        let context = CapturedContext(
+            selectedText: nil,
+            applicationName: "OpenType",
+            bundleIdentifier: "ai.rain.opentype"
+        )
+        let requestID = UUID()
+        lastTranscript = trimmed
+
+        switch conversation.kind {
+        case .ask:
+            dispatchAskRun(
+                transcript: trimmed,
+                context: context,
+                practice: false,
+                requestID: requestID,
+                conversationId: conversation.id,
+                model: sidecarTextModel
+            )
+        case .agent:
+            dispatchAgentRun(
+                transcript: trimmed,
+                context: context,
+                practice: false,
+                requestID: requestID,
+                conversationId: conversation.id
+            )
+        }
+    }
+
     private func dispatchAskRun(
         transcript: String,
         context: CapturedContext,

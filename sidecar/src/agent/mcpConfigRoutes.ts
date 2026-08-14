@@ -25,6 +25,7 @@ interface MaskedMcpServer {
   url?: string;
   envMasked?: Record<string, string>;
   headersMasked?: Record<string, string>;
+  enabled: boolean;
 }
 
 export interface McpConfigRouteDeps {
@@ -66,6 +67,7 @@ function maskServer(server: StoredMcpServer): MaskedMcpServer {
     url: server.url,
     envMasked: maskMap(server.env),
     headersMasked: maskMap(server.headers),
+    enabled: server.enabled,
   };
 }
 
@@ -200,7 +202,11 @@ export function buildMcpConfigRoutes(
           // the user's own saved config.
           configured: store.getStatus().mcpConfigured,
           source: resolved.source,
-          servers: resolved.servers.map(maskServer),
+          // `allServers`, not `servers`: the latter is the boot subset and
+          // omits disabled ones. A disabled server the panel cannot see is a
+          // disabled server the user cannot re-enable or delete, which defeats
+          // the point of letting a failing server be saved at all.
+          servers: resolved.allServers.map(maskServer),
         });
       },
     },

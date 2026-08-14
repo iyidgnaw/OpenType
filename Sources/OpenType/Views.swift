@@ -90,23 +90,31 @@ struct RootView: View {
     private var destinationList: some View {
         switch model.selectedTab {
         case .sessions:
-            QAConversationsView(model: model)
+            SessionsListColumn(model: model)
         case .dictation:
-            HistoryView(model: model, history: model.history)
-        case .memory, .settings:
-            SettingsView(
-                model: model,
-                configuration: model.configuration,
-                agentMemory: model.agentMemory
-            )
+            DictationColumn(model: model, history: model.history)
+        case .memory:
+            MemoryColumn(model: model)
+        case .settings:
+            SettingsColumn(model: model)
         }
     }
 
-    /// The right column. Empty for destinations that are a single page —
-    /// filled in per screen as phases C–F land.
+    /// The right column. 记忆 and 听写 are single pages that fill the width
+    /// themselves, so they leave it empty and `hasOpenDetail` keeps the narrow
+    /// layout from pushing an empty panel over them.
     @ViewBuilder
     private var destinationDetail: some View {
-        Color.clear
+        switch model.selectedTab {
+        case .sessions:
+            SessionThreadColumn(model: model) { text, conversation in
+                model.submitTypedTurn(text, in: conversation)
+            }
+        case .settings:
+            SettingsDetailColumn(model: model)
+        case .dictation, .memory:
+            Color.clear
+        }
     }
 }
 

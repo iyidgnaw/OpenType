@@ -1,15 +1,19 @@
 import SwiftUI
 
-/// The menubar `NSPopover`'s content (Part A of the Alfred-style split):
-/// per the product owner, this is a simple mode-switch entry point only — a
-/// hotkey starts recording, and the popover's whole job is picking which of
-/// the 3 modes that hotkey uses next, plus a glance at whether things are
-/// working. Settings, Agent history, and Memory/context all moved out to a
-/// real app window (`RootView`, opened via the gear button here) rather than
-/// living in this popover the way the old full-featured `RootView`-in-a-popover
-/// did. Reuses `ModeGrid` from `Views.swift` rather than re-implementing the
-/// mode cards — it was already compact and already matches this codebase's
-/// existing card style.
+/// The menubar `NSPopover`'s content.
+///
+/// It used to be a mode switcher and nothing else: three 56pt cards with
+/// subtitles, filling two thirds of the popover to answer a question — "which
+/// mode will the hotkey use next" — that the three mode names already answer.
+/// The redesign compresses that into one row of three cells and spends the
+/// space it frees on **what is happening right now**: the shortcut's status, a
+/// live 进行中 block for a running agent task, and the two most recent
+/// sessions.
+///
+/// The reason is the app's shape. `RootView` runs as `.accessory` and is
+/// usually closed, so between dictating something and getting a result there
+/// is often no OpenType window on screen at all. The menu bar is then the only
+/// place to look, and "which mode is next" is not what anyone is looking for.
 struct MenuBarPopoverView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
@@ -22,76 +26,90 @@ struct MenuBarPopoverView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 0) {
             header
-            ModeGrid(model: model, configuration: configuration)
+            modeRow
             if model.needsLLMForSelectedMode {
                 llmSetupNudge
             }
-            Divider()
-            statusArea
-            Divider()
-            quitButton
+            statusRow
+            if let run = runningRun {
+                runningSection(run)
+            }
+            if !recentSessions.isEmpty {
+                recentSection
+            }
+            openWindowRow
+            quitRow
         }
-        .padding(16)
-        // Widened from the original 264pt and given room to grow vertically:
-        // at 264pt wide, 3-mode subtitles like "提出问题 · 弹窗直接回答" wrapped
-        // across 2-3 lines and clipped. `configurePopover()` in
-        // `OpenTypeApp.swift` sets the matching `NSPopover.contentSize`.
-        .frame(width: 320)
+        // The handoff's 300pt. `configurePopover()` in `OpenTypeApp.swift`
+        // sets the matching `NSPopover.contentSize`.
+        .frame(width: 300)
         .background(Color(nsColor: .windowBackgroundColor))
-        .tint(AppAccent.primary)
+        .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(
-                    Color(nsColor: MenuBarStatusIcon.backgroundColor(
-                        for: model.state
-                    ))
-                )
-                .frame(width: 8, height: 8)
+    // MARK: - Header
 
-            Text(model.state.title)
-                .font(.system(size: 12, weight: .semibold))
+    private var header: some View {
+        HStack(spacing: 9) {
+            RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [DS.Colour.accent, Color(red: 0.341, green: 0.318, blue: 0.980)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: 20, height: 20)
+                .overlay {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+
+            Text("OpenType")
+                .font(DS.Text.body(.semibold))
 
             Spacer(minLength: 8)
 
             Button(action: onOpenMainWindow) {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 22, height: 22)
-                    .background(Color.primary.opacity(0.045), in: Circle())
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help(OpenTypeL10n.text(
-                "打开 OpenType（设置、历史、Agent 任务）",
-                english: "Open OpenType (settings, history, Agent tasks)"
+                "打开 OpenType（会话、听写、记忆、设置）",
+                english: "Open OpenType (sessions, dictation, memory, settings)"
             ))
         }
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
     }
 
-    /// The menu bar is the only surface that's always reachable — the app is
-    /// `.accessory` whenever the main window is closed, so there's no Dock
-    /// icon and no app menu to quit from. Spelled out with a label rather
-    /// than an icon so it doesn't read as "close the popover".
-    private var quitButton: some View {
-        Button {
-            model.quit()
-        } label: {
-            Label(
-                OpenTypeL10n.text("退出 OpenType", english: "Quit OpenType"),
-                systemImage: "power"
-            )
-            .font(.system(size: 11.5, weight: .medium))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+    // MARK: - Modes
+
+    /// One row, three cells. The names carry the whole distinction; the
+    /// subtitles they used to have are said once in Settings instead of three
+    /// times here, every time the popover opens.
+    private var modeRow: some View {
+        HStack(spacing: 4) {
+            ForEach(InputMode.visibleModes) { mode in
+                ModeCell(
+                    mode: mode,
+                    isSelected: configuration.selectedMode == mode
+                ) {
+                    model.selectMode(mode)
+                }
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
     }
 
     /// Shown when the user selects Ask/Agent but has no LLM configured (the
@@ -103,99 +121,339 @@ struct MenuBarPopoverView: View {
             onOpenMainWindow()
             model.selectedTab = .settings
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 10.5, weight: .medium))
+            HStack(spacing: 7) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 11, weight: .medium))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(OpenTypeL10n.text(
                         "该模式需要 AI 模型",
                         english: "This mode needs an AI model"
                     ))
-                    .font(.system(size: 10.5, weight: .medium))
+                    .font(DS.Text.caption())
+                    .fontWeight(.medium)
                     Text(OpenTypeL10n.text(
                         "点此前往设置配置",
                         english: "Tap to set one up in Settings"
                     ))
-                    .font(.system(size: 9.5))
+                    .font(DS.Text.mono())
                     .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            .foregroundStyle(Color.orange)
+            .foregroundStyle(DS.Colour.warningText)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(
+                DS.Colour.warningFill,
+                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 10)
     }
 
-    private var statusArea: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Label(model.shortcutStatus, systemImage: "keyboard")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+    // MARK: - Status
 
-            // Previously undiscoverable, and then wrong: the hint used to
-            // promise "点 Shift 或 Tab" for every preset, naming a chord that
-            // no longer exists and a key half the presets do not record with.
-            // Driven off the preset now (`HotKeyPreset.modeSwitchHint`), and
-            // rendered only when that preset is the one actually installed —
-            // an Accessibility-less fallback is a Space chord, which has no
-            // Tab handling and so no hint.
-            if model.preferredShortcutActive,
-               let hint = configuration.hotKeyPreset.modeSwitchHint {
-                Label(hint, systemImage: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
+    /// One line for "is this thing working": the gesture on the left, a 5pt
+    /// dot on the right. It replaces four stacked `Label`s that each said
+    /// something slightly different about the same answer.
+    private var statusRow: some View {
+        HStack(spacing: 8) {
+            if model.sidecarNeedsAttention {
+                Text(model.sidecarStatusText)
+                    .font(DS.Text.mono())
+                    .foregroundStyle(DS.Colour.warningText)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-            }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            if model.sidecarNeedsAttention {
-                HStack(spacing: 6) {
-                    Label(model.sidecarStatusText, systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(.orange)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Spacer(minLength: 0)
-
-                    Button {
-                        model.restartSidecarManually()
-                    } label: {
-                        Text(OpenTypeL10n.text("重启服务", english: "Restart service"))
-                            .font(.system(size: 10.5, weight: .medium))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(Color.accentColor)
+                Button {
+                    model.restartSidecarManually()
+                } label: {
+                    Text(OpenTypeL10n.text("重启服务", english: "Restart"))
+                        .font(DS.Text.caption())
+                        .foregroundStyle(DS.Colour.accent)
                 }
+                .buttonStyle(.plain)
             } else {
-                Label(model.sidecarStatusText, systemImage: "bolt.horizontal.circle")
-                    .font(.system(size: 10.5))
+                Text(shortcutLine)
+                    .font(DS.Text.mono())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if model.runningAgentRunCount > 0 {
-                Label(
-                    OpenTypeL10n.text(
-                        "\(model.runningAgentRunCount) 个 Agent 任务运行中",
-                        english: "\(model.runningAgentRunCount) Agent task(s) running"
-                    ),
-                    systemImage: "wand.and.stars"
-                )
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(Color.accentColor)
+            Circle()
+                .fill(model.sidecarNeedsAttention ? DS.Colour.warning : DS.Colour.ok)
+                .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .dsHairline(.top)
+    }
+
+    /// The gesture, named from the installed preset rather than hardcoded —
+    /// telling an `fn` user to hold ⌥ is the copy-side version of the bug the
+    /// Tab gate used to have.
+    private var shortcutLine: String {
+        guard model.preferredShortcutActive,
+              let hint = configuration.hotKeyPreset.modeSwitchHint
+        else { return model.shortcutStatus }
+        return hint
+    }
+
+    // MARK: - 进行中
+
+    private var runningRun: AgentRunRecord? {
+        model.agentRuns.first { $0.status.isRunning }
+    }
+
+    /// The block the whole redesign of this popover is for: a task that is
+    /// still going, what it is doing, and how long it has been at it.
+    private func runningSection(_ run: AgentRunRecord) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 7) {
+                MenuBarBreathingDot(colour: DS.Colour.accent)
+
+                Text(OpenTypeL10n.text("进行中", english: "Running"))
+                    .font(DS.Text.groupLabel())
+                    .tracking(DS.Tracking.groupLabel)
+                    .foregroundStyle(.tertiary)
+
+                Spacer(minLength: 4)
+
+                TimelineView(.periodic(from: run.dispatchedAt, by: 1)) { context in
+                    Text(OverlayElapsed.short(
+                        max(0, context.date.timeIntervalSince(run.dispatchedAt))
+                    ))
+                    .font(DS.Text.mono())
+                    .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(run.task)
+                .font(DS.Text.body())
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(toolLine(for: run))
+                .font(DS.Text.mono())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(DS.Colour.accent.opacity(0.05))
+        .dsHairline(.top)
+    }
+
+    /// The tool the run is on, parsed out of the last progress line the same
+    /// way the overlay's working pill does it.
+    private func toolLine(for run: AgentRunRecord) -> String {
+        guard let last = run.steps.last else {
+            return OpenTypeL10n.text("正在准备…", english: "Starting up…")
+        }
+        guard let parsed = AgentToolLine.parse(last.detail) else {
+            return last.detail
+        }
+        return parsed.summary.isEmpty ? parsed.tool : "\(parsed.tool) · \(parsed.summary)"
+    }
+
+    // MARK: - 最近
+
+    private var recentSessions: [ConversationSummary] {
+        Array(model.sessionConversations.prefix(2))
+    }
+
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(OpenTypeL10n.text("最近", english: "Recent"))
+                .font(DS.Text.groupLabel())
+                .tracking(DS.Tracking.groupLabel)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 6)
+
+            ForEach(recentSessions) { conversation in
+                Button {
+                    open(conversation)
+                } label: {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(dotColour(for: conversation))
+                            .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
+
+                        Text(conversation.title)
+                            .font(DS.Text.body())
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Text(MenuBarSessionTime.text(forMilliseconds: conversation.updatedAt))
+                            .font(DS.Text.mono())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+        .dsHairline(.top)
     }
+
+    private func dotColour(for conversation: ConversationSummary) -> Color {
+        conversation.sessionKind == .agent ? DS.Colour.agent : DS.Colour.accent
+    }
+
+    /// Opening a session from here is the same act as opening it in the list,
+    /// so it goes through the same state rather than a menubar-only path.
+    private func open(_ conversation: ConversationSummary) {
+        guard let kind = conversation.sessionKind else { return }
+        onOpenMainWindow()
+        model.selectedTab = .sessions
+        model.focusedConversation = FocusedConversation(id: conversation.id, kind: kind)
+    }
+
+    // MARK: - Footer
+
+    private var openWindowRow: some View {
+        Button(action: onOpenMainWindow) {
+            HStack(spacing: 8) {
+                Text(OpenTypeL10n.text("打开主窗口", english: "Open main window"))
+                    .font(DS.Text.body())
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Text("⌘O")
+                    .font(DS.Text.mono())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("o", modifiers: .command)
+        .dsHairline(.top)
+    }
+
+    /// The menu bar is the only surface that's always reachable — the app is
+    /// `.accessory` whenever the main window is closed, so there's no Dock
+    /// icon and no app menu to quit from. Spelled out with a label rather
+    /// than an icon so it doesn't read as "close the popover".
+    private var quitRow: some View {
+        Button {
+            model.quit()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "power")
+                    .font(.system(size: 11, weight: .medium))
+                Text(OpenTypeL10n.text("退出 OpenType", english: "Quit OpenType"))
+                    .font(DS.Text.body())
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .dsHairline(.top)
+    }
+}
+
+/// One of the three mode cells: icon over label, 52pt tall, and accent-filled
+/// when it is the one the hotkey will use.
+private struct ModeCell: View {
+    let mode: InputMode
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: mode.symbol)
+                    .font(.system(size: 17, weight: .medium))
+                Text(mode.title)
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 52)
+            .background(
+                isSelected ? DS.Colour.accent : DS.Colour.inset,
+                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(mode.shortTitle)
+    }
+}
+
+/// The same 1.4s breath the overlay's running states use, so "still going"
+/// looks the same wherever it is said.
+private struct MenuBarBreathingDot: View {
+    let colour: Color
+    @State private var dim = false
+
+    var body: some View {
+        Circle()
+            .fill(colour)
+            .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
+            .opacity(dim ? 0.35 : 1)
+            .scaleEffect(dim ? 0.82 : 1)
+            .animation(
+                .easeInOut(duration: 1.4).repeatForever(autoreverses: true),
+                value: dim
+            )
+            .onAppear { dim = true }
+    }
+}
+
+/// `13:20` for today, `昨天`, then a date. Short enough to sit at the right
+/// edge of a 300pt popover without pushing the title out.
+enum MenuBarSessionTime {
+    static func text(forMilliseconds milliseconds: Int) -> String {
+        text(for: Date(timeIntervalSince1970: Double(milliseconds) / 1000))
+    }
+
+    static func text(for date: Date, now: Date = Date()) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = OpenTypeL10n.locale
+        if calendar.isDate(date, inSameDayAs: now) {
+            return timeFormatter.string(from: date)
+        }
+        if calendar.isDateInYesterday(date) {
+            return OpenTypeL10n.text("昨天", english: "Yesterday")
+        }
+        return dayFormatter.string(from: date)
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = OpenTypeL10n.locale
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = OpenTypeL10n.locale
+        formatter.dateFormat = "MM-dd"
+        return formatter
+    }()
 }

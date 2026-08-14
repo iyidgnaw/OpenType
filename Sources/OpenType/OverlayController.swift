@@ -30,6 +30,40 @@ private final class OverlayPresentation: ObservableObject {
     /// still in the stretch that ends by itself.
     @Published var pastWarningThreshold = false
 
+    // MARK: - Redesign additions (2026-08-14 handoff §04)
+
+    /// When the current processing/working episode began, so the pill can say
+    /// 「…· 42s」. Timed here rather than pushed because it is the panel's own
+    /// question — how long has the user been looking at this — and the states
+    /// it spans (`.processing` → `.working`) are exactly the ones this
+    /// controller already sees the boundaries of.
+    @Published var workingStartedAt: Date?
+    /// How many distinct agent steps have arrived during that episode. The
+    /// wire gives us the *last* step's text, not an index, so 「第 6 步」 is
+    /// counted from the changes we observe. Total-step estimates do not exist
+    /// upstream, so the readout deliberately shows the current number alone
+    /// rather than inventing a denominator.
+    @Published var stepCount = 0
+    /// The finished episode's duration, frozen at the moment the card
+    /// appeared. A card that kept counting would be timing the user reading
+    /// it, not the run.
+    @Published var finishedElapsed: TimeInterval?
+    /// The last live caption of the recording that led into this episode —
+    /// what the user said, kept so the working pill and the result card can
+    /// show the task rather than a generic 「请稍候…」.
+    @Published var lastCaption = ""
+    /// Where the last delivery landed, for 「已写入 <App>」. Set by `AppModel`
+    /// alongside `correctionWindowArmed`; `nil` falls back to naming the field
+    /// rather than the app.
+    @Published var deliveryTargetApp: String?
+    /// What was delivered, shown under that headline.
+    @Published var deliveredText: String?
+    /// Whether the installed hotkey preset actually supports Tab-to-switch
+    /// (`HotKeyPreset.modeSwitchHint != nil`). The Space-chord presets do not,
+    /// and a pill that advertises a key that does nothing is worse than one
+    /// that stays quiet.
+    @Published var modeSwitchHintAvailable = true
+
     /// The visible half of an armed correction window.
     struct CorrectionHint: Equatable {
         let text: String
@@ -88,6 +122,56 @@ extension OverlayHideBehavior {
     }
 }
 
+/// The panel's two widths, and the heights that go with them.
+///
+/// The redesign's single biggest change to this surface: **420 or 640, and
+/// nothing else.** The panel used to be 300 / 388 / 392 / 460 / 480 / 620
+/// depending on what it happened to be showing, so every morph slid it
+/// sideways under the user's eyes — five states that are one panel read as
+/// five panels taking turns. Everything except the result card is 420; the
+/// card is 640×520 (handoff §04).
+///
+/// This supersedes `VoiceSurfacePanelLayout.size(for:)` (`Models.swift`),
+/// which still returns the pre-redesign table and is now referenced only by
+/// its own tests. Positioning still comes from `VoiceSurfacePanelLayout.frame`
+/// — the bottom-anchored geometry is unchanged, and that is what keeps the
+/// morph reading as growth rather than as a new window.
+enum VoiceSurfacePanelMetrics {
+    /// Every pre-result state. One size for all of them, so the panel holds
+    /// still from the first word until it becomes the card.
+    static let pill = NSSize(width: 420, height: 132)
+    static let card = NSSize(width: 640, height: 520)
+    /// Toasts with a single headline row (mode changed, failed, cancelled).
+    static let compactToast = NSSize(width: 420, height: 66)
+    /// A delivery toast: headline, the delivered text, and the merged
+    /// countdown/hint row.
+    static let deliveryToast = NSSize(width: 420, height: 122)
+    static let pendingDispatch = NSSize(width: 420, height: 96)
+
+    /// The question card grows with its options and stays 420 wide. A prompt,
+    /// not a document — it never reaches the card's 640.
+    static func asking(optionCount: Int) -> NSSize {
+        // Header + question + the mic/answer row + padding, plus one 36pt row
+        // per option inside a bordered list.
+        let base: CGFloat = 152
+        let rows = CGFloat(min(max(optionCount, 0), 6)) * 36
+        return NSSize(width: 420, height: base + rows)
+    }
+
+    static func size(for state: VoiceSurfaceState) -> NSSize {
+        switch state {
+        case .hidden:
+            return .zero
+        case .listening, .processing, .working:
+            return pill
+        case .asking(let detail):
+            return asking(optionCount: detail.question.options?.count ?? 0)
+        case .result, .failed:
+            return card
+        }
+    }
+}
+
 /// The app's single floating bottom-center panel. It plays two roles:
 ///
 /// 1. The legacy transient HUD — transcribe mode's live-caption pill and every
@@ -110,12 +194,6 @@ extension OverlayHideBehavior {
 /// had, which is what keeps show/hide from feedback-looping).
 @MainActor
 final class OverlayController {
-    private let compactSize = NSSize(width: 300, height: 60)
-    private let listeningSize = NSSize(width: 388, height: 96)
-    /// Room for the hint's second line plus the window's progress bar.
-    private let correctionHintSize = NSSize(width: 392, height: 84)
-    /// Same footprint, with room for a two-line transcript (P1-6).
-    private let pendingDispatchSize = NSSize(width: 392, height: 96)
     private let presentation = OverlayPresentation()
     private var panel: NSPanel?
     private var dismissWorkItem: DispatchWorkItem?
@@ -146,10 +224,16 @@ final class OverlayController {
     /// The Esc watchers installed for the length of a pre-dispatch
     /// confirmation (P1-6), and only for that length.
     private var pendingDispatchKeyMonitors: [Any] = []
+    /// The digit watchers installed for the length of an agent question, and
+    /// only for that length — see `installQuestionKeyMonitors(for:)`.
+    private var questionKeyMonitors: [Any] = []
     /// Takes the two-minute warning's sentence back off the pill (P2-10).
     private var recordingWarningWorkItem: DispatchWorkItem?
     /// How long that sentence stays up.
     private let recordingWarningSeconds: TimeInterval = 4.5
+    /// The agent step whose text the pill is currently showing, so a poll tick
+    /// that repeats it does not count as a new step.
+    private var lastStepSignature: String?
 
     /// Whether a post-delivery correction window is open right now (P0-3).
     /// `AppModel` sets it *before* pushing the delivery state, since it is
@@ -157,6 +241,27 @@ final class OverlayController {
     /// A plain flag rather than the `CorrectionWindow.State` itself: the
     /// controller decides presentation, never policy.
     var correctionWindowArmed = false
+
+    /// Where the last delivery landed (`AppModel.lastApplication`), so the
+    /// toast can say 「已写入 Notes」 instead of 「已复制」. Set before pushing
+    /// the delivery state, same contract as `correctionWindowArmed`.
+    var deliveryTargetApp: String? {
+        get { presentation.deliveryTargetApp }
+        set { presentation.deliveryTargetApp = newValue }
+    }
+
+    /// What was delivered, shown beneath that headline.
+    var deliveredText: String? {
+        get { presentation.deliveredText }
+        set { presentation.deliveredText = newValue }
+    }
+
+    /// Whether the installed hotkey preset supports Tab-to-switch. Drives the
+    /// listening pill's bottom row; see the presentation property.
+    var modeSwitchHintAvailable: Bool {
+        get { presentation.modeSwitchHintAvailable }
+        set { presentation.modeSwitchHintAvailable = newValue }
+    }
 
     /// Escape, the 关闭 button, or a click outside a finished card.
     var onRequestDismiss: (() -> Void)?
@@ -174,6 +279,21 @@ final class OverlayController {
     /// instant means (`DispatchConfirmation.decision`).
     var onCancelPendingDispatch: (() -> Void)?
 
+    /// A follow-up typed (or picked from the card's action row) while a result
+    /// card is on screen: **the card's way out of being a dead end.**
+    ///
+    /// Before this, following up on an answer you were looking at meant
+    /// dismissing the card, opening the main window, finding the thread and
+    /// speaking again. The caller is expected to dispatch the text against the
+    /// card's own `conversationId` (`VoiceFollowUp.conversationId`) and push
+    /// the surface back to `.working`, so the follow-up continues the
+    /// conversation instead of starting a parallel one.
+    var onFollowUp: ((String) -> Void)?
+    /// The card composer's mic button — the same intent as holding the hotkey,
+    /// reported rather than performed because starting a recording is
+    /// `AppModel`'s job.
+    var onFollowUpByVoice: (() -> Void)?
+
     private lazy var hostingView = NSHostingView(
         rootView: OverlayView(
             presentation: presentation,
@@ -183,7 +303,9 @@ final class OverlayController {
             onStop: { [weak self] in self?.onStopAgentRun?() },
             onAnswer: { [weak self] runId, answer in
                 self?.onAnswerAgentQuestion?(runId, answer)
-            }
+            },
+            onFollowUp: { [weak self] text in self?.onFollowUp?(text) },
+            onFollowUpByVoice: { [weak self] in self?.onFollowUpByVoice?() }
         )
     )
 
@@ -209,6 +331,7 @@ final class OverlayController {
         surfaceState = surface
         lastState = state
         lastMode = mode
+        trackProgress(from: previous, to: surface)
 
         // A new recording is a fresh, user-initiated action: it always wins
         // over a toast still sitting on the panel.
@@ -259,10 +382,56 @@ final class OverlayController {
         state: ProcessingState,
         mode: InputMode
     ) {
+        trackProgress(from: surfaceState, to: surface)
         surfaceState = surface
         lastState = state
         lastMode = mode
         presentToast(state: state, mode: mode)
+    }
+
+    /// Keeps the pill's 「第 N 步 · 42s」 and the card's frozen duration in step
+    /// with the surface, since neither number exists on the wire.
+    ///
+    /// An *episode* is one uninterrupted stretch of processing/working. It
+    /// starts when the surface first enters one of those states and ends when
+    /// it leaves them, which is also the moment the card's elapsed is frozen —
+    /// a card that kept counting would be timing how long the user takes to
+    /// read it.
+    private func trackProgress(
+        from previous: VoiceSurfaceState,
+        to surface: VoiceSurfaceState
+    ) {
+        let wasBusy = previous.isBusyEpisode
+        let isBusy = surface.isBusyEpisode
+
+        if isBusy, !wasBusy {
+            presentation.workingStartedAt = Date()
+            presentation.stepCount = 0
+            presentation.finishedElapsed = nil
+            lastStepSignature = nil
+        }
+
+        if case .working(let detail) = surface,
+           let step = detail.currentStep,
+           step != lastStepSignature {
+            lastStepSignature = step
+            presentation.stepCount += 1
+        }
+
+        switch surface {
+        case .result, .failed:
+            if let started = presentation.workingStartedAt {
+                presentation.finishedElapsed = Date().timeIntervalSince(started)
+                presentation.workingStartedAt = nil
+            }
+        case .listening:
+            // A new recording starts a new task: the previous run's caption
+            // must not linger under it.
+            presentation.lastCaption = ""
+            presentation.finishedElapsed = nil
+        case .hidden, .processing, .working, .asking:
+            break
+        }
     }
 
     /// Pure per-state timing decision behind `show(...)`. `.idle` hides
@@ -324,6 +493,7 @@ final class OverlayController {
     func updateLiveTranscript(_ text: String) {
         guard presentation.state == .listening else { return }
         presentation.liveTranscript = text
+        if !text.isEmpty { presentation.lastCaption = text }
     }
 
     /// The elapsed-time readout, pushed by `AppModel`'s recording tick (P2-10).
@@ -374,6 +544,7 @@ final class OverlayController {
         cancelToastOverride()
         removeClickOutsideMonitor()
         removePendingDispatchMonitors()
+        removeQuestionKeyMonitors()
         clearRecordingElapsed()
         legacyOnScreen = nil
         surfaceState = .hidden
@@ -403,8 +574,9 @@ final class OverlayController {
         )
 
         let panel = panel ?? makePanel()
-        hostingView.frame = NSRect(origin: .zero, size: pendingDispatchSize)
-        panel.setContentSize(pendingDispatchSize)
+        let size = VoiceSurfacePanelMetrics.pendingDispatch
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        panel.setContentSize(size)
         position(panel)
         // Never `makeKey`: the user may still be typing into the app they
         // dictated from, and 1.5 seconds is not worth stealing focus for. The
@@ -460,11 +632,65 @@ final class OverlayController {
         pendingDispatchKeyMonitors = []
     }
 
+    // MARK: - Answering an agent question by number key
+
+    /// Watches for `1`…`9` while a question is on screen, so a task started
+    /// without touching the mouse can be answered without reaching for it.
+    ///
+    /// Global as well as local for the same reason Esc is: the panel never
+    /// takes key focus, so the user is still in whatever app they dictated
+    /// from. The monitors are removed the instant an answer is sent or the
+    /// question leaves the screen, which bounds the one real cost — a bare
+    /// digit typed elsewhere while a question is open counts as an answer.
+    /// Modified keypresses (⌘1, ⌃2, …) are ignored, since those are somebody
+    /// else's shortcuts.
+    private func installQuestionKeyMonitors(for detail: VoiceSurfaceState.AskingDetail) {
+        removeQuestionKeyMonitors()
+        guard let options = detail.question.options, !options.isEmpty else { return }
+
+        let answer: (NSEvent) -> Bool = { [weak self] event in
+            guard let self else { return false }
+            let interesting: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
+            guard event.modifierFlags.intersection(interesting).isEmpty,
+                  let characters = event.charactersIgnoringModifiers,
+                  let digit = Int(characters),
+                  digit >= 1, digit <= options.count
+            else { return false }
+
+            self.removeQuestionKeyMonitors()
+            self.onAnswerAgentQuestion?(
+                detail.runId,
+                AgentQuestionAnswerItem(
+                    id: detail.question.id,
+                    selected: [options[digit - 1].label],
+                    custom: nil
+                )
+            )
+            return true
+        }
+
+        let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            answer(event) ? nil : event
+        }
+        let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            _ = answer(event)
+        }
+        questionKeyMonitors = [local, global].compactMap { $0 }
+    }
+
+    private func removeQuestionKeyMonitors() {
+        for monitor in questionKeyMonitors {
+            NSEvent.removeMonitor(monitor)
+        }
+        questionKeyMonitors = []
+    }
+
     // MARK: - Legacy transient HUD
 
     private func presentLegacy(state: ProcessingState, mode: InputMode) {
         dismissWorkItem?.cancel()
         removeClickOutsideMonitor()
+        removeQuestionKeyMonitors()
 
         let behavior = Self.hideBehavior(
             for: state,
@@ -491,12 +717,13 @@ final class OverlayController {
         }
 
         let size: NSSize
-        if state == .listening {
-            size = listeningSize
-        } else if presentation.correctionHint != nil {
-            size = correctionHintSize
-        } else {
-            size = compactSize
+        switch state {
+        case .listening:
+            size = VoiceSurfacePanelMetrics.pill
+        case .success, .copied:
+            size = VoiceSurfacePanelMetrics.deliveryToast
+        default:
+            size = VoiceSurfacePanelMetrics.compactToast
         }
         let panel = panel ?? makePanel()
         hostingView.frame = NSRect(origin: .zero, size: size)
@@ -585,7 +812,7 @@ final class OverlayController {
         legacyOnScreen = nil
         presentation.correctionHint = nil
 
-        let size = VoiceSurfacePanelLayout.size(for: surface)
+        let size = VoiceSurfacePanelMetrics.size(for: surface)
         let frame = VoiceSurfacePanelLayout.frame(
             for: size,
             visibleFrame: visibleFrame() ?? panel.frame
@@ -599,6 +826,12 @@ final class OverlayController {
             && previous != .hidden
             && !NSEqualSizes(panel.frame.size, NSSize(width: size.width, height: size.height))
         panel.setFrame(frame, display: true, animate: shouldAnimate)
+
+        if case .asking(let detail) = surface {
+            installQuestionKeyMonitors(for: detail)
+        } else {
+            removeQuestionKeyMonitors()
+        }
 
         if surface.allowsClickOutsideDismiss {
             // A finished card is interactive (buttons, selectable Markdown,
@@ -645,7 +878,7 @@ final class OverlayController {
 
     private func makePanel() -> NSPanel {
         let panel = KeyableOverlayPanel(
-            contentRect: NSRect(origin: .zero, size: compactSize),
+            contentRect: NSRect(origin: .zero, size: VoiceSurfacePanelMetrics.pill),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -653,6 +886,10 @@ final class OverlayController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.level = .floating
+        // The handoff's `0 22px 60px rgba(0,0,0,.40)` is a window shadow, not
+        // an in-content one: a SwiftUI `.shadow` would be clipped by the
+        // hosting view's bounds, which end exactly at the panel's edge. AppKit
+        // draws it from the content's alpha instead.
         panel.hasShadow = true
         panel.collectionBehavior = [
             .canJoinAllSpaces,
@@ -692,6 +929,19 @@ final class OverlayController {
     }
 }
 
+private extension VoiceSurfaceState {
+    /// Whether this state is part of one "the user is waiting" episode — the
+    /// stretch the pill's elapsed readout and step counter measure.
+    var isBusyEpisode: Bool {
+        switch self {
+        case .processing, .working, .asking:
+            return true
+        case .hidden, .listening, .result, .failed:
+            return false
+        }
+    }
+}
+
 /// A `.nonactivatingPanel` normally can't become key, which would swallow the
 /// Escape keypress meant for the result card's `onExitCommand`. Overriding
 /// `canBecomeKey` lets the panel receive keyboard input while
@@ -709,6 +959,8 @@ private struct OverlayView: View {
     let onOpenMainWindow: () -> Void
     let onStop: () -> Void
     let onAnswer: (String, AgentQuestionAnswerItem) -> Void
+    let onFollowUp: (String) -> Void
+    let onFollowUpByVoice: () -> Void
 
     var body: some View {
         Group {
@@ -722,13 +974,13 @@ private struct OverlayView: View {
         }
         .background(
             .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            in: RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous)
+                .strokeBorder(.white.opacity(0.45), lineWidth: 0.75)
         )
-        .tint(AppAccent.primary)
+        .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
         // The content crossfade half of the morph: the panel's frame animates
         // (`setFrame(_:display:animate:)`), the contents fade between states.
@@ -742,8 +994,8 @@ private struct OverlayView: View {
             case .hidden:
                 if presentation.state == .listening {
                     listeningContent
-                } else if let hint = presentation.correctionHint {
-                    correctionHintContent(hint)
+                } else if presentation.state == .success || presentation.state == .copied {
+                    deliveryContent(hint: presentation.correctionHint)
                 } else {
                     compactContent
                 }
@@ -751,22 +1003,29 @@ private struct OverlayView: View {
                 listeningContent
             case .processing:
                 WorkingPill(
-                    headline: OpenTypeL10n.text("正在整理…", english: "Transcribing…"),
-                    modeTitle: presentation.mode.title,
-                    ticker: nil
+                    kind: presentation.mode == .agent ? .agent : .ask,
+                    task: presentation.lastCaption,
+                    toolLine: nil,
+                    fallbackLine: OpenTypeL10n.text("正在识别…", english: "Transcribing…"),
+                    startedAt: presentation.workingStartedAt,
+                    stepCount: 0,
+                    onStop: nil
                 )
             case .working(let detail):
                 WorkingPill(
-                    headline: detail.kind == .agent
-                        ? OpenTypeL10n.text("Agent 正在执行…", english: "Agent is working…")
-                        : OpenTypeL10n.text("正在思考…", english: "Thinking…"),
                     // The badge names the run this pill belongs to, not the
                     // currently-selected mode: a dispatched run outlives the
                     // recording (and the user is free to switch modes while it
                     // is still working), so `presentation.mode` would be able
                     // to label an Agent run "听写".
-                    modeTitle: (detail.kind == .agent ? InputMode.agent : .ask).title,
-                    ticker: detail.currentStep,
+                    kind: detail.kind,
+                    task: presentation.lastCaption,
+                    toolLine: detail.currentStep.flatMap(AgentToolLine.parse),
+                    fallbackLine: detail.kind == .agent
+                        ? OpenTypeL10n.text("正在准备下一步…", english: "Planning the next step…")
+                        : OpenTypeL10n.text("正在查资料并作答…", english: "Searching and answering…"),
+                    startedAt: presentation.workingStartedAt,
+                    stepCount: presentation.stepCount,
                     onStop: presentation.surface.stoppableAgentRun ? onStop : nil
                 )
             case .asking(let detail):
@@ -779,17 +1038,23 @@ private struct OverlayView: View {
                 VoiceSurfaceCard(
                     card: card,
                     failed: false,
+                    elapsed: presentation.finishedElapsed,
                     onClose: onClose,
                     onCopy: onCopy,
-                    onOpenMainWindow: onOpenMainWindow
+                    onOpenMainWindow: onOpenMainWindow,
+                    onFollowUp: onFollowUp,
+                    onFollowUpByVoice: onFollowUpByVoice
                 )
             case .failed(let card):
                 VoiceSurfaceCard(
                     card: card,
                     failed: true,
+                    elapsed: presentation.finishedElapsed,
                     onClose: onClose,
                     onCopy: onCopy,
-                    onOpenMainWindow: onOpenMainWindow
+                    onOpenMainWindow: onOpenMainWindow,
+                    onFollowUp: onFollowUp,
+                    onFollowUpByVoice: onFollowUpByVoice
                 )
             }
         }
@@ -806,103 +1071,138 @@ private struct OverlayView: View {
     private func pendingDispatchContent(
         _ pending: OverlayPresentation.PendingDispatch
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 11) {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 9) {
                 Image(systemName: "paperplane")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(DS.Colour.accent)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(pending.transcript)
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .lineLimit(2)
-                        .truncationMode(.tail)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(
-                        OpenTypeL10n.text(
-                            "即将下发给 Agent · \(DispatchConfirmation.hintText)",
-                            english: "Dispatching to Agent · \(DispatchConfirmation.hintText)"
-                        )
-                    )
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                }
+                Text(pending.transcript)
+                    .font(DS.Text.body(.medium))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Spacer(minLength: 0)
             }
 
-            WindowCountdownBar(seconds: pending.seconds)
-                .id(pending.startedAt)
+            HStack(spacing: 9) {
+                WindowCountdownBar(seconds: pending.seconds)
+                    .id(pending.startedAt)
+                Text(
+                    OpenTypeL10n.text(
+                        "即将下发给 Agent · \(DispatchConfirmation.hintText)",
+                        english: "Dispatching · \(DispatchConfirmation.hintText)"
+                    )
+                )
+                .font(DS.Text.mono())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .layoutPriority(1)
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .frame(width: 392, height: 96, alignment: .leading)
+        .padding(.vertical, 14)
+        .frame(
+            width: VoiceSurfacePanelMetrics.pendingDispatch.width,
+            height: VoiceSurfacePanelMetrics.pendingDispatch.height,
+            alignment: .leading
+        )
     }
 
+    /// 4A. The live caption is the reason this panel exists, so it is the
+    /// largest thing on it — it used to be 13pt, smaller than a button label.
     private var listeningContent: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 9) {
-                ListeningPulse(level: presentation.audioLevel)
+                LiveWaveform(level: presentation.audioLevel)
 
-                Text("正在听")
-                    .font(.system(size: 12.5, weight: .semibold))
+                ModeTag(mode: presentation.mode)
 
-                Text(modeBadgeTitle)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.055), in: Capsule())
+                Spacer(minLength: 4)
 
-                // How long this recording has been running (P2-10). Monospaced
-                // digits so the pill's contents don't shuffle sideways once a
-                // second; tinted for the rest of the recording once the
-                // two-minute warning has fired.
+                // How long this recording has been running (P2-10). Mono so
+                // the pill's contents don't shuffle sideways once a second;
+                // tinted for the rest of the recording once the two-minute
+                // warning has fired.
                 if let elapsed = presentation.elapsedText {
                     Text(elapsed)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .monospacedDigit()
+                        .font(DS.Text.mono())
                         .foregroundStyle(
                             presentation.pastWarningThreshold
-                                ? Color.orange
+                                ? DS.Colour.warningText
                                 : Color.secondary
                         )
                 }
 
-                Spacer(minLength: 4)
-
-                LiveWaveform(level: presentation.audioLevel)
+                Text(OpenTypeL10n.text("松开结束", english: "Release to finish"))
+                    .font(DS.Text.mono())
+                    .foregroundStyle(.tertiary)
             }
 
             Text(captionText)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(captionColor)
                 .lineLimit(2)
                 .truncationMode(.head)
-                .frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+                .frame(maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
                 .contentTransition(.opacity)
                 .animation(
                     .easeOut(duration: 0.16),
                     value: presentation.liveTranscript
                 )
+
+            if presentation.modeSwitchHintAvailable {
+                modeSwitchRow
+            }
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 12)
-        .frame(width: 388, height: 96)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(
+            width: VoiceSurfacePanelMetrics.pill.width,
+            height: VoiceSurfacePanelMetrics.pill.height,
+            alignment: .topLeading
+        )
+    }
+
+    /// 「Tab 切换到 [问答] [Agent]」 — the mode switch was previously only
+    /// discoverable from Settings, which is not where anyone is while holding
+    /// a key down.
+    private var modeSwitchRow: some View {
+        HStack(spacing: 7) {
+            Text(OpenTypeL10n.text("Tab 切换到", english: "Tab switches to"))
+                .font(DS.Text.mono())
+                .foregroundStyle(.tertiary)
+
+            ForEach(InputMode.visibleModes.filter { $0 != presentation.mode }) { mode in
+                Text(mode.title)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        DS.Colour.inset,
+                        in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                    )
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 9)
+        .dsHairline(.top)
     }
 
     private var compactContent: some View {
         HStack(spacing: 11) {
             Image(systemName: presentation.state.symbol)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(symbolColor)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(symbolColour)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(presentation.state.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(DS.Text.body(.semibold))
                 Text(presentation.state.overlayDetail(for: presentation.mode))
-                    .font(.system(size: 10, weight: .medium))
+                    .font(DS.Text.caption())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -910,44 +1210,90 @@ private struct OverlayView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
-        .frame(width: 300, height: 60)
+        .frame(
+            width: VoiceSurfacePanelMetrics.compactToast.width,
+            height: VoiceSurfacePanelMetrics.compactToast.height
+        )
     }
 
-    /// The delivery toast while a correction window is open (P0-3): the same
-    /// 完成/已复制 headline, but with the hint that names the gesture and a bar
-    /// that empties exactly as the window does. The bar is the honest part —
-    /// it is why the user can tell at a glance how much of the offer is left,
-    /// rather than having to count seconds.
-    private func correctionHintContent(
-        _ hint: OverlayPresentation.CorrectionHint
+    /// 4C. Delivery, and — while a correction window is open (P0-3) — the
+    /// offer to fix it by voice.
+    ///
+    /// Two changes from the old toast. It says **where the text landed**
+    /// (「已写入 Notes」) rather than 「已复制」, because "copied" was the least
+    /// interesting true thing about a delivery that also went into the app the
+    /// user was typing in; the clipboard copy is demoted to the mono 「也已复制」
+    /// at the right. And the countdown bar and the hint are one row instead of
+    /// two stacked blocks — they are one statement, and stacking them made the
+    /// panel taller than what it had to say.
+    private func deliveryContent(
+        hint: OverlayPresentation.CorrectionHint?
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 11) {
-                Image(systemName: presentation.state.symbol)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(symbolColor)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                // Neutral, not green and not accent: success is the common
+                // case, and colouring it spends attention on the expected
+                // outcome (handoff §Design Tokens).
+                Image(systemName: "checkmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(presentation.state.title)
-                        .font(.system(size: 12.5, weight: .semibold))
-                    Text(hint.text)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                Text(deliveryHeadline)
+                    .font(DS.Text.body(.semibold))
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if presentation.state == .success {
+                    Text(OpenTypeL10n.text("也已复制", english: "Copied too"))
+                        .font(DS.Text.mono())
+                        .foregroundStyle(.tertiary)
                 }
-
-                Spacer(minLength: 0)
             }
 
-            WindowCountdownBar(seconds: hint.seconds)
-                // A re-armed window is a new bar starting full again, not the
-                // old one continuing — new identity, fresh `onAppear`.
-                .id(hint.startedAt)
+            Text(presentation.deliveredText ?? presentation.lastCaption)
+                .font(DS.Text.caption())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            if let hint {
+                HStack(spacing: 9) {
+                    WindowCountdownBar(seconds: hint.seconds)
+                        // A re-armed window is a new bar starting full again,
+                        // not the old one continuing — new identity, fresh
+                        // `onAppear`.
+                        .id(hint.startedAt)
+                    Text(hint.text)
+                        .font(DS.Text.mono())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+                .padding(.top, 9)
+                .dsHairline(.top)
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .frame(width: 392, height: 84, alignment: .leading)
+        .padding(.vertical, 14)
+        .frame(
+            width: VoiceSurfacePanelMetrics.deliveryToast.width,
+            height: VoiceSurfacePanelMetrics.deliveryToast.height,
+            alignment: .topLeading
+        )
+    }
+
+    /// 「已写入 Notes」 when the text went into an app, 「已复制」 when the
+    /// clipboard is genuinely all that happened.
+    private var deliveryHeadline: String {
+        guard presentation.state == .success else {
+            return ProcessingState.copied.title
+        }
+        if let app = presentation.deliveryTargetApp, !app.isEmpty {
+            return OpenTypeL10n.text("已写入 \(app)", english: "Written to \(app)")
+        }
+        return OpenTypeL10n.text("已写入当前输入框", english: "Written to the focused field")
     }
 
     /// The pill's second line: the two-minute warning while it is up, then the
@@ -985,21 +1331,53 @@ private struct OverlayView: View {
     }
 
     private var captionColor: Color {
-        if presentation.recordingWarning != nil { return .orange }
+        if presentation.recordingWarning != nil { return DS.Colour.warningText }
         return presentation.liveTranscript.isEmpty ? .secondary : .primary
     }
 
-    private var modeBadgeTitle: String {
-        presentation.mode.title
+    private var symbolColour: Color {
+        switch presentation.state {
+        case .failure: return DS.Colour.error
+        case .cancelled: return .secondary
+        default: return DS.Colour.accent
+        }
+    }
+}
+
+/// The coloured type tag that replaced the grey capsule: Agent carries its own
+/// identity colour, the two speech modes carry the accent. It is the only
+/// place on the pill where the mode is named, so it has to be readable at a
+/// glance rather than merely present.
+private struct ModeTag: View {
+    let title: String
+    let colour: Color
+
+    init(mode: InputMode) {
+        title = mode.title
+        colour = mode == .agent ? DS.Colour.agent : DS.Colour.accent
     }
 
-    private var symbolColor: Color {
-        switch presentation.state {
-        case .failure: return .red
-        case .cancelled: return .secondary
-        case .success, .copied: return .accentColor
-        default: return .accentColor
+    init(kind: AskPanelState.Kind) {
+        switch kind {
+        case .agent:
+            title = InputMode.agent.title
+            colour = DS.Colour.agent
+        case .ask:
+            title = InputMode.ask.title
+            colour = DS.Colour.accent
         }
+    }
+
+    var body: some View {
+        Text(title)
+            .font(DS.Text.groupLabel())
+            .foregroundStyle(colour)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(
+                colour.opacity(0.12),
+                in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+            )
     }
 }
 
@@ -1019,26 +1397,38 @@ private struct WindowCountdownBar: View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.primary.opacity(0.09))
+                    .fill(DS.Colour.border)
                 Capsule()
-                    .fill(Color.accentColor.opacity(0.85))
+                    .fill(DS.Colour.accent)
                     .frame(width: max(0, proxy.size.width * remaining))
             }
         }
-        .frame(height: 3)
+        .frame(height: 2)
+        .frame(minWidth: 60)
         .onAppear {
             withAnimation(.linear(duration: seconds)) { remaining = 0 }
         }
     }
 }
 
-/// The `processing`/`working` pill: the same footprint as the listening pill,
-/// with three breathing dots where the waveform was, plus (agent only) a
-/// one-line live step ticker.
+/// 4B. What is actually happening, instead of 「正在思考…」.
+///
+/// The old pill said the same six characters for the whole run whether that
+/// was two seconds or two minutes. The one thing somebody waiting wants to
+/// know is what it is doing right now, so the tool call is the content: its
+/// name and arguments in mono, under a header that carries the step number and
+/// how long this has been going.
 private struct WorkingPill: View {
-    let headline: String
-    let modeTitle: String
-    let ticker: String?
+    let kind: AskPanelState.Kind
+    /// What the user said, as the live caption caught it. Empty when live
+    /// captions are off, in which case the row is dropped rather than filled
+    /// with a placeholder.
+    let task: String
+    let toolLine: AgentToolLine.Line?
+    /// What to put on the mono line before any tool has been called.
+    let fallbackLine: String
+    let startedAt: Date?
+    let stepCount: Int
     /// Non-nil only while the surface is showing a stoppable agent run
     /// (`VoiceSurfaceState.stoppableAgentRun`). Separate from the card's
     /// 关闭: closing the panel and stopping the run are different intentions,
@@ -1046,21 +1436,17 @@ private struct WorkingPill: View {
     var onStop: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 11) {
             HStack(spacing: 9) {
-                BouncingDots()
+                BreathingDot(colour: kind == .agent ? DS.Colour.agent : DS.Colour.accent)
 
-                Text(headline)
-                    .font(.system(size: 12.5, weight: .semibold))
-
-                Text(modeTitle)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Color.primary.opacity(0.055), in: Capsule())
+                ModeTag(kind: kind)
 
                 Spacer(minLength: 4)
+
+                if let startedAt {
+                    ElapsedLabel(startedAt: startedAt, stepCount: stepCount)
+                }
 
                 if let onStop {
                     // Plain rather than bordered: a bordered control is ~24pt
@@ -1070,31 +1456,224 @@ private struct WorkingPill: View {
                     // not chrome.
                     Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
                         .buttonStyle(.plain)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Color.accentColor)
+                        .font(DS.Text.caption())
+                        .foregroundStyle(DS.Colour.accent)
                 }
             }
 
-            Text(ticker ?? OpenTypeL10n.text("请稍候…", english: "One moment…"))
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentTransition(.opacity)
-                .animation(.easeOut(duration: 0.16), value: ticker)
+            if !task.isEmpty {
+                Text(task)
+                    .font(DS.Text.body())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 8) {
+                    Image(systemName: "wrench.and.screwdriver")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(DS.Colour.agent)
+                    Text(toolLine.map { "\($0.tool) · \($0.summary)" } ?? fallbackLine)
+                        .font(DS.Text.mono())
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentTransition(.opacity)
+                }
+                IndeterminateBar()
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(
+                DS.Colour.inset,
+                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+            )
+            .animation(.easeOut(duration: 0.16), value: toolLine)
         }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 12)
-        .frame(width: 388, alignment: .leading)
-        .frame(maxHeight: .infinity, alignment: .center)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(
+            width: VoiceSurfacePanelMetrics.pill.width,
+            height: VoiceSurfacePanelMetrics.pill.height,
+            alignment: .topLeading
+        )
     }
 }
 
-/// The agent asking the user something mid-run (T5). Deliberately plain: a
-/// question list with buttons, plus a free-text field for "something else".
-/// The answer encoding is the same whichever control the user touches, so a
-/// richer presentation later changes nothing the agent receives.
+/// 「第 6 步 · 42s」, ticking once a second.
+///
+/// The handoff's 「第 6 / ~9 步」 wants a total, and there is none: `/agent/run`
+/// reports the steps it has taken, never how many it expects. Rather than
+/// invent a denominator the run would then contradict, this prints the step
+/// number alone — the handoff's own instruction for exactly this case.
+private struct ElapsedLabel: View {
+    let startedAt: Date
+    let stepCount: Int
+
+    var body: some View {
+        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+            Text(text(at: context.date))
+                .font(DS.Text.mono())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func text(at now: Date) -> String {
+        let elapsed = OverlayElapsed.short(max(0, now.timeIntervalSince(startedAt)))
+        guard stepCount > 0 else { return elapsed }
+        return OpenTypeL10n.text(
+            "第 \(stepCount) 步 · \(elapsed)",
+            english: "Step \(stepCount) · \(elapsed)"
+        )
+    }
+}
+
+enum OverlayElapsed {
+    /// `42s`, `2m14s`. Seconds-only below a minute because that is the range
+    /// almost every run finishes in, and `0:42` reads as a timestamp.
+    static func short(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        guard total >= 60 else { return "\(total)s" }
+        return "\(total / 60)m\(total % 60)s"
+    }
+
+    /// The same, with one decimal below a minute: a finished run's duration is
+    /// read once and compared, so the tenth is worth the character.
+    static func precise(_ seconds: TimeInterval) -> String {
+        guard seconds >= 60 else {
+            return String(format: "%.1fs", max(0, seconds))
+        }
+        return short(seconds)
+    }
+}
+
+/// Turns one agent progress line into the tool name and argument the pill
+/// shows.
+///
+/// The sidecar emits `Calling opentype__bash({"command":"pandoc a.md -o a.pdf"})`
+/// (`sidecar/src/agent/loop.ts`). Printing that verbatim spends the pill's one
+/// mono line on `Calling opentype__` and a JSON envelope, so the parse is what
+/// makes the line readable — `bash · pandoc a.md -o a.pdf`. Anything that does
+/// not match returns `nil` and the caller falls back to its own copy, rather
+/// than showing a half-parsed string.
+enum AgentToolLine {
+    struct Line: Equatable {
+        let tool: String
+        let summary: String
+    }
+
+    /// The argument keys worth showing, in the order they are preferred.
+    /// JSON objects are unordered once decoded, so "the first argument" is not
+    /// a thing that exists — this names the ones that identify the call.
+    private static let preferredKeys = [
+        "command", "code", "path", "file_path", "pattern", "query", "url", "name"
+    ]
+
+    static func parse(_ detail: String) -> Line? {
+        let prefix = "Calling "
+        guard detail.hasPrefix(prefix),
+              let open = detail.firstIndex(of: "("),
+              detail.hasSuffix(")")
+        else { return nil }
+
+        let rawName = String(detail[detail.index(detail.startIndex, offsetBy: prefix.count)..<open])
+            .trimmingCharacters(in: .whitespaces)
+        guard !rawName.isEmpty else { return nil }
+        let tool = rawName.hasPrefix("opentype__")
+            ? String(rawName.dropFirst("opentype__".count))
+            : rawName
+
+        let argumentsStart = detail.index(after: open)
+        let argumentsEnd = detail.index(before: detail.endIndex)
+        guard argumentsStart <= argumentsEnd else { return Line(tool: tool, summary: "") }
+        let arguments = String(detail[argumentsStart..<argumentsEnd])
+
+        return Line(tool: tool, summary: summarise(arguments))
+    }
+
+    private static func summarise(_ arguments: String) -> String {
+        let trimmed = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "{}" else { return "" }
+
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            for key in preferredKeys {
+                if let value = object[key] as? String, !value.isEmpty {
+                    return collapse(value)
+                }
+            }
+            if let first = object.values.compactMap({ $0 as? String }).first {
+                return collapse(first)
+            }
+        }
+        return collapse(trimmed)
+    }
+
+    /// One line, however many the argument had: the pill is a single row.
+    private static func collapse(_ text: String) -> String {
+        text.split(whereSeparator: \.isNewline)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+/// A 5pt dot breathing at the handoff's 1.4s — the one animation that says
+/// "still going" without claiming to know how far along it is.
+private struct BreathingDot: View {
+    let colour: Color
+    @State private var dim = false
+
+    var body: some View {
+        Circle()
+            .fill(colour)
+            .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
+            .opacity(dim ? 0.35 : 1)
+            .scaleEffect(dim ? 0.82 : 1)
+            .animation(
+                .easeInOut(duration: 1.4).repeatForever(autoreverses: true),
+                value: dim
+            )
+            .onAppear { dim = true }
+    }
+}
+
+/// A 2pt bar for progress that has no fraction. The run reports steps taken,
+/// never steps remaining, so a filled percentage would be a number we made up;
+/// a sweep says "moving" and claims nothing else.
+private struct IndeterminateBar: View {
+    @State private var offset: CGFloat = -0.42
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(DS.Colour.border)
+                Capsule()
+                    .fill(DS.Colour.accent)
+                    .frame(width: proxy.size.width * 0.36)
+                    .offset(x: proxy.size.width * offset)
+            }
+            .clipShape(Capsule())
+        }
+        .frame(height: 2)
+        .onAppear {
+            withAnimation(
+                .easeInOut(duration: 1.4).repeatForever(autoreverses: false)
+            ) {
+                offset = 1.06
+            }
+        }
+    }
+}
+
+/// 4D. The agent asking the user something mid-run (T5).
+///
+/// A task started by voice should be answerable without reaching for the
+/// mouse, so every option carries a number and the number keys are live
+/// (`OverlayController.installQuestionKeyMonitors`). The bottom row is both
+/// the instruction and the escape hatch: type anything else and it goes back
+/// as a custom answer.
 private struct AgentQuestionCard: View {
     let detail: VoiceSurfaceState.AskingDetail
     let onAnswer: (AgentQuestionAnswerItem) -> Void
@@ -1102,79 +1681,124 @@ private struct AgentQuestionCard: View {
 
     @State private var custom = ""
 
+    private var options: [AgentQuestionOption] { detail.question.options ?? [] }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "questionmark.bubble")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text(OpenTypeL10n.text("Agent 有个问题", english: "The agent has a question"))
-                    .font(.system(size: 12.5, weight: .semibold))
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 9) {
+                ModeTag(kind: .agent)
+
+                Text(OpenTypeL10n.text("需要你选一下", english: "Pick one"))
+                    .font(DS.Text.body(.semibold))
+
                 Spacer(minLength: 4)
+
                 Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
+                    .font(DS.Text.caption())
+                    .foregroundStyle(.secondary)
             }
 
             Text(detail.question.question)
-                .font(.system(size: 12))
+                .font(DS.Text.body())
                 .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
 
-            if let text = detail.question.detail, !text.isEmpty {
-                Text(text)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let options = detail.question.options, !options.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(options, id: \.label) { option in
-                        Button {
-                            onAnswer(
-                                AgentQuestionAnswerItem(
-                                    id: detail.question.id,
-                                    selected: [option.label],
-                                    custom: nil
-                                )
-                            )
-                        } label: {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(option.label)
-                                    .font(.system(size: 11.5, weight: .medium))
-                                if let description = option.description, !description.isEmpty {
-                                    Text(description)
-                                        .font(.system(size: 9.5))
-                                        .foregroundStyle(.secondary)
+            if !options.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                        optionRow(option, number: index + 1)
+                            .overlay(alignment: .top) {
+                                if index > 0 {
+                                    Rectangle()
+                                        .fill(DS.Colour.hairline)
+                                        .frame(height: 0.75)
                                 }
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
                 }
-            }
-
-            HStack(spacing: 6) {
-                TextField(
-                    OpenTypeL10n.text("其他…", english: "Something else…"),
-                    text: $custom
+                .background(
+                    DS.Colour.card.opacity(0.6),
+                    in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
                 )
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11))
-                .onSubmit(submitCustom)
-
-                Button(OpenTypeL10n.text("发送", english: "Send"), action: submitCustom)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                        .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                )
             }
+
+            answerRow
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
-        .frame(width: 480, alignment: .leading)
+        .frame(
+            width: VoiceSurfacePanelMetrics.asking(optionCount: options.count).width,
+            alignment: .topLeading
+        )
         .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func optionRow(_ option: AgentQuestionOption, number: Int) -> some View {
+        Button {
+            onAnswer(
+                AgentQuestionAnswerItem(
+                    id: detail.question.id,
+                    selected: [option.label],
+                    custom: nil
+                )
+            )
+        } label: {
+            HStack(spacing: 10) {
+                Text(option.label)
+                    .font(DS.Text.mono(12))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let description = option.description, !description.isEmpty {
+                    Text(description)
+                        .font(DS.Text.mono())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Text("\(number)")
+                    .font(DS.Text.mono())
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The instruction and the "something else" field are the same row: the
+    /// mockup's line reads as a placeholder because that is what it is, which
+    /// keeps a custom answer reachable without a second control.
+    private var answerRow: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "mic.fill")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(DS.Colour.accent)
+
+            TextField(
+                OpenTypeL10n.text(
+                    "按数字键，或按住 ⌥ 直接说",
+                    english: "Press a number, or hold ⌥ and say it"
+                ),
+                text: $custom
+            )
+            .textFieldStyle(.plain)
+            .font(DS.Text.caption())
+            .onSubmit(submitCustom)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(
+            DS.Colour.inset,
+            in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+        )
     }
 
     private func submitCustom() {
@@ -1186,223 +1810,491 @@ private struct AgentQuestionCard: View {
     }
 }
 
-/// Three dots breathing in sequence — the "received, still working" signal
-/// that replaces the waveform once the user stops speaking.
-private struct BouncingDots: View {
-    @State private var animating = false
+/// What a finished card offers to do next, chosen by what the result *is*.
+///
+/// Three generic buttons (复制 / 关闭 / 打开主窗口) answered the question "what
+/// can this panel do" rather than "what would you like to do with this". A run
+/// that produced a file wants to open it; an answer wants to be pushed on.
+enum VoiceResultAction: Equatable {
+    /// A file the run produced, openable with its default app.
+    case openFile(path: String)
+    case copyPath(path: String)
+    /// Both of these are follow-ups in the same conversation, not new modes.
+    case elaborate
+    case rephrase
 
-    var body: some View {
-        HStack(spacing: 3.5) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 5, height: 5)
-                    .scaleEffect(animating ? 1.0 : 0.55)
-                    .opacity(animating ? 1.0 : 0.4)
-                    .animation(
-                        .easeInOut(duration: 0.52)
-                            .repeatForever()
-                            .delay(Double(index) * 0.16),
-                        value: animating
-                    )
+    var title: String {
+        switch self {
+        case .openFile(let path):
+            let ext = (path as NSString).pathExtension.uppercased()
+            guard !ext.isEmpty else {
+                return OpenTypeL10n.text("打开文件", english: "Open file")
             }
+            return OpenTypeL10n.text("打开 \(ext)", english: "Open \(ext)")
+        case .copyPath:
+            return OpenTypeL10n.text("复制路径", english: "Copy path")
+        case .elaborate:
+            return OpenTypeL10n.text("展开说说", english: "Say more")
+        case .rephrase:
+            return OpenTypeL10n.text("换个说法", english: "Put it differently")
         }
-        .frame(width: 20, height: 20)
-        .onAppear { animating = true }
     }
 }
 
-/// The result/failed card the pill morphs into: mode badge, the spoken
-/// query/task as plain user text, the Markdown-rendered answer, a collapsible
-/// agent step list, and the 复制 / 打开主窗口 / 关闭 actions.
+enum VoiceResultActions {
+    /// Prefers a produced file when the run left one behind, since that is the
+    /// thing the user asked for; otherwise the answer's two follow-ups.
+    static func actions(for card: VoiceSurfaceState.ResultCard) -> [VoiceResultAction] {
+        if let path = producedPath(in: card) {
+            return [.openFile(path: path), .copyPath(path: path)]
+        }
+        return [.elaborate, .rephrase]
+    }
+
+    /// A path the run wrote or opened, if the transcript mentions one.
+    ///
+    /// Reads the steps before the body: `opentype__open_file` naming a path is
+    /// direct evidence of a produced file, whereas the answer's prose may just
+    /// be quoting an input. Only absolute or `~`-rooted paths with an
+    /// extension count — a bare word with a dot in it is not a file.
+    static func producedPath(in card: VoiceSurfaceState.ResultCard) -> String? {
+        for step in card.steps.reversed() where step.kind == .toolCall {
+            guard let line = AgentToolLine.parse(step.detail),
+                  line.tool.contains("open_file") || line.tool.contains("write")
+            else { continue }
+            if let path = firstPath(in: line.summary) { return path }
+        }
+        return firstPath(in: card.body)
+    }
+
+    private static let pathPattern = try? NSRegularExpression(
+        pattern: "(?:~|/)[^\\s\"'`,、，。()\\[\\]【】]*\\.[A-Za-z0-9]{1,6}"
+    )
+
+    private static func firstPath(in text: String) -> String? {
+        guard let pathPattern else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        // The last match, not the first: a run that reads one file and writes
+        // another mentions the output last.
+        let matches = pathPattern.matches(in: text, range: range)
+        guard let match = matches.last, let found = Range(match.range, in: text) else {
+            return nil
+        }
+        return String(text[found])
+    }
+}
+
+/// 4E. The result card the pill morphs into — 640×520, and no longer a dead
+/// end.
+///
+/// The composer at the bottom is the point: following up used to mean
+/// dismissing this, opening the main window, finding the thread and speaking
+/// again, which is enough friction that people simply did not. Now the next
+/// thing said or typed continues the same conversation.
 private struct VoiceSurfaceCard: View {
     let card: VoiceSurfaceState.ResultCard
     let failed: Bool
+    /// How long the run took, frozen when the card appeared.
+    let elapsed: TimeInterval?
     let onClose: () -> Void
     let onCopy: (String) -> Void
     let onOpenMainWindow: () -> Void
+    let onFollowUp: (String) -> Void
+    let onFollowUpByVoice: () -> Void
 
     @State private var stepsExpanded = false
+    @State private var draft = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
+        VStack(alignment: .leading, spacing: 0) {
             header
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+                .dsHairline(.bottom)
 
-            Text(card.query)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
-            ScrollView {
-                AssistantMarkdownView(markdown: card.body, fontSize: 13)
-                    .padding(.trailing, 4)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .scrollIndicators(.visible)
-
-            if card.kind == .agent, !card.steps.isEmpty {
-                stepList
-            }
+            content
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             footer
+                .padding(.horizontal, 18)
+                .padding(.top, 12)
+                .padding(.bottom, 16)
+                .dsHairline(.top)
         }
-        .padding(16)
-        .frame(width: 620, height: 480, alignment: .topLeading)
+        .frame(
+            width: VoiceSurfacePanelMetrics.card.width,
+            height: VoiceSurfacePanelMetrics.card.height,
+            alignment: .topLeading
+        )
         .onExitCommand(perform: onClose)
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: card.kind == .agent ? "wand.and.stars" : "questionmark.bubble.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+        HStack(spacing: 10) {
+            ModeTag(kind: card.kind)
 
-            Text(card.kind == .agent
-                ? OpenTypeL10n.text("Agent", english: "Agent")
-                : OpenTypeL10n.text("问答", english: "Ask"))
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.055), in: Capsule())
-
-            HStack(spacing: 5) {
-                Image(systemName: failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(failed ? Color.red : Color.accentColor)
-                Text(failed
-                    ? OpenTypeL10n.text("失败", english: "Failed")
-                    : OpenTypeL10n.text("完成", english: "Done"))
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(failed ? Color.red : Color.secondary)
-            }
+            Text(failed
+                ? OpenTypeL10n.text("失败", english: "Failed")
+                : OpenTypeL10n.text("完成", english: "Done"))
+                .font(DS.Text.body(.semibold))
+                .foregroundStyle(failed ? DS.Colour.error : Color.primary)
 
             Spacer(minLength: 8)
 
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.secondary)
+            if let summary = runSummary {
+                Text(summary)
+                    .font(DS.Text.mono())
+                    .foregroundStyle(.tertiary)
             }
-            .buttonStyle(.plain)
-            .help(OpenTypeL10n.text("关闭", english: "Close"))
+
+            iconButton("arrow.up.forward.app", help: OpenTypeL10n.text(
+                "打开主窗口", english: "Open main window"
+            ), action: onOpenMainWindow)
+
+            iconButton("xmark", help: OpenTypeL10n.text(
+                "关闭", english: "Close"
+            ), action: onClose)
         }
     }
 
-    private var stepList: some View {
-        DisclosureGroup(isExpanded: $stepsExpanded) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(Array(card.steps.enumerated()), id: \.offset) { _, step in
-                        HStack(alignment: .firstTextBaseline, spacing: 7) {
-                            Image(systemName: symbol(for: step.kind))
-                                .font(.system(size: 10.5, weight: .semibold))
+    /// 「9 步 · 24.1s」 — whichever halves exist.
+    private var runSummary: String? {
+        var parts: [String] = []
+        if !card.steps.isEmpty {
+            parts.append(OpenTypeL10n.text(
+                "\(card.steps.count) 步",
+                english: "\(card.steps.count) steps"
+            ))
+        }
+        if let elapsed {
+            parts.append(OverlayElapsed.precise(elapsed))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func iconButton(
+        _ symbol: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var content: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if !card.query.isEmpty {
+                    HStack {
+                        Spacer(minLength: 40)
+                        Text(card.query)
+                            .font(DS.Text.body())
+                            .foregroundStyle(.white)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 9)
+                            .background(DS.Colour.accent, in: UserBubbleShape())
+                    }
+                }
+
+                if !card.steps.isEmpty {
+                    stepLog
+                }
+
+                AssistantMarkdownView(markdown: card.body, fontSize: 13)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.trailing, 4)
+        }
+        .scrollIndicators(.visible)
+    }
+
+    /// The step log is one line until asked otherwise: 「执行了 9 步」 plus the
+    /// tools it used. The full list is available and rarely what is wanted —
+    /// the summary answers "did it do something reasonable" in a glance, which
+    /// is the actual question.
+    private var stepLog: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                stepsExpanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: stepsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 12)
+                    Text(OpenTypeL10n.text(
+                        "执行了 \(card.steps.count) 步",
+                        english: "Ran \(card.steps.count) steps"
+                    ))
+                    .font(DS.Text.caption())
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 8)
+
+                    Text(toolNames)
+                        .font(DS.Text.mono())
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if stepsExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(card.steps.enumerated()), id: \.offset) { index, step in
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(String(format: "%02d", index + 1))
+                                .font(DS.Text.mono())
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 18, alignment: .leading)
+                            Text(AgentToolLine.parse(step.detail)?.tool ?? label(for: step.kind))
+                                .font(DS.Text.mono())
                                 .foregroundStyle(
-                                    step.kind == .error
-                                        ? AnyShapeStyle(.red)
-                                        : AnyShapeStyle(.secondary)
+                                    step.kind == .error ? DS.Colour.error : DS.Colour.agent
                                 )
-                                .frame(width: 14)
-                            Text(step.detail)
-                                .font(.system(size: 11))
-                                .foregroundStyle(step.kind == .error ? .red : .secondary)
-                                .lineLimit(2)
-                                .truncationMode(.tail)
+                                .frame(width: 64, alignment: .leading)
+                                .lineLimit(1)
+                            Text(AgentToolLine.parse(step.detail)?.summary ?? step.detail)
+                                .font(DS.Text.mono())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .padding(.top, 4)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 9)
+                .dsHairline(.top)
             }
-            .frame(maxHeight: 108)
-        } label: {
-            Text(OpenTypeL10n.text(
-                "执行步骤（\(card.steps.count)）",
-                english: "Steps (\(card.steps.count))"
-            ))
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
+        }
+        .background(
+            DS.Colour.inset,
+            in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+        )
+    }
+
+    private var toolNames: String {
+        var seen: [String] = []
+        for step in card.steps where step.kind == .toolCall {
+            guard let tool = AgentToolLine.parse(step.detail)?.tool else { continue }
+            if !seen.contains(tool) { seen.append(tool) }
+        }
+        return seen.prefix(4).joined(separator: " · ")
+    }
+
+    private func label(for kind: AgentProgressStep.Kind) -> String {
+        switch kind {
+        case .thinking: return "think"
+        case .toolCall: return "tool"
+        case .toolResult: return "result"
+        case .error: return "error"
         }
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
-            Button(OpenTypeL10n.text("复制", english: "Copy")) {
-                onCopy(card.body)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
+                    Button(action.title) { perform(action) }
+                        .buttonStyle(.plain)
+                        .font(DS.Text.caption())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 24)
+                        .background(
+                            DS.Colour.inset,
+                            in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                        )
+                }
+
+                Spacer(minLength: 0)
+
+                Button(OpenTypeL10n.text("复制", english: "Copy")) {
+                    onCopy(card.body)
+                }
+                .buttonStyle(.plain)
+                .font(DS.Text.caption())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .frame(height: 24)
+                .background(
+                    DS.Colour.inset,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                )
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
 
-            Button(OpenTypeL10n.text("关闭", english: "Close"), action: onClose)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            composer
+        }
+    }
 
-            Button(
-                OpenTypeL10n.text("打开主窗口", english: "Open main window"),
-                action: onOpenMainWindow
+    private var actions: [VoiceResultAction] {
+        VoiceResultActions.actions(for: card)
+    }
+
+    private func perform(_ action: VoiceResultAction) {
+        switch action {
+        case .openFile(let path):
+            NSWorkspace.shared.open(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+        case .copyPath(let path):
+            onCopy(path)
+        case .elaborate:
+            onFollowUp(OpenTypeL10n.text("展开说说", english: "Say more about that"))
+        case .rephrase:
+            onFollowUp(OpenTypeL10n.text("换个说法", english: "Put that differently"))
+        }
+    }
+
+    private var composer: some View {
+        HStack(alignment: .bottom, spacing: 9) {
+            TextField(
+                OpenTypeL10n.text("接着说，或按住 ⌥ 口述…", english: "Keep going, or hold ⌥ to speak…"),
+                text: $draft,
+                axis: .vertical
             )
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-        }
-    }
+            .textFieldStyle(.plain)
+            .font(DS.Text.body())
+            .lineLimit(1...3)
+            .onSubmit(submitDraft)
+            .padding(.bottom, 4)
 
-    private func symbol(for kind: AgentProgressStep.Kind) -> String {
-        switch kind {
-        case .thinking: return "brain"
-        case .toolCall: return "wrench.and.screwdriver"
-        case .toolResult: return "arrow.turn.down.left"
-        case .error: return "exclamationmark.triangle"
-        }
-    }
-}
-
-private struct ListeningPulse: View {
-    let level: Double
-    @State private var breathing = false
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(Color.accentColor.opacity(0.13))
-                .scaleEffect(breathing ? 1.16 : 0.88)
-                .opacity(breathing ? 0.32 : 0.8)
-            Circle()
-                .fill(Color.accentColor)
-                .frame(width: 7, height: 7)
-                .scaleEffect(0.92 + level * 0.42)
-        }
-        .frame(width: 20, height: 20)
-        .animation(.spring(response: 0.16), value: level)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 0.95).repeatForever()) {
-                breathing = true
+            Button(action: onFollowUpByVoice) {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(DS.Colour.accent)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        DS.Colour.card,
+                        in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                            .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                    )
             }
+            .buttonStyle(.plain)
+            .help(OpenTypeL10n.text("口述追问", english: "Dictate a follow-up"))
+
+            Button(action: submitDraft) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        DS.Colour.accent.opacity(draft.isEmpty ? 0.35 : 1),
+                        in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
+        .padding(.leading, 13)
+        .padding(.trailing, 9)
+        .padding(.vertical, 9)
+        .background(
+            DS.Colour.card.opacity(0.7),
+            in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+        )
+    }
+
+    private func submitDraft() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        draft = ""
+        onFollowUp(text)
     }
 }
 
+/// The user's turn: rounded everywhere except the corner nearest the speaker,
+/// which is what makes a bubble read as coming *from* somewhere.
+///
+/// Drawn by hand rather than with `UnevenRoundedRectangle`, which this app's
+/// macOS 13 floor cannot rely on.
+private struct UserBubbleShape: Shape {
+    private let tail: CGFloat = 4
+
+    func path(in rect: CGRect) -> Path {
+        let radius = min(DS.Radius.card, min(rect.width, rect.height) / 2)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX + radius, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))
+        path.addArc(
+            center: CGPoint(x: rect.maxX - radius, y: rect.minY + radius),
+            radius: radius,
+            startAngle: .degrees(-90),
+            endAngle: .degrees(0),
+            clockwise: false
+        )
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - tail))
+        path.addArc(
+            center: CGPoint(x: rect.maxX - tail, y: rect.maxY - tail),
+            radius: tail,
+            startAngle: .degrees(0),
+            endAngle: .degrees(90),
+            clockwise: false
+        )
+        path.addLine(to: CGPoint(x: rect.minX + radius, y: rect.maxY))
+        path.addArc(
+            center: CGPoint(x: rect.minX + radius, y: rect.maxY - radius),
+            radius: radius,
+            startAngle: .degrees(90),
+            endAngle: .degrees(180),
+            clockwise: false
+        )
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + radius))
+        path.addArc(
+            center: CGPoint(x: rect.minX + radius, y: rect.minY + radius),
+            radius: radius,
+            startAngle: .degrees(180),
+            endAngle: .degrees(270),
+            clockwise: false
+        )
+        path.closeSubpath()
+        return path
+    }
+}
+
+/// Five bars at the handoff's 2.5pt, reacting to level. The pill's only
+/// non-textual element, and the one that makes it obvious the mic is live.
 private struct LiveWaveform: View {
     let level: Double
-    private let weights = [0.48, 0.82, 1.0, 0.68, 0.42]
+    private let weights = [0.44, 0.86, 1.0, 0.62, 0.32]
 
     var body: some View {
         HStack(alignment: .center, spacing: 3) {
             ForEach(Array(weights.enumerated()), id: \.offset) { _, weight in
                 Capsule()
-                    .fill(Color.accentColor)
+                    .fill(DS.Colour.accent)
                     .frame(
-                        width: 3,
-                        height: 5 + max(level, 0.08) * 23 * weight
+                        width: 2.5,
+                        height: 5 + max(level, 0.1) * 22 * weight
                     )
             }
         }
-        .frame(width: 30, height: 28)
+        .frame(width: 26, height: 18)
         .animation(.interactiveSpring(response: 0.12), value: level)
     }
 }

@@ -289,29 +289,52 @@ private struct ReviewPanelView: View {
             .frame(minHeight: 140, maxHeight: .infinity)
             .padding(8)
             .background(
-                Color(nsColor: .textBackgroundColor).opacity(0.5),
-                in: RoundedRectangle(cornerRadius: 10)
+                DS.Colour.card.opacity(0.5),
+                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                    .strokeBorder(DS.Colour.border, lineWidth: 0.75)
             )
 
             footerHint
 
             HStack(spacing: 10) {
                 Button(action: onCancel) {
-                    Label(cancelTitle, systemImage: "xmark")
+                    Text(cancelTitle)
+                        .font(DS.Text.caption())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background(
+                            DS.Colour.card,
+                            in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                        )
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
 
                 Spacer(minLength: 0)
 
                 Button(action: onCommit) {
-                    Label(commitTitle, systemImage: "checkmark")
+                    Text(commitTitle)
+                        .font(DS.Text.caption())
+                        .fontWeight(.medium)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background(
+                            DS.Colour.accent,
+                            in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                        )
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
@@ -319,13 +342,13 @@ private struct ReviewPanelView: View {
         .frame(width: 460)
         .background(
             .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            in: RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous)
+                .strokeBorder(.white.opacity(0.45), lineWidth: 0.75)
         )
-        .tint(AppAccent.primary)
+        .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
         .onExitCommand(perform: onCancel)
     }
@@ -334,15 +357,15 @@ private struct ReviewPanelView: View {
         HStack(spacing: 8) {
             Image(systemName: "text.badge.checkmark")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(DS.Colour.accent)
             Text(OpenTypeL10n.text("复核", english: "Review"))
-                .font(.system(size: 13, weight: .semibold))
+                .font(DS.Text.body(.semibold))
             if presentation.isCorrecting {
                 Spacer(minLength: 8)
                 ProgressView()
                     .controlSize(.small)
                 Text(OpenTypeL10n.text("正在修改…", english: "Correcting…"))
-                    .font(.system(size: 11))
+                    .font(DS.Text.caption())
                     .foregroundStyle(.secondary)
             } else {
                 Spacer(minLength: 8)
@@ -352,8 +375,12 @@ private struct ReviewPanelView: View {
 
     private var footerHint: some View {
         Text(presentation.correctionHint ?? defaultHint)
-            .font(.system(size: 10))
-            .foregroundStyle(presentation.correctionHint == nil ? Color.secondary : Color.orange)
+            .font(DS.Text.caption())
+            .foregroundStyle(
+                presentation.correctionHint == nil
+                    ? Color.secondary
+                    : DS.Colour.warningText
+            )
             .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
     }

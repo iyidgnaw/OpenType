@@ -14,19 +14,29 @@ A local-first AI voice-input tool for macOS. Hold a hotkey, talk, and release �
 
 ## Install
 
-Download `OpenType-<version>-macos-arm64.zip` (~24 MB) from
-[Releases](https://github.com/iyidgnaw/OpenType/releases/latest), unzip it, and
-run this from inside the unzipped folder:
-
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh | zsh
 ```
 
-It installs the app to `/Applications`, installs the dependencies, builds the
-local speech-recognition environment inside the app bundle, and re-signs the
-app. Safe to re-run — a second run keeps a working speech environment rather
-than rebuilding it. Pass `--skip-whisper` to skip local recognition and
-configure a remote transcription service in the app instead.
+It fetches the latest release itself, installs the app to `/Applications`,
+installs the dependencies, builds the local speech-recognition environment
+inside the app bundle, and re-signs the app. Safe to re-run — a second run
+keeps a working speech environment rather than rebuilding it. Pass
+`--skip-whisper` to use a remote transcription service instead (through a pipe
+that is `| zsh -s -- --skip-whisper`).
+
+Want to read it before running it — which is a good habit with any install
+script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh -o install.sh
+less install.sh && zsh install.sh
+```
+
+You can also download the zip (~23 MB) from
+[Releases](https://github.com/iyidgnaw/OpenType/releases/latest) and run the
+`./install.sh` inside it — same script; when it finds an OpenType.app beside
+it, it uses that instead of downloading again.
 
 Two things are left that only you can do:
 

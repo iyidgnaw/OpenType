@@ -24,6 +24,8 @@ script_path=${0:A}
 project_dir=${script_path:h:h}
 cd "$project_dir"
 
+REPO_SLUG="iyidgnaw/OpenType"
+
 step() { print -P "%F{cyan}==>%f $1"; }
 ok()   { print -P "  %F{green}ok%f  $1"; }
 die()  { print -P "%F{red}error:%f $1" >&2; exit 1; }
@@ -72,6 +74,11 @@ That installs the app into /Applications, installs its two dependencies
 (Homebrew's python@3.12 and ffmpeg), and builds the local speech-recognition
 environment. It is safe to re-run.
 
+You did not actually need to download this archive by hand — the same script,
+run straight from the network, fetches the latest release itself:
+
+    curl -fsSL https://raw.githubusercontent.com/$REPO_SLUG/main/scripts/install-release.sh | zsh
+
 Prefer to have a coding agent do it? Give Claude Code / Codex / Cursor this:
 
     Please install OpenType on this Mac. In this folder there's an
@@ -83,7 +90,7 @@ After installing you'll need to grant two macOS permissions (microphone and
 accessibility) and finish a short in-app setup wizard. Plain dictation needs no
 API key; the Ask and Agent modes need an LLM provider key you supply there.
 
-Homepage and source: https://github.com/iyidgnaw/OpenType
+Homepage and source: https://github.com/$REPO_SLUG
 EOF
 
 step "Packing"

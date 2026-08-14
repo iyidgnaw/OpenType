@@ -46,28 +46,22 @@ Don't proceed past this step until I've answered both:
 
 **a) Speech-to-text: local or remote?**
 - **Local** runs entirely on this Mac — private, free, no API key, works offline. Setup installs Homebrew's python@3.12 plus ffmpeg and builds a ~1.1 GB Python environment, so budget a few minutes and a couple of GB of disk. The first transcription then downloads a ~460 MB speech model, once. This is the default and what most people want.
-- **Remote** calls a hosted transcription API instead, and needs a base URL and API key that I'll enter in the app later. If I pick this, pass `--skip-whisper` to the installer in step 4 and skip the Python setup entirely.
+- **Remote** calls a hosted transcription API instead, and needs a base URL and API key that I'll enter in the app later. If I pick this, pass `--skip-whisper` to the installer in step 3 and skip the Python setup entirely.
 
 **b) LLM provider: which one, and do I have an API key ready?**
 Only the Ask and Agent modes need this — plain dictation works with no key at all, so "none for now" is a fine answer. The app has its own setup wizard with a real Test Connection and model picker, so you don't need to configure it yourself; just confirm I have a key ready (Anthropic, OpenAI, DeepSeek, or any OpenAI-compatible endpoint) so I'm not stuck mid-wizard.
 
 Also tell me now, before installing: Agent mode runs shell commands and file operations with no sandbox and no confirmation prompt, and its Stop button is known not to reliably halt tool calls that are already queued. I should hear that before it's on my machine, not after.
 
-## 3. Download the release
+## 3. Run the installer
 
-Get the latest release archive from https://github.com/iyidgnaw/OpenType/releases/latest — the asset is named `OpenType-<version>-macos-arm64.zip`. Download it and unzip it (use `ditto -x -k <zip> <dir>` rather than a GUI unarchiver, so the app's code signature survives intact).
+    curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh | zsh
 
-Inside you'll find `OpenType.app`, `install.sh`, and `INSTALL.md`.
+If I chose remote speech-to-text in step 2, use `| zsh -s -- --skip-whisper` instead.
 
-## 4. Run the installer
+The script fetches the latest release itself, installs the app to /Applications, installs Homebrew's python@3.12 and ffmpeg if missing, builds the local speech environment inside the app bundle, and re-signs the app. It's safe to re-run, and re-running keeps a working speech environment rather than rebuilding it.
 
-From inside the unzipped folder:
-
-    ./install.sh
-
-Add `--skip-whisper` if I chose remote speech-to-text in step 2.
-
-It installs the app to /Applications, installs Homebrew's python@3.12 and ffmpeg if missing, builds the local speech environment inside the app bundle, and re-signs the app. It's safe to re-run, and re-running keeps a working speech environment rather than rebuilding it.
+Show me the script before you run it if I ask — `curl -fsSL <url> -o install.sh` then read it. Don't skip that if I want to see it; running unreviewed code from the network is my call to make, not yours.
 
 Read its output. Its error messages are written to be actionable and each one names the fix. Two things NOT to do when troubleshooting:
 - Don't substitute a bare `python3` if it complains about python@3.12. The system Python is 3.9 and Xcode's bundled one is also wrong; this software needs 3.12 or newer. Install Homebrew's python@3.12 properly instead.
@@ -75,7 +69,7 @@ Read its output. Its error messages are written to be actionable and each one na
 
 If something fails in a way its error message doesn't cover, stop and tell me exactly what broke and what you tried, rather than silently working around it.
 
-## 5. Walk me through permissions
+## 4. Walk me through permissions
 
 Open the app (`open /Applications/OpenType.app`), then guide me through granting both required permissions:
 - **Microphone** — to record my voice.
@@ -85,13 +79,13 @@ macOS should prompt. If it doesn't, or I dismiss one, send me to System Settings
 
 Then confirm with me that the menu bar icon appeared. OpenType runs menu-bar-only with no Dock icon until its main window is opened; opening that window gives it a Dock icon and makes it Cmd+Tab-switchable, and closing it returns to menu-bar-only. "Quit OpenType" is in the menu bar popover.
 
-## 6. Walk me through the in-app wizard
+## 5. Walk me through the in-app wizard
 
 Nothing is configured yet, so opening the main window should show a first-run setup wizard covering the same two choices from step 2: pick the speech-to-text source (entering URL and key if remote), then optionally pick an LLM provider, enter its key, hit Test Connection, and choose a model once it succeeds.
 
 This is the same UI as Settings' "语音识别" / "AI 模型" sections — note that the app's interface is currently Chinese only, and tell me that up front if I don't read Chinese.
 
-## 7. Wrap up
+## 6. Wrap up
 
 Tell me explicitly that everything configured today — speech source, LLM provider, hotkey style — is editable later from Settings, and that nothing requires reinstalling to change.
 

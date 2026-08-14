@@ -14,13 +14,20 @@
 
 ## 安装
 
-从 [Releases](https://github.com/iyidgnaw/OpenType/releases/latest) 下载 `OpenType-<版本>-macos-arm64.zip`（约 24 MB），解压后在该目录里运行：
-
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh | zsh
 ```
 
-它会把 app 装进 `/Applications`、装好依赖、在 app 内部搭建本地语音识别环境，然后重新签名。可以反复运行，重跑时会保留已建好的语音环境。加 `--skip-whisper` 可跳过本地识别，改在应用内配置远程识别服务。
+它会自己抓取最新 release、把 app 装进 `/Applications`、装好依赖、在 app 内部搭建本地语音识别环境，然后重新签名。可以反复运行，重跑时会保留已建好的语音环境。加 `--skip-whisper` 可跳过本地识别改用远程识别服务（管道方式下写成 `| zsh -s -- --skip-whisper`）。
+
+想先看看它到底干了什么再执行——这是个好习惯：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh -o install.sh
+less install.sh && zsh install.sh
+```
+
+也可以从 [Releases](https://github.com/iyidgnaw/OpenType/releases/latest) 手动下载 zip（约 23 MB），解压后运行里面的 `./install.sh`——同一个脚本，识别到 app 就在旁边时会直接用，不再重复下载。
 
 装完还有两件只能你自己做的事：
 

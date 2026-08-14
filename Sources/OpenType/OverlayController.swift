@@ -10,6 +10,18 @@ private final class OverlayPresentation: ObservableObject {
     /// The unified ask/agent surface. `.hidden` hands the panel back to the
     /// legacy transcribe HUD / toast content below.
     @Published var surface: VoiceSurfaceState = .hidden
+    /// Non-nil while the toast on screen *is* the correction-window affordance
+    /// (P0-3) rather than a plain success toast.
+    @Published var correctionHint: CorrectionHint?
+
+    /// The visible half of an armed correction window.
+    struct CorrectionHint: Equatable {
+        let text: String
+        let seconds: TimeInterval
+        /// Identity for the progress bar: a re-armed window is a *new* bar
+        /// that starts full again, not the old one continuing.
+        let startedAt: Date
+    }
 }
 
 /// How `OverlayController.show(...)` should treat the HUD panel for a given
@@ -20,8 +32,34 @@ enum OverlayHideBehavior: Equatable {
     case hideImmediately
     /// Leave it up for `after` seconds, then hide (transient toast states).
     case scheduleHide(after: TimeInterval)
+    /// Leave it up for `after` seconds carrying the correction-window
+    /// affordance (`CorrectionWindow.hintText` plus a bar that empties as the
+    /// window does) instead of the bare success copy — P0-3. Distinct from
+    /// `.scheduleHide` because what changes is *what the toast says*, not only
+    /// how long it stays: a longer-lived 「完成」 would teach nobody that the
+    /// hotkey has temporarily changed meaning.
+    case scheduleHideWithCorrectionHint(after: TimeInterval)
     /// Keep it on screen with no scheduled hide (active in-flight states).
     case keepVisible
+}
+
+extension OverlayHideBehavior {
+    /// How long the panel stays up, for the two cases that schedule a hide.
+    ///
+    /// Exists so that consumers which only care about the *timing* ask once
+    /// here rather than pattern-matching a single case and silently ignoring
+    /// the other — the trap the spec calls out for `presentToast`, where an
+    /// unhandled case does not fail to compile, it just stops restoring the
+    /// preempted voice surface forever.
+    var scheduledHideDelay: TimeInterval? {
+        switch self {
+        case .scheduleHide(let seconds),
+             .scheduleHideWithCorrectionHint(let seconds):
+            return seconds
+        case .hideImmediately, .keepVisible:
+            return nil
+        }
+    }
 }
 
 /// The app's single floating bottom-center panel. It plays two roles:
@@ -48,6 +86,8 @@ enum OverlayHideBehavior: Equatable {
 final class OverlayController {
     private let compactSize = NSSize(width: 300, height: 60)
     private let listeningSize = NSSize(width: 388, height: 96)
+    /// Room for the hint's second line plus the window's progress bar.
+    private let correctionHintSize = NSSize(width: 392, height: 84)
     private let presentation = OverlayPresentation()
     private var panel: NSPanel?
     private var dismissWorkItem: DispatchWorkItem?
@@ -75,6 +115,13 @@ final class OverlayController {
     /// and went.
     private var legacyOnScreen: (state: ProcessingState, mode: InputMode)?
     private var clickOutsideMonitor: Any?
+
+    /// Whether a post-delivery correction window is open right now (P0-3).
+    /// `AppModel` sets it *before* pushing the delivery state, since it is
+    /// what turns that push's success toast into the window's affordance.
+    /// A plain flag rather than the `CorrectionWindow.State` itself: the
+    /// controller decides presentation, never policy.
+    var correctionWindowArmed = false
 
     /// Escape, the 关闭 button, or a click outside a finished card.
     var onRequestDismiss: (() -> Void)?
@@ -204,6 +251,36 @@ final class OverlayController {
         }
     }
 
+    /// The same decision, told whether a correction window is open (P0-3).
+    ///
+    /// Only the two delivery-success toasts change: they *are* the affordance,
+    /// so they stay up for exactly the window's length — 0.9s is not enough
+    /// time to read a hint, let alone select a word and press a key — and the
+    /// duration comes from `CorrectionWindow.windowSeconds` itself so the bar
+    /// cannot promise more time than the hotkey actually honors. Errors,
+    /// cancellations, mode switches and every in-flight state are not the
+    /// affordance and keep the timings above unchanged.
+    ///
+    /// `OutputDeliveryPolicy` can downgrade an insert to clipboard-only at the
+    /// last moment, so `.copied` gets the same treatment as `.success`: which
+    /// of the two toasts was chosen says nothing about whether the delivered
+    /// text is worth fixing.
+    static func hideBehavior(
+        for state: ProcessingState,
+        correctionWindowArmed: Bool
+    ) -> OverlayHideBehavior {
+        guard correctionWindowArmed else { return hideBehavior(for: state) }
+        switch state {
+        case .success, .copied:
+            return .scheduleHideWithCorrectionHint(
+                after: CorrectionWindow.windowSeconds
+            )
+        case .idle, .modeChanged, .listening, .transcribing, .transforming,
+             .inserting, .dispatched, .cancelled, .failure:
+            return hideBehavior(for: state)
+        }
+    }
+
     func updateLiveTranscript(_ text: String) {
         guard presentation.state == .listening else { return }
         presentation.liveTranscript = text
@@ -221,6 +298,7 @@ final class OverlayController {
         legacyOnScreen = nil
         surfaceState = .hidden
         presentation.surface = .hidden
+        presentation.correctionHint = nil
         panel?.orderOut(nil)
     }
 
@@ -230,6 +308,11 @@ final class OverlayController {
         dismissWorkItem?.cancel()
         removeClickOutsideMonitor()
 
+        let behavior = Self.hideBehavior(
+            for: state,
+            correctionWindowArmed: correctionWindowArmed
+        )
+
         presentation.state = state
         presentation.mode = mode
         presentation.surface = .hidden
@@ -237,8 +320,26 @@ final class OverlayController {
             presentation.liveTranscript = ""
             presentation.audioLevel = 0
         }
+        // The affordance and the timing are the same decision, so they are
+        // read off the same answer rather than tested for separately.
+        if case .scheduleHideWithCorrectionHint(let seconds) = behavior {
+            presentation.correctionHint = OverlayPresentation.CorrectionHint(
+                text: CorrectionWindow.hintText,
+                seconds: seconds,
+                startedAt: Date()
+            )
+        } else {
+            presentation.correctionHint = nil
+        }
 
-        let size = state == .listening ? listeningSize : compactSize
+        let size: NSSize
+        if state == .listening {
+            size = listeningSize
+        } else if presentation.correctionHint != nil {
+            size = correctionHintSize
+        } else {
+            size = compactSize
+        }
         let panel = panel ?? makePanel()
         hostingView.frame = NSRect(origin: .zero, size: size)
         panel.setContentSize(size)
@@ -246,10 +347,11 @@ final class OverlayController {
         panel.orderFrontRegardless()
         self.panel = panel
 
-        switch Self.hideBehavior(for: state) {
+        switch behavior {
         case .hideImmediately:
             hide()
-        case .scheduleHide(let seconds):
+        case .scheduleHide(let seconds),
+             .scheduleHideWithCorrectionHint(let seconds):
             legacyOnScreen = (state, mode)
             dismiss(after: seconds)
         case .keepVisible:
@@ -266,6 +368,11 @@ final class OverlayController {
     /// Nothing to preempt (`surfaceState == .hidden`) means this is exactly
     /// the legacy path, and a state that isn't a scheduled-hide toast (only
     /// `.idle` today, which hides immediately) schedules no restore.
+    ///
+    /// The restore delay is taken from `scheduledHideDelay` rather than by
+    /// matching one case: this `guard` is not exhaustiveness-checked, so a
+    /// `case .scheduleHide` that silently failed to match a newer toast case
+    /// would return early and leave the preempted surface off screen forever.
     private func presentToast(state: ProcessingState, mode: InputMode) {
         cancelToastOverride()
         let preempted = surfaceState
@@ -273,7 +380,10 @@ final class OverlayController {
         presentLegacy(state: state, mode: mode)
 
         guard preempted != .hidden,
-              case .scheduleHide(let seconds) = Self.hideBehavior(for: state)
+              let seconds = Self.hideBehavior(
+                for: state,
+                correctionWindowArmed: correctionWindowArmed
+              ).scheduledHideDelay
         else { return }
 
         let item = DispatchWorkItem { [weak self] in
@@ -293,6 +403,8 @@ final class OverlayController {
         presentation.state = lastState
         presentation.mode = lastMode
         presentation.surface = surfaceState
+        // The surface owns the panel again; the toast's hint went with it.
+        presentation.correctionHint = nil
         // `grewFrom: .hidden` suppresses the frame animation: coming back from
         // a toast is not the pill-morphs-into-the-card moment, so it snaps.
         presentSurface(surfaceState, grewFrom: .hidden)
@@ -313,6 +425,7 @@ final class OverlayController {
         self.panel = panel
         // The surface owns the panel from here on; no legacy toast is up.
         legacyOnScreen = nil
+        presentation.correctionHint = nil
 
         let size = VoiceSurfacePanelLayout.size(for: surface)
         let frame = VoiceSurfacePanelLayout.frame(
@@ -441,6 +554,8 @@ private struct OverlayView: View {
             case .hidden:
                 if presentation.state == .listening {
                     listeningContent
+                } else if let hint = presentation.correctionHint {
+                    correctionHintContent(hint)
                 } else {
                     compactContent
                 }
@@ -567,6 +682,43 @@ private struct OverlayView: View {
         .frame(width: 300, height: 60)
     }
 
+    /// The delivery toast while a correction window is open (P0-3): the same
+    /// 完成/已复制 headline, but with the hint that names the gesture and a bar
+    /// that empties exactly as the window does. The bar is the honest part —
+    /// it is why the user can tell at a glance how much of the offer is left,
+    /// rather than having to count seconds.
+    private func correctionHintContent(
+        _ hint: OverlayPresentation.CorrectionHint
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 11) {
+                Image(systemName: presentation.state.symbol)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(symbolColor)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(presentation.state.title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                    Text(hint.text)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            CorrectionWindowProgressBar(seconds: hint.seconds)
+                // A re-armed window is a new bar starting full again, not the
+                // old one continuing — new identity, fresh `onAppear`.
+                .id(hint.startedAt)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(width: 392, height: 84, alignment: .leading)
+    }
+
     private var captionText: String {
         if !presentation.liveTranscript.isEmpty {
             return presentation.liveTranscript
@@ -600,6 +752,33 @@ private struct OverlayView: View {
         case .cancelled: return .secondary
         case .success, .copied: return .accentColor
         default: return .accentColor
+        }
+    }
+}
+
+/// The correction window running out, drawn rather than counted: a bar that
+/// starts full and reaches zero at the same instant the hotkey stops meaning
+/// "correct this selection." Driven by one linear animation over the window's
+/// own duration rather than a ticking timer, so it costs nothing while it runs
+/// and cannot drift away from the deadline it is drawing.
+private struct CorrectionWindowProgressBar: View {
+    let seconds: TimeInterval
+
+    @State private var remaining: CGFloat = 1
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.09))
+                Capsule()
+                    .fill(Color.accentColor.opacity(0.85))
+                    .frame(width: max(0, proxy.size.width * remaining))
+            }
+        }
+        .frame(height: 3)
+        .onAppear {
+            withAnimation(.linear(duration: seconds)) { remaining = 0 }
         }
     }
 }

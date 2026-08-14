@@ -235,6 +235,20 @@ final class AppModel: ObservableObject {
     /// SwiftUI) since this is `AppModel`-internal bookkeeping the panel
     /// itself has no need to see.
     private var reviewSession: ReviewSession?
+    /// The open post-delivery correction window (P0-3), or `nil` when the
+    /// hotkey has its ordinary meaning. Holds the pure
+    /// `CorrectionWindow.State` plus the audit anchors a correction round
+    /// needs — see `CorrectionWindowSession`. Only ever written through
+    /// `armCorrectionWindow`/`updateCorrectionWindow`/`reArmCorrectionWindow`,
+    /// which keep `overlay.correctionWindowArmed` in step with it: a window
+    /// the user cannot see is, per the spec, no window at all.
+    private var correctionWindowSession: CorrectionWindowSession?
+    /// Non-nil for the duration of one in-place correction round: what
+    /// `processCorrection(audioURL:)` needs to route the audio to the Direct
+    /// path rather than the Review panel's. Set at hotkey-press time so the
+    /// selection being corrected is the one that was live *then*, not whatever
+    /// the user happens to have selected when the recording ends.
+    private var inPlaceCorrection: InPlaceCorrectionSession?
     /// Detached, un-awaited units of work for in-flight `/agent/run` calls,
     /// keyed by `AgentRunRecord.id`. Deliberately not awaited by
     /// `process(audioURL:)` — see `dispatchAgentRun(...)` — so a slow Agent
@@ -564,6 +578,32 @@ final class AppModel: ObservableObject {
 
         let context = contextBridge.capture()
         let mode = configuration.selectedMode
+
+        // P0-3: inside the post-delivery correction window, with something
+        // selected in the app that delivery landed in, the hotkey means "fix
+        // this selection" instead of "start a new dictation". Everything that
+        // decides which is which lives in `CorrectionWindow.intent` —
+        // including the deliberate rule that an empty selection does *not*
+        // steal the hotkey from someone who just wants to keep talking.
+        if let session = correctionWindowSession,
+           let selectedText = context.selectedText,
+           CorrectionWindow.intent(
+               lastDeliveryAt: session.window.deliveredAt,
+               now: Date(),
+               selectedText: selectedText,
+               capturedBundleId: session.window.capturedBundleId,
+               frontmostBundleId: context.bundleIdentifier,
+               mode: mode,
+               variant: configuration.transcribeVariant
+           ) == .correctSelection {
+            beginInPlaceCorrectionRecording(
+                selectedText: selectedText,
+                context: context,
+                session: session
+            )
+            return
+        }
+
         if mode.requiresSelection, !contextBridge.accessibilityGranted {
             fail(OpenTypeError.accessibilityRequired)
             return
@@ -605,6 +645,11 @@ final class AppModel: ObservableObject {
         mode: InputMode,
         practice: Bool
     ) {
+        // The single choke point for "a NEW dictation began" — which is what
+        // closes a correction window (P0-3). Deliberately not in
+        // `beginCorrectionRecording`, whose round has to survive long enough
+        // to re-arm the window it belongs to.
+        updateCorrectionWindow(on: .recordingStarted)
         isStartingRecording = true
         capturedContext = context
         activeMode = mode
@@ -659,9 +704,34 @@ final class AppModel: ObservableObject {
                 self.microphonePermission = self.audioRecorder.permissionStatus
                 self.isStartingRecording = false
                 self.isCorrectionRecording = false
+                self.inPlaceCorrection = nil
                 self.fail(error)
             }
         }
+    }
+
+    /// The Direct-mode counterpart (P0-3): the same correction recording, but
+    /// targeting a selection in the *target app* rather than in the Review
+    /// panel. Recording is identical either way — only the bookkeeping set up
+    /// here differs, which is what `processCorrection(audioURL:)` branches on.
+    ///
+    /// The selection is captured now, at press time: it is what the user was
+    /// pointing at when they decided to correct, and it is what gets sent as
+    /// `fullText`. It is *also* re-read at write time — not to retarget the
+    /// paste, but to refuse it if the selection has moved out from under the
+    /// round trip (see `processInPlaceCorrection`).
+    private func beginInPlaceCorrectionRecording(
+        selectedText: String,
+        context: CapturedContext,
+        session: CorrectionWindowSession
+    ) {
+        inPlaceCorrection = InPlaceCorrectionSession(
+            requestId: session.requestId,
+            selectedText: selectedText,
+            context: context,
+            supersedesEventId: session.supersedesEventId
+        )
+        beginCorrectionRecording()
     }
 
     func hotKeyReleased() {
@@ -688,6 +758,7 @@ final class AppModel: ObservableObject {
         isStartingRecording = false
         isPracticeSession = false
         isCorrectionRecording = false
+        inPlaceCorrection = nil
         activeMode = nil
         shortcutBehavior = hotKey.behavior
         hotKey.setRecordingActive(false)
@@ -714,8 +785,20 @@ final class AppModel: ObservableObject {
             || isStartingRecording
             || isCorrectionRecording
             || isBusy
-        guard wasActive else { return }
+        guard wasActive else {
+            // Nothing is in flight, but Esc still means "done with this" for
+            // an open correction window (P0-3): close it and take the hint
+            // toast down. Silently, with no 「已取消」 — after a *successful*
+            // delivery that message would read as if the text had been
+            // un-delivered, which it has not.
+            if correctionWindowSession != nil {
+                updateCorrectionWindow(on: .cancelled)
+                setState(.idle)
+            }
+            return
+        }
 
+        updateCorrectionWindow(on: .cancelled)
         cancel()
 
         let message = OpenTypeL10n.text("已取消", english: "Cancelled")
@@ -1175,6 +1258,14 @@ final class AppModel: ObservableObject {
             isCorrectionRecording = false
         }
 
+        // Two correction paths share this recording, and which one this is was
+        // decided back at hotkey-press time (`hotKeyPressed`): the Review
+        // panel's, or Direct mode's in-place one (P0-3).
+        if let session = inPlaceCorrection {
+            await processInPlaceCorrection(audioURL: audioURL, session: session)
+            return
+        }
+
         guard let session = reviewSession else {
             setState(.idle)
             return
@@ -1199,25 +1290,12 @@ final class AppModel: ObservableObject {
             reviewPanel.beginCorrecting()
             let fullText = reviewPanel.currentText()
 
-            struct CorrectRequestBody: Encodable {
-                let fullText: String
-                let selectionStart: Int
-                let selectionEnd: Int
-                let instruction: String
-            }
-            struct CorrectResponseBody: Decodable { let replacement: String }
-
-            let response: CorrectResponseBody
+            let response: CorrectionResponseBody
             do {
-                response = try await sidecarClient.request(
-                    method: "POST",
-                    path: "/transcribe/correct",
-                    body: CorrectRequestBody(
-                        fullText: fullText,
-                        selectionStart: selection.range.location,
-                        selectionEnd: selection.range.location + selection.range.length,
-                        instruction: instruction
-                    )
+                response = try await requestCorrection(
+                    fullText: fullText,
+                    range: selection.range,
+                    instruction: instruction
                 )
             } catch {
                 reviewPanel.endCorrecting()
@@ -1262,6 +1340,257 @@ final class AppModel: ObservableObject {
             reviewPanel.showHint(ErrorMessagePresenter.message(for: error))
             setState(.idle)
         }
+    }
+
+    private struct CorrectionRequestBody: Encodable {
+        let fullText: String
+        let selectionStart: Int
+        let selectionEnd: Int
+        let instruction: String
+    }
+
+    private struct CorrectionResponseBody: Decodable {
+        let replacement: String
+        /// What this correction also taught the entity dictionary, when it
+        /// qualified (P0-2 — the sidecar omits the key entirely rather than
+        /// sending null). Decoded so the response is read as the shape it
+        /// actually has; the 「已记住」 affordance that will surface it is a
+        /// separate piece of work, so nothing reads this yet.
+        let learned: LearnedTerm?
+
+        struct LearnedTerm: Decodable {
+            let canonicalTerm: String
+            let alias: String
+        }
+    }
+
+    /// The one `POST /transcribe/correct` call, shared by both correction
+    /// paths — the Review panel's and Direct mode's in-place one. `range` is
+    /// UTF-16 code units, which is what the sidecar's JS string slicing means
+    /// by the same integers (see `TextSpanCorrection`).
+    private func requestCorrection(
+        fullText: String,
+        range: NSRange,
+        instruction: String
+    ) async throws -> CorrectionResponseBody {
+        try await sidecarClient.request(
+            method: "POST",
+            path: "/transcribe/correct",
+            body: CorrectionRequestBody(
+                fullText: fullText,
+                selectionStart: range.location,
+                selectionEnd: range.location + range.length,
+                instruction: instruction
+            )
+        )
+    }
+
+    /// One in-place correction round (P0-3): ASR only (never `VoiceModeRouter`
+    /// — the spoken text is always an instruction, never a mode-switch
+    /// command, exactly as in the Review path), then `/transcribe/correct`
+    /// with the selection as the *whole* document, then Cmd+V over the still-
+    /// live selection.
+    ///
+    /// The span is `0..<selectedText.utf16.count` because there is no
+    /// surrounding document: the user pointed at the text to fix, so that text
+    /// is both the context and the target. The replacement then lands via the
+    /// ordinary `ContextBridge.insert` — Cmd+V natively replaces a selection —
+    /// and is copied to the clipboard like every other result, so the always-
+    /// copy invariant holds here too.
+    private func processInPlaceCorrection(
+        audioURL: URL,
+        session: InPlaceCorrectionSession
+    ) async {
+        defer { inPlaceCorrection = nil }
+
+        do {
+            setState(.transcribing)
+            let instruction = try await transcribeLocally(audioURL: audioURL)
+            try Task.checkCancellation()
+
+            setState(.transforming)
+            let selected = session.selectedText
+            let response: CorrectionResponseBody
+            do {
+                response = try await requestCorrection(
+                    fullText: selected,
+                    range: NSRange(
+                        location: 0,
+                        length: (selected as NSString).length
+                    ),
+                    instruction: instruction
+                )
+            } catch {
+                throw OpenTypeError.service(
+                    "修改请求失败：\(error.localizedDescription)"
+                )
+            }
+            try Task.checkCancellation()
+
+            let replacement = response.replacement
+            var completionState: ProcessingState = .success
+
+            // The selection was read at hotkey-press time, but this write
+            // happens an ASR + `/transcribe/correct` round trip later — a
+            // second or more — and `insert` is Cmd+V, which replaces whatever
+            // is selected *now*. So the target is re-read here and the paste
+            // is refused unless it is still the same selection in the same
+            // app. The delivery path guards its own write at write time for
+            // the same reason (`OutputDeliveryPolicy.shouldInsert` against a
+            // freshly read frontmost app); this path needs the stricter of the
+            // two checks, because a replacement derived from one span pasted
+            // over a *different* span destroys text the user never pointed at,
+            // which is worse than landing dictated text in the wrong window.
+            // Downgrading costs nothing: the replacement is copied either way.
+            lastDeliveryNotice = nil
+            let target = contextBridge.capture()
+            let stillTheSameSelection = OutputDeliveryPolicy.shouldInsert(
+                capturedBundleId: session.context.bundleIdentifier,
+                frontmostBundleId: target.bundleIdentifier
+            ) && target.selectedText == session.selectedText
+
+            if stillTheSameSelection {
+                setState(.inserting)
+                do {
+                    try await contextBridge.insert(replacement)
+                } catch {
+                    completionState = .copied
+                }
+            } else {
+                completionState = .copied
+                lastDeliveryNotice = OpenTypeL10n.text(
+                    "选区已改变，纠正结果已复制到剪贴板",
+                    english: "The selection changed, so the correction was copied to the clipboard instead of pasted."
+                )
+            }
+            contextBridge.copyToClipboard(replacement)
+
+            lastResult = replacement
+            lastTranscript = instruction
+            lastApplication = session.context.applicationName
+            lastResultWasPractice = false
+
+            let eventId = UUID()
+            recordAuditEvent(
+                ImmutableAuditEvent(
+                    id: eventId,
+                    requestId: session.requestId,
+                    status: .corrected,
+                    mode: .transcribe,
+                    rawTranscript: instruction,
+                    effectiveInput: replacement,
+                    selectedContext: selected,
+                    result: replacement,
+                    provider: sidecarTextProvider,
+                    model: sidecarTextModel,
+                    error: nil,
+                    supersedesEventId: session.supersedesEventId
+                )
+            )
+
+            // Re-arm rather than end: fixing two words in a row is common, and
+            // the second fix should not cost a re-dictation.
+            reArmCorrectionWindow(after: eventId)
+
+            playFeedbackSound(.done)
+            setState(completionState)
+            scheduleIdle(after: completionState, delay: correctionWindowIdleDelay)
+        } catch is CancellationError {
+            // Whatever cancelled this round has already closed the window
+            // itself — Esc through `cancelActiveVoiceSession`, a superseding
+            // dictation through `beginRecording` — so there is nothing left
+            // here to close.
+            setState(.idle)
+        } catch {
+            // The window keeps running on its original clock (see
+            // `CorrectionWindow.Event.correctionFailed`) — the failure toast
+            // covers the hint while it is up, and whatever seconds are left
+            // are still the user's to retry in.
+            updateCorrectionWindow(on: .correctionFailed)
+            fail(error)
+        }
+    }
+
+    // MARK: - Post-delivery correction window (P0-3)
+
+    /// How long the delivery toast stays up, and therefore how long `state`
+    /// must keep saying so: while a window is open the toast *is* the
+    /// affordance, so letting `state` fall back to idle after the usual second
+    /// would let the next surface push tear the hint down early.
+    private var correctionWindowIdleDelay: TimeInterval {
+        correctionWindowSession == nil ? 1 : CorrectionWindow.windowSeconds
+    }
+
+    /// Opens (or replaces) the window after a delivery. The event carries the
+    /// mode and variant so `CorrectionWindow.reduce` — not this call site —
+    /// decides whether a window exists at all; an ask/agent or Review delivery
+    /// closes any window a previous Direct delivery had opened.
+    private func armCorrectionWindow(
+        mode: InputMode,
+        variant: TranscribeVariant,
+        context: CapturedContext,
+        requestId: UUID,
+        completedEventId: UUID,
+        at now: Date = Date()
+    ) {
+        let window = CorrectionWindow.reduce(
+            correctionWindowSession?.window,
+            on: .delivered(
+                at: now,
+                capturedBundleId: context.bundleIdentifier,
+                mode: mode,
+                variant: variant
+            )
+        )
+        correctionWindowSession = window.map {
+            CorrectionWindowSession(
+                window: $0,
+                requestId: requestId,
+                supersedesEventId: completedEventId
+            )
+        }
+        syncCorrectionWindowAffordance()
+    }
+
+    /// Restarts the clock after a correction landed, chaining the next
+    /// round's `supersedesEventId` to the `.corrected` event just written.
+    private func reArmCorrectionWindow(after eventId: UUID, at now: Date = Date()) {
+        guard let session = correctionWindowSession,
+              let window = CorrectionWindow.reduce(
+                session.window,
+                on: .correctionSucceeded(at: now)
+              )
+        else {
+            correctionWindowSession = nil
+            syncCorrectionWindowAffordance()
+            return
+        }
+        correctionWindowSession = CorrectionWindowSession(
+            window: window,
+            requestId: session.requestId,
+            supersedesEventId: eventId
+        )
+        syncCorrectionWindowAffordance()
+    }
+
+    /// Every other window transition (`.recordingStarted`, `.cancelled`,
+    /// `.correctionFailed`), routed through the same reducer so this side
+    /// holds no opinion of its own about which ones close it.
+    private func updateCorrectionWindow(on event: CorrectionWindow.Event) {
+        guard let session = correctionWindowSession else { return }
+        if let window = CorrectionWindow.reduce(session.window, on: event) {
+            correctionWindowSession?.window = window
+        } else {
+            correctionWindowSession = nil
+        }
+        syncCorrectionWindowAffordance()
+    }
+
+    /// Keeps the HUD's knowledge of the window in step with the window. Per
+    /// the spec, a window the user cannot see does not exist as a feature, so
+    /// these two must never disagree.
+    private func syncCorrectionWindowAffordance() {
+        overlay.correctionWindowArmed = correctionWindowSession != nil
     }
 
     /// Commits the current Review-panel text (Enter button / Cmd+Return) —
@@ -1399,6 +1728,7 @@ final class AppModel: ObservableObject {
             }
         } catch {
             isCorrectionRecording = false
+            inPlaceCorrection = nil
             fail(error)
         }
     }
@@ -2184,7 +2514,7 @@ final class AppModel: ObservableObject {
                 contextBridge.copyToClipboard(result)
             }
 
-            appendAudit(
+            let completedEventId = appendAudit(
                 status: .completed,
                 result: result,
                 // `.transcribe` is a pure ASR passthrough with no sidecar
@@ -2194,9 +2524,21 @@ final class AppModel: ObservableObject {
                 model: effectiveTextModel
             )
 
+            // P0-3: the text is delivered and the user is looking at it — for
+            // the next few seconds the hotkey offers to fix it in place.
+            // Armed *before* the state push below, because that push is what
+            // turns the success toast into the window's visible affordance.
+            armCorrectionWindow(
+                mode: mode,
+                variant: configuration.transcribeVariant,
+                context: capturedContext,
+                requestId: auditRequestID,
+                completedEventId: completedEventId
+            )
+
             playFeedbackSound(.done)
             setState(completionState)
-            scheduleIdle(after: completionState)
+            scheduleIdle(after: completionState, delay: correctionWindowIdleDelay)
         } catch is CancellationError {
             appendAudit(
                 status: .cancelled,
@@ -2743,9 +3085,18 @@ final class AppModel: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    private func scheduleIdle(after completionState: ProcessingState) {
+    /// Lets a settled state fall back to `.idle` once its toast has had its
+    /// time. `delay` is only ever non-default for the correction window
+    /// (P0-3), whose toast outlives the usual second — see
+    /// `correctionWindowIdleDelay`.
+    private func scheduleIdle(
+        after completionState: ProcessingState,
+        delay: TimeInterval = 1
+    ) {
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(
+                nanoseconds: UInt64(max(0, delay) * 1_000_000_000)
+            )
             guard let self, self.state == completionState else { return }
             self.state = .idle
         }
@@ -2824,6 +3175,33 @@ private struct ReviewSession {
     let requestId: UUID
     let capturedContext: CapturedContext
     var lastEventId: UUID
+}
+
+/// An open correction window (P0-3) plus the audit bookkeeping a correction
+/// round appends against. The window itself is pure policy
+/// (`CorrectionWindow.State`); these two fields are what make the `.corrected`
+/// event a *link in the delivery's chain* rather than an orphan — the same
+/// `requestId` grouping and `supersedesEventId` chaining a Review session uses
+/// (§8 of `docs/superpowers/specs/2026-08-09-current-system-state.md`).
+private struct CorrectionWindowSession {
+    var window: CorrectionWindow.State
+    let requestId: UUID
+    /// The event this window's text came from: the delivery's `.completed`
+    /// event, or the previous correction's `.corrected` event once one has
+    /// landed.
+    var supersedesEventId: UUID
+}
+
+/// One in-place correction round — see `AppModel.inPlaceCorrection`.
+private struct InPlaceCorrectionSession {
+    let requestId: UUID
+    /// The whole of what the user selected in the target app. It is both the
+    /// `fullText` sent to `/transcribe/correct` and the span being corrected
+    /// (0..<its UTF-16 length): there is no surrounding document to send,
+    /// because the correction is scoped to exactly what the user pointed at.
+    let selectedText: String
+    let context: CapturedContext
+    let supersedesEventId: UUID
 }
 
 enum AppTab: String, CaseIterable, Identifiable {

@@ -1,123 +1,113 @@
 # OpenType setup prompt (for a new user's coding agent)
 
 Status: a ready-to-copy prompt, not a design doc. This file's job is the
-literal text inside the fenced block below — hand it to a new user, who pastes
-it into their own coding agent (Claude Code, Codex, etc.) to get OpenType
-built, installed, and configured on their Mac. Everything outside the fence
-is context for whoever is maintaining this file, not part of the prompt
-itself.
+literal text inside the fenced block below — a new user pastes it into their
+own coding agent (Claude Code, Codex, etc.) to get OpenType built, installed
+and configured on their Mac. Everything outside the fence is context for
+whoever maintains this file, not part of the prompt itself.
 
 ## Why a prompt instead of a normal install doc
 
-OpenType has no packaged release yet (see the root `README.md`'s delivery
-status) — install currently means clone + build from source, which involves
-enough real steps (Xcode CLI tools, Homebrew, a Python venv pinned to the
-right interpreter, ffmpeg, first-run permissions) that walking a non-engineer
-through it by hand doesn't scale. A coding agent can drive all of that
-directly instead of the user copy-pasting shell commands themselves.
+OpenType has no packaged release (see the root `README.md`) — installing means
+clone and build from source, which involves enough real steps (Xcode CLI tools,
+Homebrew, a Python venv pinned to the right interpreter, ffmpeg, code signing,
+two macOS permission grants) that walking a non-engineer through it by hand
+doesn't scale. A coding agent can drive all of it directly.
 
-## Keeping this in sync
+## Relationship to `scripts/setup.sh`
 
-This prompt intentionally tells the coding agent to *check* `CLAUDE.md` /
-`sidecar/README.md` / `sidecar/src/env.ts` for current provider/env-var
-specifics rather than hardcoding them here, since that surface is under
-active development (see `docs/superpowers/specs/2026-08-09-current-system-state.md`
-§10) and would go stale fast otherwise. The parts that *are* hardcoded below
-(the local-Whisper venv/ffmpeg steps) are hardcoded deliberately — they're
-the two real, previously-hit bugs this session found (see
-`docs/superpowers/specs/2026-08-09-current-system-state.md` §4 and its build
-notes), not surface that's expected to change soon. If `sidecar/whisper-env`'s
-layout or the venv bootstrap path in `scripts/build-app.sh` ever changes,
-update the fenced prompt below to match.
+The mechanical work now lives in `scripts/setup.sh`, which is idempotent and
+has a non-mutating `--check` mode. This prompt deliberately does **not**
+re-specify the commands the script already runs — an agent executing one
+audited script is far more reliable than an agent improvising a dozen shell
+commands, and it keeps this file from drifting out of sync with the build.
 
-## The repo is currently private
+What stays in the prompt is the part a script can't do: asking the user the two
+questions that change what gets installed, interpreting failures, walking them
+through macOS permissions, and driving the in-app wizard. The prompt also tells
+the agent to read `CLAUDE.md` / `sidecar/README.md` for current provider and
+env-var specifics rather than hardcoding them here, since that surface changes.
 
-The clone step below will fail for anyone not already added as a GitHub
-collaborator on `iyidgnaw/OpenType`. Whoever hands this prompt out needs to
-grant access first.
+If `setup.sh` grows or loses a flag, update the fenced prompt to match.
 
 ---
 
 ## The prompt
 
 ```
-You're setting up OpenType, a local-first macOS voice-input app, for me on this Mac. Work through this step by step, and ask me questions where noted rather than guessing or picking a default on my behalf.
+You're setting up OpenType, a local-first macOS voice-input app, for me on this Mac. Work through this step by step. Where a step says to ask me something, actually ask and wait — don't guess or pick a default on my behalf.
 
-## 1. Prerequisites
+## 1. Clone and orient
 
-Confirm/install before proceeding:
-- macOS on Apple Silicon (MLX-Whisper, the local speech-recognition engine, requires it)
-- Xcode command line tools: `xcode-select -p` (install via `xcode-select --install` if missing)
-- Homebrew, with `bun` and `python@3.12` installed: `brew install oven-sh/bun/bun python@3.12` if missing
-- I have git access to the private repo below — I may need to accept a GitHub collaborator invite first
+Clone https://github.com/iyidgnaw/OpenType.git (or the SSH form, git@github.com:iyidgnaw/OpenType.git, if I have SSH keys set up).
 
-## 2. Clone and orient
+Then read the repo's README.md and CLAUDE.md before doing anything else. CLAUDE.md is the authoritative architecture and build reference — if anything below disagrees with it, CLAUDE.md wins and you should tell me about the discrepancy.
 
-Clone git@github.com:iyidgnaw/OpenType.git (use the https form if I don't have SSH keys set up: https://github.com/iyidgnaw/OpenType.git). Then read CLAUDE.md at the repo root in full before doing anything else — it's the authoritative build/architecture reference and takes precedence over anything below if they disagree.
+## 2. Ask me two questions before installing anything
 
-## 3. Ask me two questions before setting anything up
+Don't proceed past this step until I've answered both:
 
-Ask me directly — don't assume defaults, and don't proceed past this step until I've answered both:
-
-**a) Speech-to-text (Whisper): local or remote?**
-- **Local** runs entirely on this Mac via MLX-Whisper — private, free, needs Apple Silicon, and the first real transcription request has a one-time multi-second delay while the model loads (don't mistake that for a hang). This is the default and what most people want.
-- **Remote** calls a hosted transcription API instead — needs a base URL and an API key from me, entered later in the app itself. If I pick this, skip section 4 below (no local Whisper environment needed) and go straight to section 5.
+**a) Speech-to-text: local or remote?**
+- **Local** runs entirely on this Mac via MLX-Whisper — private, free, no API key, works offline. Requires Apple Silicon. Downloads a ~460 MB model the first time I actually transcribe something, and the first request after each launch has a few seconds of model-loading delay. This is the default and what most people want.
+- **Remote** calls a hosted transcription API instead, and needs a base URL and API key that I'll enter in the app later. If I pick this, pass `--skip-whisper` to the setup script in step 3.
 
 **b) LLM provider: which one, and do I have an API key ready?**
-The app now has its own in-app setup wizard for this (real Test Connection + model picking, not just an env file) — you don't need to configure it yourself. Just confirm I have a key ready for whichever provider I want (Anthropic, OpenAI, DeepSeek, or another OpenAI-compatible endpoint), so I'm not stuck mid-wizard later. Check `CLAUDE.md` and `sidecar/README.md` for the current list of supported provider types in case this has changed since this prompt was written.
+This is only needed for Ask and Agent modes — plain dictation works without any key, so "none for now" is a valid answer. The app has its own setup wizard for this with a real Test Connection and model picker, so you don't need to configure it yourself; just confirm I have a key ready (Anthropic, OpenAI, DeepSeek, or any OpenAI-compatible endpoint) so I'm not stuck mid-wizard. Check CLAUDE.md and sidecar/README.md for the current supported provider list in case it changed.
 
-## 4. Set up local Whisper (only if I chose "local" above)
+Also tell me now, before we start, that Agent mode runs shell commands and file operations with no sandbox and no confirmation prompt, and that its Stop button is known not to reliably halt already-queued tool calls. I should know that before I install it, not after.
 
-This is the step most likely to silently go wrong, so follow it exactly and verify each part — don't just run the commands and assume success:
-
-```bash
-cd sidecar
-/opt/homebrew/bin/python3.12 -m venv whisper-env
-```
-
-Use the explicit `/opt/homebrew/bin/python3.12` path, NOT a bare `python3`. On many Macs, plain `python3` silently resolves to Xcode's bundled interpreter (`/Applications/Xcode.app/Contents/Developer/usr/bin/python3`) instead of Homebrew's — it's an old, fragile version tied to wherever Xcode happens to be installed, and mlx-whisper has broken against it before. If `/opt/homebrew/bin/python3.12` doesn't exist, that means `brew install python@3.12` from step 1 didn't complete — go back and fix that first rather than falling back to plain `python3`.
-
-```bash
-whisper-env/bin/pip install mlx-whisper
-brew install ffmpeg
-```
-
-`mlx_whisper.transcribe()` shells out to `ffmpeg` — this is a real, previously-hit failure mode, not a hypothetical. You do NOT need to manually add ffmpeg to any PATH: OpenType's sidecar automatically searches `/opt/homebrew/bin`, `/opt/homebrew/sbin`, and `/usr/local/bin` when it spawns the local Whisper process, specifically because GUI-launched (`open`-launched) apps inherit a minimal PATH that wouldn't otherwise include it. As long as `brew install ffmpeg` put it in one of those three standard locations (it will, by default), this just works — but if `which ffmpeg` doesn't show one of those three paths, flag it to me rather than assuming it'll be found.
-
-Before building the full app, verify the venv actually works on its own:
-
-```bash
-whisper-env/bin/python3 -c "import mlx_whisper; print('ok')"
-```
-
-If this fails, stop and fix it here — don't proceed to a full app build with a broken ASR environment, since the failure will be much harder to diagnose once it's wrapped inside the packaged app.
-
-## 5. Build and install
+## 3. Run the setup script
 
 From the repo root:
 
-```bash
-./scripts/build-app.sh
-open dist/OpenType.app
-```
+    ./scripts/setup.sh
 
-If the build script warns about a missing `sidecar/whisper-env`, that means section 4 wasn't completed (expected if I chose "remote" Whisper) — otherwise go back and fix it.
+Add `--skip-whisper` if I chose remote speech-to-text in step 2.
 
-## 6. First-run permissions
+The script checks prerequisites, installs bun / python@3.12 / ffmpeg via Homebrew, builds the local Whisper environment, and builds dist/OpenType.app. It's idempotent, so re-running it after fixing a problem is safe and cheap.
 
-Tell me to grant these when macOS prompts (or via System Settings → Privacy & Security if I miss the prompt):
-- Microphone (to record my voice)
-- Accessibility (to read/write text in whatever app I'm using)
+Expect it to take a while — it downloads several hundred MB of Python packages and does a full release build. It needs network access for both, plus for SwiftPM to resolve dependencies on the first build.
 
-Confirm the app's menu bar status icon appears. OpenType runs menu-bar-only by default (no Dock icon) until its main window is opened, at which point it gets a Dock icon and becomes Cmd+Tab-switchable; closing that window returns it to menu-bar-only. There's a labelled "Quit OpenType" action in both the menu bar popover and the main window if I need to fully quit it.
+**If it fails, read its error message carefully — they're written to be actionable and each names the fix.** Two things NOT to do when troubleshooting:
+- Don't fall back to a bare `python3` if the script complains about `python@3.12`. The system Python is 3.9 and Xcode's bundled one is also wrong; this stack's floor is 3.12 (scipy requires >=3.12). Install Homebrew's python@3.12 properly instead.
+- Don't skip ffmpeg. MLX-Whisper shells out to it to decode audio, and its absence produces a confusing runtime failure much later rather than an install error. This is a real, previously-hit bug.
 
-## 7. In-app setup wizard
+If something fails in a way the error message doesn't cover, stop and tell me exactly what broke and what you tried, rather than working around it silently.
 
-Since nothing is configured yet, opening OpenType's main window should show a first-run setup wizard covering exactly the two choices from section 3 — walk me through it: pick Whisper mode (and if remote, enter the URL/key), then pick an LLM provider, enter its base URL and API key, hit Test Connection, and pick a model from the list once it succeeds. This is the same UI as Settings' "语音识别"/"AI 模型" sections, so anything set here can be changed later from Settings too — nothing in this whole setup is permanent or requires reinstalling to change.
+## 4. Verify before moving on
+
+Run:
+
+    ./scripts/setup.sh --check
+
+This changes nothing and reports the state of every piece. Everything should report ok (local Whisper lines will be skipped if I chose remote). Don't move on with a failing check — a broken speech environment is much harder to diagnose once it's wrapped inside the packaged app.
+
+## 5. Install and launch
+
+    cp -R dist/OpenType.app /Applications/
+    open /Applications/OpenType.app
+
+Running it from /Applications rather than dist/ keeps macOS permissions stable across future rebuilds.
+
+## 6. Walk me through first-run permissions
+
+Two permissions are required, and the app is useless without both:
+- **Microphone** — to record my voice.
+- **Accessibility** — to read selected text and insert results into whatever app I'm using.
+
+macOS should prompt. If it doesn't, or I dismiss one, send me to System Settings → Privacy & Security; Accessibility in particular usually has to be enabled by hand there. Tell me what to click.
+
+Then confirm with me that the menu bar icon appeared. OpenType runs menu-bar-only with no Dock icon until its main window is opened; opening that window gives it a Dock icon and makes it Cmd+Tab-switchable, and closing it goes back to menu-bar-only. "Quit OpenType" is in the menu bar popover.
+
+## 7. Walk me through the in-app wizard
+
+Nothing is configured yet, so opening the main window should show a first-run setup wizard covering the same two choices from step 2: pick the speech-to-text source (entering URL and key if remote), then optionally pick an LLM provider, enter its key, hit Test Connection, and choose a model once it succeeds.
+
+This is the same UI as Settings' "语音识别" / "AI 模型" sections — note that the app's interface is currently Chinese only, and tell me that up front if I don't read Chinese.
 
 ## 8. Wrap up
 
-Tell me explicitly that everything configured today — Whisper source, LLM provider, hotkey style — is editable later from the app's own Settings, and ask if I want to try recording something to confirm the whole pipeline actually works end to end.
+Tell me explicitly that everything configured today — speech source, LLM provider, hotkey style — is editable later from Settings, and that nothing here requires reinstalling to change.
 
-If anything fails at any step, don't guess past it or silently work around it — tell me exactly what broke, what you tried, and ask before trying something more invasive.
+Then offer to have me try a recording end to end, and remind me the very first transcription downloads the ~460 MB model, so a long pause there is expected exactly once and is not a hang.
 ```

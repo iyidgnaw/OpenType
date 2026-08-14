@@ -6,7 +6,46 @@ OpenType 是一个本地优先的 macOS AI 语音输入工具，把自然口语�
 
 完整使用情景、操作方式和功能边界见 [OpenType 使用说明书](USER_GUIDE.md)。
 
-**新用户想在自己电脑上安装？** 仓库目前是私有的、还没有打包发行版，安装方式是 clone 仓库后本地编译。与其手动照抄命令，可以把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 直接发给你自己的 coding agent（Claude Code、Codex 等），让它帮你把 clone、依赖安装、本地 Whisper 环境搭建、编译、首次授权和应用内设置引导全部走一遍。
+## 安装
+
+还没有打包发行版，安装方式是 clone 仓库后本地编译。有两条路：
+
+**A. 交给你自己的 coding agent（推荐给非工程师）**
+
+把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 直接发给 Claude Code / Codex 等，让它把 clone、依赖安装、本地 Whisper 环境搭建、编译、首次授权和应用内设置引导全部走一遍。那份 prompt 除了驱动下面的脚本，还覆盖了脚本做不了的部分——macOS 两项权限授予、应用内设置向导，以及安装前需要先问你的两个选择（语音识别用本地还是远程、用哪家 LLM）。
+
+**B. 自己动手**
+
+```bash
+git clone https://github.com/iyidgnaw/OpenType.git
+cd OpenType
+./scripts/setup.sh
+```
+
+[`scripts/setup.sh`](scripts/setup.sh) 是幂等的：检查环境 → 用 Homebrew 装好 `bun` / `python@3.12` / `ffmpeg` → 搭建本地 Whisper venv → 编译出 `dist/OpenType.app`。随时可以重跑，也可以用 `--check` 只体检不改动：
+
+| 参数 | 作用 |
+|---|---|
+| `--skip-whisper` | 跳过本地 Whisper 环境（改在应用内配置远程识别服务） |
+| `--no-build` | 只装依赖，不编译 |
+| `--check` | 只检查并报告，不做任何改动 |
+
+编译完成后：
+
+```bash
+cp -R dist/OpenType.app /Applications/
+open /Applications/OpenType.app
+```
+
+（放到 `/Applications` 再运行，可以让 macOS 的权限授权在后续重新编译后依然有效。）
+
+## 环境要求
+
+- **Apple Silicon Mac**：本地语音识别基于 Apple 的 MLX，没有 Intel 版本，这条没有变通办法。
+- **macOS 13 (Ventura) 或更新**。
+- **Xcode 命令行工具**（`xcode-select --install`）和 **[Homebrew](https://brew.sh)**；其余依赖由 `setup.sh` 安装。
+- **约 4 GB 磁盘空间**（Python 机器学习栈和编译产物占大头），另外首次转写会在 `~/.cache/huggingface` 下载约 460 MB 的语音模型——这是一次性开销，不是卡死。
+- **LLM API Key 只有「问答」和「Agent」模式需要**；纯听写不需要任何 Key、不需要联网。
 
 ## 当前交付状态
 
@@ -31,21 +70,24 @@ OpenType 是一个本地优先的 macOS AI 语音输入工具，把自然口语�
 - 面向用户的错误提示，不直接暴露底层技术报错
 - 完整审计：每一次识别、每一次修正（Review 模式下的每次语音纠错）、以及最终完成或取消，都会追加写入本地一份不可修改的 JSONL 审计日志，原始音频本身不保留
 
-## 运行
+## 首次运行
 
-```bash
-./scripts/build-app.sh
-open dist/OpenType.app
-```
-
-首次运行需要授权：
+需要授权两项权限，缺一不可：
 
 1. 麦克风：录制你的语音
 2. 辅助功能：读取选中文字并把结果写回当前输入框
 
+macOS 一般会主动弹窗；如果错过了，去「系统设置 → 隐私与安全性」里补上——辅助功能通常必须在那里手动打开。
+
 如果语音识别和 LLM Provider 都还没配置过，打开主窗口会自动进入设置引导向导（Test Connection + 模型列表选择），配置完才会进入正常界面；之后可以随时在“设置 → 语音识别 / AI 模型”里修改。
 
-**全新环境从零安装**（包括本地 Whisper 环境搭建）建议直接把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 交给你自己的 coding agent 执行，而不是手动照抄下面的命令——那份 prompt 把这一节命令之外容易踩的坑（比如 Whisper 的 Python venv 必须用 Homebrew 的 `python3.12` 而不是 Xcode 自带的、`mlx_whisper` 依赖 `ffmpeg`）都写清楚了。
+日常改完代码后重新编译，直接用 `./scripts/build-app.sh` 即可（`setup.sh` 只在环境需要初始化或修复时才需要重跑）。注意每跑一次 `build-app.sh` 都会在 `sidecar/` 下遗留一个约 57 MB 的 `.bun-build` 临时文件，它们已被 gitignore 但不会自动清理，编译多了记得扫一次：`rm -f sidecar/.*.bun-build`。
+
+## 关于 Agent 模式的风险
+
+Agent 模式会真的执行 shell 命令、Python 和文件操作，**没有沙箱，也不会在执行前向你确认**。这是作者针对自己机器做的明确取舍，不是疏漏——但它意味着 Agent 会照着一句口语指令去做事，包括你并不完全是那个意思的时候。这里还有已知缺陷：按下「停止」并不能可靠地阻止已经排进队列的工具调用继续执行。请据此判断是否要用；如果不接受这个取舍，「听写」和「问答」两个模式不涉及这些。
+
+Agent 最终产出的**文字答案**始终只是草稿——复制到剪贴板，永远不会代你发送出去。
 
 ## 隐私
 

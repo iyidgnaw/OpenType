@@ -2271,6 +2271,15 @@ final class AppModel: ObservableObject {
     /// `memoryEditError`.
     @Published private(set) var mcpEditError: String?
 
+    /// Hands a failure over to whichever surface is better placed to show it.
+    /// `McpServerEditor` calls this after a failed save: it renders the message
+    /// beside its own Save button (the provider panels' idiom), and the
+    /// panel-level banner would otherwise repeat the same sentence at the far
+    /// end of the section.
+    func clearMcpEditError() {
+        mcpEditError = nil
+    }
+
     private struct McpServerMutationResponseBody: Decodable { let server: McpServerSummary }
     private struct McpDeletionResponseBody: Decodable { let deleted: Bool }
     /// The `{ error }` envelope every `/config/mcp*` route answers a 400/404

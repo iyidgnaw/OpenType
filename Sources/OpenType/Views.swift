@@ -2253,10 +2253,16 @@ private struct McpServerPanelView: View {
             // The honest sentence. Anyone adding a server from a half-read
             // README needs to know what the grant actually is before they paste
             // a command in, so it sits above the list, not in a tooltip.
+            //
+            // It names the P1-6 confirmation only to say it does not apply
+            // here: `classifyCommandRisk` inspects `opentype__bash` and
+            // `opentype__python` arguments and returns "safe" for every other
+            // tool, MCP included. Mentioning the guard without that limit would
+            // hand these tools a protection they do not have.
             Label(
                 OpenTypeL10n.text(
-                    "这些工具和内置工具一样，直接在你的电脑上运行，没有沙箱；除少数已知的破坏性 shell 命令会先弹窗确认外，它们做的事不会再经过你同意。只添加你自己信任的服务器。",
-                    english: "Those tools run directly on your Mac with no sandbox, exactly like the built-in ones — and apart from a few named destructive shell commands that ask first, what they do is not confirmed with you. Only add servers you trust."
+                    "这些工具和内置工具一样，直接在你的电脑上运行，没有沙箱。OpenType 只在自己的 shell／Python 工具跑到少数几条点名的破坏性命令时才会弹窗问你，这条检查不覆盖 MCP 工具——这里加进来的服务器，它的工具做什么都不会再经过你同意。只添加你自己信任的服务器。",
+                    english: "These tools run directly on your Mac with no sandbox, exactly like the built-in ones. OpenType asks before a few named destructive commands in its own shell/Python tools, but that check does not cover MCP tools — whatever a server you add here does, it does without asking you. Only add servers you trust."
                 ),
                 systemImage: "exclamationmark.triangle.fill"
             )
@@ -2478,6 +2484,17 @@ private struct McpSecretEntry: Identifiable, Equatable {
         return false
     }
 
+    /// The key as submitted. A `.typed` key is trimmed, because the user may
+    /// have left a stray space around something they typed. A `.stored` key is
+    /// sent back **exactly** as it arrived: the sidecar matches masks per key,
+    /// so normalising one here would leave the mask with no stored counterpart
+    /// to resolve against — and a mask that fails to resolve is written as that
+    /// key's literal value. The key is not editable, so there is nothing to
+    /// normalise anyway.
+    var submittedKey: String {
+        isStored ? key : key.trimmingCharacters(in: .whitespaces)
+    }
+
     /// What goes into the request. For a `.stored` entry this is the mask, and
     /// sending it verbatim is exactly how the sidecar is told "unchanged" —
     /// it resolves a value equal to the stored mask, for that same server and
@@ -2525,6 +2542,12 @@ private struct McpServerEditor: View {
     @State private var testResult: McpTestResultSummary?
     @State private var isTesting = false
     @State private var isSaving = false
+    /// Why the last Save from *this* form failed. Held locally, and shown next
+    /// to the Save button, the way `WhisperSetupContent`/`LLMProviderSetupContent`
+    /// do it — the panel-level banner sits above the whole server list, which
+    /// is the wrong end of the section to explain a button the user just
+    /// pressed at the bottom of it.
+    @State private var saveError: String?
     @State private var didSeed = false
 
     var body: some View {
@@ -2620,6 +2643,13 @@ private struct McpServerEditor: View {
                 .disabled(isSaving)
             }
 
+            if let saveError {
+                Text(saveError)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if renameBlocksTest {
                 Text(OpenTypeL10n.text(
                     "改名后请先保存，再测试连接：已保存的密钥是按原来的名字存的。",
@@ -2708,7 +2738,7 @@ private struct McpServerEditor: View {
         }
 
         let entries = activeEntries
-        if entries.contains(where: { $0.key.trimmingCharacters(in: .whitespaces).isEmpty }) {
+        if entries.contains(where: { $0.submittedKey.isEmpty }) {
             return OpenTypeL10n.text("有一行还没填名字", english: "One row has no name yet")
         }
         // An empty replacement would be written as an empty secret — almost
@@ -2719,7 +2749,10 @@ private struct McpServerEditor: View {
         }) {
             return OpenTypeL10n.text("有一项的值还没填", english: "One value is still empty")
         }
-        let keys = entries.map { $0.key.trimmingCharacters(in: .whitespaces) }
+        // Compared as *submitted*, so this catches exactly the collisions the
+        // request would actually contain — one of which would otherwise silently
+        // drop an entry when the dictionary is built below.
+        let keys = entries.map(\.submittedKey)
         if Set(keys).count != keys.count {
             return OpenTypeL10n.text("有重复的名字", english: "Two rows share a name")
         }
@@ -2738,7 +2771,7 @@ private struct McpServerEditor: View {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         var map: [String: String] = [:]
         for entry in activeEntries {
-            map[entry.key.trimmingCharacters(in: .whitespaces)] = entry.submittedValue
+            map[entry.submittedKey] = entry.submittedValue
         }
         if transport == .stdio {
             let args = argsText
@@ -2778,6 +2811,7 @@ private struct McpServerEditor: View {
 
     private func save() {
         isSaving = true
+        saveError = nil
         let candidate = request()
         Task { @MainActor in
             let ok: Bool
@@ -2794,6 +2828,13 @@ private struct McpServerEditor: View {
                 // dropped (a transport switch clears the other half), and those
                 // masks would then save as literal values.
                 onDone()
+            } else {
+                // Take the message off the model and clear it there, so the one
+                // sentence appears once — here, beside the button that produced
+                // it — rather than twice. The panel-level banner stays for the
+                // failures that have no form to land in, i.e. a failed delete.
+                saveError = model.mcpEditError
+                model.clearMcpEditError()
             }
         }
     }

@@ -25,6 +25,8 @@ project_dir=${script_path:h:h}
 cd "$project_dir"
 
 REPO_SLUG="iyidgnaw/OpenType"
+INSTALL_URL="https://opentype-site.vercel.app/install"
+AGENT_URL="https://opentype-site.vercel.app/agent"
 
 step() { print -P "%F{cyan}==>%f $1"; }
 ok()   { print -P "  %F{green}ok%f  $1"; }
@@ -54,41 +56,43 @@ codesign --force --sign - \
 codesign --verify --strict "$app_dir" || die "re-signed bundle fails verification"
 ok "signature valid"
 
+# The archive carries the app and a note, not the installer: install.sh always
+# fetches the current release itself, so a copy shipped inside one particular
+# release would be a stale copy of a script whose whole job is to go get the
+# newest thing.
 step "Staging the archive contents"
 rm -rf "$project_dir/dist/release"
 mkdir -p "$staging"
 ditto "$app_dir" "$staging/OpenType.app"
-cp "$project_dir/scripts/install-release.sh" "$staging/install.sh"
-chmod +x "$staging/install.sh"
 
 cat > "$staging/INSTALL.md" <<EOF
 # OpenType $version — install
 
 Requires an Apple Silicon Mac running macOS 13 or newer.
 
-Open Terminal, \`cd\` into this folder, and run:
+**Do not install by dragging OpenType.app into /Applications.** On its own it
+cannot transcribe anything: speech recognition needs a Python environment that
+has to be built on this Mac, because a prebuilt one hardcodes absolute paths to
+the machine that created it and will not run anywhere else.
 
-    ./install.sh
+Open Terminal and run:
 
-That installs the app into /Applications, installs its two dependencies
-(Homebrew's python@3.12 and ffmpeg), and builds the local speech-recognition
-environment. It is safe to re-run.
+    curl -fsSL $INSTALL_URL | zsh
 
-You did not actually need to download this archive by hand — the same script,
-run straight from the network, fetches the latest release itself:
+That fetches the current release, installs it into /Applications, installs the
+dependencies (Homebrew's python@3.12 and ffmpeg), builds the speech
+environment, and signs the result. It asks where speech recognition should
+run — press Return for the on-device default. It is safe to re-run.
 
-    curl -fsSL https://raw.githubusercontent.com/$REPO_SLUG/main/scripts/install-release.sh | zsh
+Prefer to have a coding agent do it, permissions and in-app setup included?
+Give Claude Code / Codex / Cursor this:
 
-Prefer to have a coding agent do it? Give Claude Code / Codex / Cursor this:
+    Please fetch the instructions at $AGENT_URL
+    and follow them to install OpenType on this Mac for me.
 
-    Please install OpenType on this Mac. In this folder there's an
-    OpenType.app and an install.sh — read install.sh, run it, and then walk
-    me through granting the microphone and accessibility permissions and
-    finishing the app's first-run setup wizard.
-
-After installing you'll need to grant two macOS permissions (microphone and
-accessibility) and finish a short in-app setup wizard. Plain dictation needs no
-API key; the Ask and Agent modes need an LLM provider key you supply there.
+Afterwards you grant two macOS permissions (microphone and accessibility) and
+finish a short in-app wizard. Plain dictation needs no API key; the Ask and
+Agent modes need an LLM provider key you supply there.
 
 Homepage and source: https://github.com/$REPO_SLUG
 EOF

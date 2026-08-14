@@ -14,20 +14,28 @@
 
 ## 安装
 
+在终端里粘贴这一行：
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh | zsh
+curl -fsSL https://opentype-site.vercel.app/install | zsh
 ```
 
-它会自己抓取最新 release、把 app 装进 `/Applications`、装好依赖、在 app 内部搭建本地语音识别环境，然后重新签名。可以反复运行，重跑时会保留已建好的语音环境。加 `--skip-whisper` 可跳过本地识别改用远程识别服务（管道方式下写成 `| zsh -s -- --skip-whisper`）。
+它会自己抓取最新 release、把 app 装进 `/Applications`、装好依赖、搭建本地语音识别环境，然后重新签名。全程带编号步骤和进度显示，可以反复运行——重跑时会保留已建好的语音环境而不是重来一遍。
 
-想先看看它到底干了什么再执行——这是个好习惯：
+安装过程中会问你**语音识别放在哪里跑**：默认在本机（免费、离线、隐私，但要多花几分钟装约 1.1 GB 的 Python 环境），或者用远程服务（现在不用装东西，但之后必须在 app 里填转写服务的 URL 和 API Key，而且每次录音都要上传，明显更慢）。不确定就直接按回车用默认的本机识别。
+
+也可以把这句话交给 Claude Code / Codex / Cursor，让它替你走完全程（包括两项 macOS 权限授予和应用内设置向导）：
+
+> 请获取 https://opentype-site.vercel.app/agent 这个地址里的说明，然后照着执行，帮我把 OpenType 装好
+
+想先读一遍脚本再执行——对任何安装脚本这都是个好习惯：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh -o install.sh
+curl -fsSL https://opentype-site.vercel.app/install -o install.sh
 less install.sh && zsh install.sh
 ```
 
-也可以从 [Releases](https://github.com/iyidgnaw/OpenType/releases/latest) 手动下载 zip（约 23 MB），解压后运行里面的 `./install.sh`——同一个脚本，识别到 app 就在旁边时会直接用，不再重复下载。
+[Releases](https://github.com/iyidgnaw/OpenType/releases/latest) 里的 zip 只包含 app 本身；安装请走上面的脚本，它需要在你的机器上现场搭建 Python 环境（原因见下方「从源码构建」）。
 
 装完还有两件只能你自己做的事：
 

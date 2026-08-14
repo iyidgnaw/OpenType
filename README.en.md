@@ -14,29 +14,39 @@ A local-first AI voice-input tool for macOS. Hold a hotkey, talk, and release �
 
 ## Install
 
+Paste this into Terminal:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh | zsh
+curl -fsSL https://opentype-site.vercel.app/install | zsh
 ```
 
 It fetches the latest release itself, installs the app to `/Applications`,
-installs the dependencies, builds the local speech-recognition environment
-inside the app bundle, and re-signs the app. Safe to re-run — a second run
-keeps a working speech environment rather than rebuilding it. Pass
-`--skip-whisper` to use a remote transcription service instead (through a pipe
-that is `| zsh -s -- --skip-whisper`).
+installs the dependencies, builds the local speech-recognition environment, and
+re-signs the app — reporting a numbered step for each phase. Safe to re-run: a
+second run keeps a working speech environment rather than rebuilding it.
 
-Want to read it before running it — which is a good habit with any install
-script:
+It asks **where speech recognition should run**: on this Mac by default (free,
+offline, private, but it adds a few minutes and about 1.1 GB of Python), or on
+a remote service (nothing extra now, but you must then paste a transcription
+API URL and key into the app, and every recording is uploaded, so it is
+noticeably slower). Press Return for the default if you're not sure.
+
+You can also hand this sentence to Claude Code, Codex, or Cursor and let it do
+the whole thing, permissions and in-app wizard included:
+
+> Please fetch the instructions at https://opentype-site.vercel.app/agent and
+> follow them to install OpenType on this Mac for me
+
+Want to read the script first — a good habit with any install script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iyidgnaw/OpenType/main/scripts/install-release.sh -o install.sh
+curl -fsSL https://opentype-site.vercel.app/install -o install.sh
 less install.sh && zsh install.sh
 ```
 
-You can also download the zip (~23 MB) from
-[Releases](https://github.com/iyidgnaw/OpenType/releases/latest) and run the
-`./install.sh` inside it — same script; when it finds an OpenType.app beside
-it, it uses that instead of downloading again.
+The zip attached to a [release](https://github.com/iyidgnaw/OpenType/releases/latest)
+holds only the app itself. Install through the script above: it has to build
+the Python environment on your machine (see "Build from source" for why).
 
 Two things are left that only you can do:
 

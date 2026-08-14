@@ -46,7 +46,7 @@ less install.sh && zsh install.sh
 
 > 发布包是 ad-hoc 签名、**未经 Apple 公证**的。`install.sh` 会替你清掉下载隔离标记，正常流程不会看到 Gatekeeper 警告；但这也意味着你在信任本仓库作者，介意的话请从源码自行构建。
 
-**不想自己盯着这套流程**，可以把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 交给 Claude Code / Codex 等，让它把下载、安装、权限授予和设置向导全程带你走一遍。
+装完之后想细看每个模式怎么用、快捷键怎么配，见 [OpenType 使用说明书](USER_GUIDE.md)。
 
 ## 依赖
 

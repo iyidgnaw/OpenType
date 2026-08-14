@@ -64,10 +64,8 @@ and a long pause there is not a crash.
 > Gatekeeper warning — but that also means you are trusting this repository's
 > author. If you would rather not, build from source instead.
 
-**Prefer not to babysit this?** Hand the prompt in
-[`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md)
-to Claude Code, Codex, or Cursor and it will walk you through downloading,
-installing, permissions, and the setup wizard.
+For a walkthrough of each mode and how to configure the hotkey, see the
+[user guide](USER_GUIDE.md) — currently written in Chinese only.
 
 ## Requirements
 

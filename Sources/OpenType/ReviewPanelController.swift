@@ -217,6 +217,11 @@ final class ReviewPanelController {
             backing: .buffered,
             defer: false
         )
+        // A panel is its own window and does not inherit `NSApp.appearance`,
+        // so without this it kept the system's dark palette while the rest of
+        // the app was pinned light — the same split that made the menu bar
+        // popover draw white text on a white sheet.
+        panel.appearance = NSAppearance(named: .aqua)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.level = .floating

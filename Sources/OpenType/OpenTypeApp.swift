@@ -178,6 +178,12 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         popover.animates = true
         popover.contentSize = NSSize(width: 300, height: 384)
         popover.delegate = self
+        // `NSApp.appearance` does not reach a popover's own window, so in dark
+        // mode the popover drew a light chrome around content whose `.primary`
+        // still resolved to white — white text on a white sheet, everything
+        // unreadable except the one label sitting on the accent fill. Set here
+        // as well, so the two halves agree.
+        popover.appearance = NSAppearance(named: .aqua)
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView(model: model) { [weak self] in
                 self?.showMainWindow()

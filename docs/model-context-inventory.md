@@ -312,6 +312,21 @@ Use opentype__read_file or opentype__grep on <path> to read the rest.
 目录 0700、文件 0600 且以 `wx` 独占创建（防符号链接重定向）。
 工具名与 runId 都经消毒后才进路径。
 
+**被拒绝的调用也走同一条回灌路径**（P1-6）。自 `/agent/run` 接上
+`createPromptingApprovalPolicy` 起，`withApproval` 那条一直存在但从未被触发的拒绝文案
+真的会到达模型，形式是一条普通的 `role: "tool"` 结果，而不是异常：
+
+```
+Tool call to opentype__bash was denied by the approval policy: the user denied it.
+```
+
+四种结局各有自己的后半句（`the user denied it` / `the request was withdrawn` /
+`no approval channel was available`），这个区分是有用途的——「联系不上你」和「你说了不」
+对模型意味着不同的下一步。**必须是工具结果而不是抛错**：拒绝是为了让用户在这一刻掌舵，
+把它变成崩溃恰好取消了掌舵本身。
+
+**Token 成本**：约 20 token，且只在被拒绝时出现；安全调用不产生任何额外上下文。
+
 ---
 
 ### 3.7 重复调用劝告（`src/agent/repeatGuard.ts`，仅 agent）

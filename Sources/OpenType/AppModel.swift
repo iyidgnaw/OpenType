@@ -296,6 +296,15 @@ final class AppModel: ObservableObject {
     private var runningAgentTasks: [UUID: Task<Void, Never>] = [:]
     private let agentNotificationDelegate = AgentNotificationDelegate()
 
+    /// The pre-dispatch confirmation currently on screen (P1-6), or `nil` when
+    /// no task is waiting to go out. Its presence is also what gives Esc its
+    /// temporary second meaning — see `cancelActiveVoiceSession()`.
+    private var pendingDispatch: DispatchConfirmation.Pending?
+    /// When Esc landed during that window. Kept as a timestamp rather than a
+    /// bool so the seam can judge it against the window's own bounds instead of
+    /// trusting whoever set it.
+    private var pendingDispatchEscapePressedAt: Date?
+
     /// Consecutive unexpected-sidecar-termination count driving the bounded
     /// auto-restart backoff (`SidecarSupervisor.restartDecision`). Reset to 0 on
     /// a successful restart and on a manual restart.
@@ -417,6 +426,13 @@ final class AppModel: ObservableObject {
             guard let state = self?.agentPanelState,
                   let runID = UUID(uuidString: state.runId) else { return }
             self?.cancelAgentRun(runID)
+        }
+        // P1-6: Esc while the pre-dispatch confirmation is up. Recorded rather
+        // than acted on — `DispatchConfirmation.decision` judges the timestamp
+        // against the window, so a keypress that arrives a hair late reads as
+        // "too late" instead of stopping a task that already went out.
+        self.overlay.onCancelPendingDispatch = { [weak self] in
+            self?.recordPendingDispatchEscape()
         }
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
@@ -817,6 +833,17 @@ final class AppModel: ObservableObject {
     /// recording ends) guarantees `audioRecorder.cancel()` here can never
     /// delete a file that transcription is still reading.
     func cancelActiveVoiceSession() {
+        // While a task is waiting to go out (P1-6) Esc means exactly one thing:
+        // don't send that. The recording is already over and the transcript is
+        // already in hand, so there is nothing to tear down — recording the
+        // keypress and letting the window resolve on its own terms is both
+        // narrower and the only reading that produces the 「未下发」 the user
+        // is asking for rather than a generic 「已取消」.
+        if pendingDispatch != nil {
+            recordPendingDispatchEscape()
+            return
+        }
+
         let wasActive = state == .listening
             || isStartingRecording
             || isCorrectionRecording
@@ -2223,6 +2250,181 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - MCP server configuration (P2-13)
+    //
+    // Thin wrappers around the sidecar's `/config/mcp*` endpoints
+    // (`sidecar/src/agent/mcpConfigRoutes.ts`), in the same shape as the
+    // provider section below: call the sidecar, then reconcile local state.
+    // Until this panel existed, `OPENTYPE_MCP_SERVERS` was the only way to
+    // attach MCP tools to Agent mode -- and a packaged `.app` user has no way
+    // to set an env var, so the capability was unreachable outside a dev
+    // checkout.
+    //
+    // Everything MCP-related on this type lives inside this block, state
+    // included, so it stays one clearly delimited section.
+
+    /// Last `GET /config/mcp`. `nil` means "not fetched yet" (the panel shows a
+    /// loading-ish empty state) as distinct from "fetched, no servers".
+    @Published private(set) var mcpConfig: McpConfigSummary?
+    /// Last failure from an MCP panel edit (add/edit/delete/test), shown
+    /// in-place and cleared by the next successful one -- same contract as
+    /// `memoryEditError`.
+    @Published private(set) var mcpEditError: String?
+
+    private struct McpServerMutationResponseBody: Decodable { let server: McpServerSummary }
+    private struct McpDeletionResponseBody: Decodable { let deleted: Bool }
+    /// The `{ error }` envelope every `/config/mcp*` route answers a 400/404
+    /// with. Worth decoding rather than falling back to a generic message: the
+    /// sidecar's validation errors here ("An MCP server named ... already
+    /// exists", "name must contain only letters, digits ...") name exactly the
+    /// field the user has to fix.
+    private struct McpErrorEnvelope: Decodable { let error: String }
+
+    /// Refreshes the Settings "MCP 服务器" panel. Like the memory panel, this
+    /// backs a convenience display rather than the recording path, so a
+    /// sidecar hiccup leaves the last-known list on screen and logs, instead of
+    /// throwing or blanking the panel.
+    func refreshMcpServers() async {
+        do {
+            mcpConfig = try await sidecarClient.request(method: "GET", path: "/config/mcp")
+        } catch {
+            print("OpenType: failed to fetch MCP servers from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// `POST /config/mcp`. The response carries the stored (masked) server, so
+    /// the row is folded in immediately; the follow-up refresh is what picks up
+    /// `configured`/`source` flipping from the env fallback to the user's own
+    /// saved list on the very first save.
+    @discardableResult
+    func createMcpServer(_ request: McpServerRequest) async -> Bool {
+        do {
+            let response: McpServerMutationResponseBody = try await sidecarClient.request(
+                method: "POST",
+                path: "/config/mcp",
+                body: request
+            )
+            applyMcpServer(response.server, replacing: nil)
+            mcpEditError = nil
+            await refreshMcpServers()
+            return true
+        } catch {
+            recordMcpEditFailure("create", error)
+            return false
+        }
+    }
+
+    /// `PUT /config/mcp/:name` -- a **replace**, not a patch: whatever the
+    /// request omits is gone afterwards. `name` is the server's current name
+    /// (the one the URL addresses); `request.name` may differ, which is how a
+    /// rename is expressed, so the local fold is keyed on the old name.
+    @discardableResult
+    func updateMcpServer(name: String, _ request: McpServerRequest) async -> Bool {
+        do {
+            let response: McpServerMutationResponseBody = try await sidecarClient.request(
+                method: "PUT",
+                path: "/config/mcp/\(Self.mcpPathComponent(name))",
+                body: request
+            )
+            applyMcpServer(response.server, replacing: name)
+            mcpEditError = nil
+            await refreshMcpServers()
+            return true
+        } catch {
+            recordMcpEditFailure("update", error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteMcpServer(name: String) async -> Bool {
+        do {
+            let _: McpDeletionResponseBody = try await sidecarClient.request(
+                method: "DELETE",
+                path: "/config/mcp/\(Self.mcpPathComponent(name))"
+            )
+            mcpEditError = nil
+            await refreshMcpServers()
+            return true
+        } catch {
+            recordMcpEditFailure("delete", error)
+            return false
+        }
+    }
+
+    /// `POST /config/mcp/test` -- connects to the candidate and reports which
+    /// tools it would hand the agent. Never throws: a probe failure comes back
+    /// as `.success == false` with the server's own error, and a transport
+    /// failure is folded into the same shape, so the panel has one code path
+    /// (same contract as `testLLMConnection`).
+    ///
+    /// Sending an unchanged secret as its mask is fine here for the same reason
+    /// it is fine on a write: the sidecar resolves a submitted value against
+    /// the *saved server of the same name* before probing, so testing an
+    /// already-saved server exercises its real credentials rather than failing
+    /// with an auth error about the mask.
+    func testMcpServer(_ request: McpServerRequest) async -> McpTestResultSummary {
+        do {
+            return try await sidecarClient.request(
+                method: "POST",
+                path: "/config/mcp/test",
+                body: request
+            )
+        } catch {
+            return McpTestResultSummary(
+                success: false,
+                error: Self.mcpFailureMessage(error),
+                tools: nil
+            )
+        }
+    }
+
+    /// Folds a mutation's resulting server into `mcpConfig.servers`, replacing
+    /// the row previously called `replacing` (so a rename updates in place
+    /// rather than duplicating) and appending when there was none.
+    private func applyMcpServer(_ server: McpServerSummary, replacing previousName: String?) {
+        guard let current = mcpConfig else { return }
+        var servers = current.servers
+        if let index = servers.firstIndex(where: { $0.name == (previousName ?? server.name) }) {
+            servers[index] = server
+        } else {
+            servers.append(server)
+        }
+        mcpConfig = McpConfigSummary(
+            configured: current.configured,
+            source: current.source,
+            servers: servers
+        )
+    }
+
+    private func recordMcpEditFailure(_ operation: String, _ error: Error) {
+        mcpEditError = Self.mcpFailureMessage(error)
+        print("OpenType: MCP server \(operation) failed: \(error.localizedDescription)")
+    }
+
+    /// The user-facing message for a failed `/config/mcp*` call. A 400/404
+    /// answers `{ error }`, which doesn't decode as the expected response and
+    /// so arrives as a decoding failure carrying the raw body -- that body's
+    /// `error` is the actionable sentence, and `ErrorMessagePresenter`'s
+    /// generic "本地服务响应异常" would throw it away.
+    nonisolated static func mcpFailureMessage(_ error: Error) -> String {
+        if case SidecarClientError.responseDecodingFailed(_, _, let body) = error,
+           let data = body.data(using: .utf8),
+           let envelope = try? JSONDecoder().decode(McpErrorEnvelope.self, from: data) {
+            return envelope.error
+        }
+        return ErrorMessagePresenter.message(for: error)
+    }
+
+    /// Percent-encodes a server name for the `:name` path segment. Saved names
+    /// are constrained to `[A-Za-z0-9_-]` sidecar-side, but a name typed into
+    /// the panel reaches this before that validation does.
+    nonisolated private static func mcpPathComponent(_ name: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return name.addingPercentEncoding(withAllowedCharacters: allowed) ?? name
+    }
+
     // MARK: - Provider configuration (Whisper / LLM)
     //
     // Thin wrappers around the sidecar's `/config/*` endpoints
@@ -2597,8 +2799,29 @@ final class AppModel: ObservableObject {
                 // `UNUserNotification` plus the Agent tab, and dismissing
                 // the surface never cancels the run.
                 effectiveTextModel = sidecarTextModel
+                // P1-6: show what was heard for ~1.5s first. Not a modal —
+                // doing nothing dispatches; only Esc inside the window stops
+                // it. This is the one mode with real hands, so a mishear here
+                // is not a bad answer, it is an executed one.
+                let confirmed = await confirmDispatch(transcript: transcript, mode: mode)
+                try Task.checkCancellation()
+                guard let confirmedTask = confirmed else {
+                    appendAudit(
+                        status: .cancelled,
+                        error: OpenTypeL10n.text(
+                            "下发前已撤销",
+                            english: "Cancelled before dispatch"
+                        )
+                    )
+                    let cancelledState = ProcessingState.cancelled(
+                        OpenTypeL10n.text("未下发", english: "Not dispatched")
+                    )
+                    setState(cancelledState)
+                    scheduleIdle(after: cancelledState)
+                    return
+                }
                 dispatchAgentRun(
-                    transcript: transcript,
+                    transcript: confirmedTask,
                     context: capturedContext,
                     practice: practice,
                     requestID: auditRequestID,
@@ -2967,6 +3190,63 @@ final class AppModel: ObservableObject {
                 )
             )
         }
+    }
+
+    /// Holds a task on screen for `DispatchConfirmation.windowSeconds` before
+    /// it goes out (P1-6), and returns the text to dispatch — or `nil` if the
+    /// user took it back with Esc.
+    ///
+    /// The whole window costs 1.5 seconds of latency, once, on the one mode
+    /// that can change the user's disk. Modes with no window (`arm` returns
+    /// `nil`) get their transcript back untouched and pay nothing.
+    ///
+    /// The wait is a poll rather than a single sleep so Esc ends it early: at
+    /// this frequency, a user who spots the mishear immediately should not have
+    /// to watch the rest of the bar drain before anything happens.
+    private func confirmDispatch(transcript: String, mode: InputMode) async -> String? {
+        guard let pending = DispatchConfirmation.arm(
+            transcript: transcript,
+            mode: mode,
+            at: Date()
+        ) else { return transcript }
+
+        pendingDispatch = pending
+        pendingDispatchEscapePressedAt = nil
+        overlay.showPendingDispatch(
+            transcript: pending.transcript,
+            seconds: DispatchConfirmation.windowSeconds
+        )
+        defer {
+            pendingDispatch = nil
+            overlay.hidePendingDispatch()
+        }
+
+        while !Task.isCancelled,
+              pendingDispatchEscapePressedAt == nil,
+              !pending.isExpired(at: Date()) {
+            // `try?`, because a cancelled sleep throws — and the loop condition
+            // above is what actually ends this, not the throw.
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+
+        switch DispatchConfirmation.decision(
+            for: pending,
+            escapePressedAt: pendingDispatchEscapePressedAt
+        ) {
+        case .dispatch(let text):
+            return text
+        case .cancelled:
+            return nil
+        }
+    }
+
+    /// Esc arrived while a task was waiting to go out (P1-6). Records *when*
+    /// and lets `confirmDispatch`'s next tick ask the seam whether that was in
+    /// time; a keypress after the window closed leaves the dispatched run alone
+    /// (stopping one that already started is `/agent/cancel`'s job).
+    private func recordPendingDispatchEscape() {
+        guard pendingDispatch != nil else { return }
+        pendingDispatchEscapePressedAt = Date()
     }
 
     /// Kicks off an Agent-mode task as an independent, detached unit of work

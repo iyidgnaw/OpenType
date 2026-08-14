@@ -13,6 +13,10 @@ private final class OverlayPresentation: ObservableObject {
     /// Non-nil while the toast on screen *is* the correction-window affordance
     /// (P0-3) rather than a plain success toast.
     @Published var correctionHint: CorrectionHint?
+    /// Non-nil while the pre-dispatch confirmation window is open (P1-6). It
+    /// preempts everything below — surface included — because for its 1.5
+    /// seconds it is the only thing on this panel worth reading.
+    @Published var pendingDispatch: PendingDispatch?
     /// The `m:ss` readout on the listening pill (P2-10), non-nil for exactly as
     /// long as a recording is being timed. `AppModel`'s recording tick is the
     /// only writer — the controller never reads a clock of its own.
@@ -32,6 +36,16 @@ private final class OverlayPresentation: ObservableObject {
         let seconds: TimeInterval
         /// Identity for the progress bar: a re-armed window is a *new* bar
         /// that starts full again, not the old one continuing.
+        let startedAt: Date
+    }
+
+    /// The visible half of a pre-dispatch confirmation (P1-6): the transcript
+    /// about to be handed to `/agent/run`, and how long is left to take it
+    /// back.
+    struct PendingDispatch: Equatable {
+        let transcript: String
+        let seconds: TimeInterval
+        /// Identity for the countdown bar, same as `CorrectionHint.startedAt`.
         let startedAt: Date
     }
 }
@@ -100,6 +114,8 @@ final class OverlayController {
     private let listeningSize = NSSize(width: 388, height: 96)
     /// Room for the hint's second line plus the window's progress bar.
     private let correctionHintSize = NSSize(width: 392, height: 84)
+    /// Same footprint, with room for a two-line transcript (P1-6).
+    private let pendingDispatchSize = NSSize(width: 392, height: 96)
     private let presentation = OverlayPresentation()
     private var panel: NSPanel?
     private var dismissWorkItem: DispatchWorkItem?
@@ -127,6 +143,9 @@ final class OverlayController {
     /// and went.
     private var legacyOnScreen: (state: ProcessingState, mode: InputMode)?
     private var clickOutsideMonitor: Any?
+    /// The Esc watchers installed for the length of a pre-dispatch
+    /// confirmation (P1-6), and only for that length.
+    private var pendingDispatchKeyMonitors: [Any] = []
     /// Takes the two-minute warning's sentence back off the pill (P2-10).
     private var recordingWarningWorkItem: DispatchWorkItem?
     /// How long that sentence stays up.
@@ -149,6 +168,11 @@ final class OverlayController {
     var onStopAgentRun: (() -> Void)?
     /// The user's answer to an agent question (T5): run id plus the answer.
     var onAnswerAgentQuestion: ((String, AgentQuestionAnswerItem) -> Void)?
+    /// Esc while the pre-dispatch confirmation is on screen (P1-6). Reported
+    /// rather than acted on, same non-self-closing contract as everything
+    /// above: `AppModel` owns the window and decides what a keypress at this
+    /// instant means (`DispatchConfirmation.decision`).
+    var onCancelPendingDispatch: (() -> Void)?
 
     private lazy var hostingView = NSHostingView(
         rootView: OverlayView(
@@ -349,12 +373,91 @@ final class OverlayController {
         dismissWorkItem?.cancel()
         cancelToastOverride()
         removeClickOutsideMonitor()
+        removePendingDispatchMonitors()
         clearRecordingElapsed()
         legacyOnScreen = nil
         surfaceState = .hidden
         presentation.surface = .hidden
         presentation.correctionHint = nil
+        presentation.pendingDispatch = nil
         panel?.orderOut(nil)
+    }
+
+    // MARK: - Pre-dispatch confirmation (P1-6)
+
+    /// Shows `transcript` for `seconds` with the Esc affordance, and starts
+    /// watching for that key.
+    ///
+    /// It preempts whatever the panel was showing (during this window the
+    /// surface would read 「正在整理…」, which catches nothing) without
+    /// disturbing `surfaceState`, so the next push from `AppModel` — the
+    /// dispatched run's working pill, or the cancelled toast — lays the panel
+    /// out again on its own.
+    func showPendingDispatch(transcript: String, seconds: TimeInterval) {
+        dismissWorkItem?.cancel()
+        cancelToastOverride()
+        presentation.pendingDispatch = OverlayPresentation.PendingDispatch(
+            transcript: transcript,
+            seconds: seconds,
+            startedAt: Date()
+        )
+
+        let panel = panel ?? makePanel()
+        hostingView.frame = NSRect(origin: .zero, size: pendingDispatchSize)
+        panel.setContentSize(pendingDispatchSize)
+        position(panel)
+        // Never `makeKey`: the user may still be typing into the app they
+        // dictated from, and 1.5 seconds is not worth stealing focus for. The
+        // global monitor below is what hears Esc from over there.
+        panel.orderFrontRegardless()
+        self.panel = panel
+
+        installPendingDispatchMonitors()
+    }
+
+    /// Takes the window down, however it ended. Layout is left to `AppModel`'s
+    /// next push, which follows immediately in the same main-actor turn.
+    func hidePendingDispatch() {
+        removePendingDispatchMonitors()
+        guard presentation.pendingDispatch != nil else { return }
+        presentation.pendingDispatch = nil
+        legacyOnScreen = nil
+    }
+
+    /// Esc's key code. Named here rather than importing Carbon for one number.
+    private static let escapeKeyCode: UInt16 = 53
+
+    private func installPendingDispatchMonitors() {
+        removePendingDispatchMonitors()
+        // Two monitors, because the keypress can land in either place: local
+        // if our own window happens to be frontmost, global if the user is
+        // still in the app they were dictating into — which is the normal case,
+        // since the pill never takes key focus.
+        //
+        // Two things a global monitor cannot do, both acceptable here. It
+        // cannot *consume* the event (only an event tap can), so Esc also
+        // reaches the app in front — in practice a no-op or a dismissed popup,
+        // and not worth an event tap of our own for 1.5 seconds. And it needs
+        // Accessibility trust, which this app already requires for its hotkey
+        // and write-back; without it, Esc still works whenever OpenType is
+        // frontmost via the local monitor.
+        let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == Self.escapeKeyCode else { return event }
+            self.onCancelPendingDispatch?()
+            return nil
+        }
+        let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == Self.escapeKeyCode else { return }
+            self.onCancelPendingDispatch?()
+        }
+        pendingDispatchKeyMonitors = [local, global].compactMap { $0 }
+    }
+
+    private func removePendingDispatchMonitors() {
+        for monitor in pendingDispatchKeyMonitors {
+            NSEvent.removeMonitor(monitor)
+        }
+        pendingDispatchKeyMonitors = []
     }
 
     // MARK: - Legacy transient HUD
@@ -609,6 +712,32 @@ private struct OverlayView: View {
 
     var body: some View {
         Group {
+            // The pre-dispatch confirmation (P1-6) preempts everything: for
+            // its 1.5 seconds the only thing worth showing is what was heard.
+            if let pending = presentation.pendingDispatch {
+                pendingDispatchContent(pending)
+            } else {
+                surfaceContent
+            }
+        }
+        .background(
+            .regularMaterial,
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
+        )
+        .tint(AppAccent.primary)
+        .environment(\.locale, OpenTypeL10n.locale)
+        // The content crossfade half of the morph: the panel's frame animates
+        // (`setFrame(_:display:animate:)`), the contents fade between states.
+        .animation(.easeInOut(duration: 0.2), value: presentation.surface)
+    }
+
+    @ViewBuilder
+    private var surfaceContent: some View {
+        Group {
             switch presentation.surface {
             case .hidden:
                 if presentation.state == .listening {
@@ -664,19 +793,51 @@ private struct OverlayView: View {
                 )
             }
         }
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
-        )
-        .tint(AppAccent.primary)
-        .environment(\.locale, OpenTypeL10n.locale)
-        // The content crossfade half of the morph: the panel's frame animates
-        // (`setFrame(_:display:animate:)`), the contents fade between states.
-        .animation(.easeInOut(duration: 0.2), value: presentation.surface)
+    }
+
+    /// The pre-dispatch confirmation (P1-6): what was heard, verbatim, with a
+    /// bar that empties exactly as the window does and the key that stops it.
+    ///
+    /// The transcript is the headline rather than a subtitle, because reading
+    /// it back is the entire function of this window — a card that led with
+    /// 「正在下发…」 would occupy the same 1.5 seconds and catch nothing. The
+    /// bar is what lets the user tell at a glance how much of the offer is
+    /// left instead of counting.
+    private func pendingDispatchContent(
+        _ pending: OverlayPresentation.PendingDispatch
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 11) {
+                Image(systemName: "paperplane")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pending.transcript)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        OpenTypeL10n.text(
+                            "即将下发给 Agent · \(DispatchConfirmation.hintText)",
+                            english: "Dispatching to Agent · \(DispatchConfirmation.hintText)"
+                        )
+                    )
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            WindowCountdownBar(seconds: pending.seconds)
+                .id(pending.startedAt)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(width: 392, height: 96, alignment: .leading)
     }
 
     private var listeningContent: some View {
@@ -779,7 +940,7 @@ private struct OverlayView: View {
                 Spacer(minLength: 0)
             }
 
-            CorrectionWindowProgressBar(seconds: hint.seconds)
+            WindowCountdownBar(seconds: hint.seconds)
                 // A re-armed window is a new bar starting full again, not the
                 // old one continuing — new identity, fresh `onAppear`.
                 .id(hint.startedAt)
@@ -842,12 +1003,14 @@ private struct OverlayView: View {
     }
 }
 
-/// The correction window running out, drawn rather than counted: a bar that
-/// starts full and reaches zero at the same instant the hotkey stops meaning
-/// "correct this selection." Driven by one linear animation over the window's
-/// own duration rather than a ticking timer, so it costs nothing while it runs
-/// and cannot drift away from the deadline it is drawing.
-private struct CorrectionWindowProgressBar: View {
+/// A timed window running out, drawn rather than counted: a bar that starts
+/// full and reaches zero at the same instant the window closes. Shared by the
+/// two windows that have one — the post-delivery correction offer (P0-3) and
+/// the pre-dispatch confirmation (P1-6) — so neither can promise more time
+/// than its own deadline. Driven by one linear animation over the window's own
+/// duration rather than a ticking timer, so it costs nothing while it runs and
+/// cannot drift away from what it is drawing.
+private struct WindowCountdownBar: View {
     let seconds: TimeInterval
 
     @State private var remaining: CGFloat = 1

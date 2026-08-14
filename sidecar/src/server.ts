@@ -172,12 +172,16 @@ async function main() {
   const builtInTools = createBuiltInTools({ store, callLLM });
   const coreTools = createCoreTools({});
   // The approval seam wraps the *merged* set so built-in memory tools, core
-  // tools, and MCP tools all flow through the same gate; v2 ships only the
-  // always-allow YOLO policy (see agent/approval.ts for the swap-in seam).
-  // No guards are registered: the YOLO stance is unchanged (T6 added the
-  // guard SEAM and its monotonicity, not a policy). The audit sink is left
-  // unset here because the approval pair belongs to a run, and only the agent
-  // route knows which run a call belongs to.
+  // tools, and MCP tools all flow through the same gate. The policy here is
+  // the always-allow baseline, and stays that way on purpose: this is the set
+  // `/oneshot/ask` also narrows down to its two web tools, and ask has no run
+  // to prompt through. `/agent/run` applies the real, user-prompting policy
+  // (P1-6, `agent/approval.ts`) on top of this, per run, because asking needs
+  // that run's id, signal and question broker -- none of which exist here. See
+  // `agent/routes.ts`. No guards are registered: the YOLO stance is unchanged
+  // (T6 added the guard SEAM and its monotonicity, not a policy). The audit
+  // sink is left unset here because the approval pair belongs to a run, and
+  // only the agent route knows which run a call belongs to.
   const tools = withApproval(mergeToolSets(builtInTools, coreTools, mcpTools), yoloApprovalPolicy);
   const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
 

@@ -1612,23 +1612,34 @@ private struct SettingsView: View {
     }
 }
 
-/// Read-only display of the sidecar's memory system: the current entity
-/// dictionary (`GET /memory/terms`) and the consolidation run log
-/// (`GET /memory/consolidation-runs`) — the human-review surface described
-/// in the memory design doc §4.1. Purely a convenience view: it refreshes
-/// itself on appear and never mutates anything.
+/// The sidecar memory system's management surface (memory design doc §4.1,
+/// made editable by P0-4): the entity dictionary (`GET /memory/terms`, plus
+/// `POST`/`PUT`/`DELETE /memory/terms`), the free-text owner facts
+/// (`GET`/`DELETE /memory/owner-facts`), and the consolidation run log
+/// (`GET /memory/consolidation-runs`). Every row shows its `origin`, because
+/// an `untrusted` entry — one the agent wrote from possibly-hostile context
+/// (P1-12) — is exactly what a user comes here to find and delete.
 private struct MemoryPanelView: View {
     @ObservedObject var model: AppModel
+    @State private var newCanonicalTerm = ""
+    @State private var newAliases = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(OpenTypeL10n.text(
-                "本地记忆服务记录的实体词典与最近的整理记录，仅供查看，不可在此编辑。",
-                english: "Entity dictionary and recent consolidation runs recorded by the local memory service. Read-only."
+                "本地记忆服务记录的实体词典、关于你的记忆条目与最近的整理记录。词条可以直接在这里增删改；改动立即生效，会影响后续识别与纠错。",
+                english: "Entity dictionary, remembered facts, and recent consolidation runs from the local memory service. Terms are editable here, and edits take effect immediately for later recognition and correction."
             ))
             .font(.system(size: 9.5))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+
+            if let error = model.memoryEditError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Label(
@@ -1637,36 +1648,55 @@ private struct MemoryPanelView: View {
                 )
                 .font(.system(size: 10.5, weight: .semibold))
 
+                HStack(spacing: 6) {
+                    TextField(
+                        OpenTypeL10n.text("词条", english: "Term"),
+                        text: $newCanonicalTerm
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10))
+
+                    TextField(
+                        OpenTypeL10n.text("别名，用逗号分隔", english: "Aliases, comma-separated"),
+                        text: $newAliases
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10))
+
+                    Button(OpenTypeL10n.text("添加", english: "Add")) {
+                        addTerm()
+                    }
+                    .controlSize(.small)
+                    .disabled(newCanonicalTerm.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+
                 if model.memoryTerms.isEmpty {
                     Text(OpenTypeL10n.text("暂无记录", english: "No entries yet"))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(model.memoryTerms) { term in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(term.canonicalTerm)
-                                    .font(.system(size: 10.5, weight: .medium))
-                                Spacer()
-                                Text(term.category)
-                                    .font(.system(size: 8.8, weight: .medium))
-                                    .foregroundStyle(.tertiary)
-                                Text(String(format: "%.0f%%", term.confidence * 100))
-                                    .font(.system(size: 8.8))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            if !term.aliases.isEmpty {
-                                Text(term.aliases.joined(separator: " · "))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            Color.primary.opacity(0.028),
-                            in: RoundedRectangle(cornerRadius: 8)
-                        )
+                        MemoryTermRow(model: model, term: term)
+                    }
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    OpenTypeL10n.text("关于你的记忆", english: "Remembered Facts"),
+                    systemImage: "person.text.rectangle"
+                )
+                .font(.system(size: 10.5, weight: .semibold))
+
+                if model.memoryOwnerFacts.isEmpty {
+                    Text(OpenTypeL10n.text("暂无记录", english: "No entries yet"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.memoryOwnerFacts) { fact in
+                        MemoryOwnerFactRow(model: model, fact: fact)
                     }
                 }
             }
@@ -1753,12 +1783,292 @@ private struct MemoryPanelView: View {
         }
     }
 
+    private func addTerm() {
+        let canonical = newCanonicalTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonical.isEmpty else { return }
+        let aliases = MemoryTermRow.parseAliases(newAliases)
+        Task {
+            if await model.createMemoryTerm(canonicalTerm: canonical, aliases: aliases) {
+                newCanonicalTerm = ""
+                newAliases = ""
+            }
+        }
+    }
+
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+/// One entity-dictionary row: a compact read view that flips in place into an
+/// editor (canonical term, aliases, confidence) plus a delete. Edit state is
+/// local to the row and seeded from `term` at the moment editing starts, so a
+/// background refresh of the list can't rewrite half-typed input.
+private struct MemoryTermRow: View {
+    @ObservedObject var model: AppModel
+    let term: EntityTermSummary
+
+    @State private var isEditing = false
+    @State private var draftCanonicalTerm = ""
+    @State private var draftAliases = ""
+    @State private var draftConfidence = 1.0
+    @State private var showingDeleteConfirmation = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if isEditing {
+                editor
+            } else {
+                readOnlyRow
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color.primary.opacity(0.028),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        // Deleting a term is irreversible — `DELETE /memory/terms/:id` drops the
+        // row and this app has no undo for it — so it gets the same confirm
+        // step Settings puts in front of a history reset.
+        .confirmationDialog(
+            OpenTypeL10n.text(
+                "删除词条「\(term.canonicalTerm)」？",
+                english: "Delete the term “\(term.canonicalTerm)”?"
+            ),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                Task { await model.deleteMemoryTerm(id: term.id) }
+            }
+            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(OpenTypeL10n.text(
+                "此操作不可撤销。删除后这个词条不再参与识别偏置与纠错替换。",
+                english: "This cannot be undone. The term will stop biasing recognition and stop being applied as a correction."
+            ))
+        }
+    }
+
+    private var readOnlyRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(term.canonicalTerm)
+                    .font(.system(size: 10.5, weight: .medium))
+                Spacer()
+                Text(term.category)
+                    .font(.system(size: 8.8, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Text(String(format: "%.0f%%", term.confidence * 100))
+                    .font(.system(size: 8.8))
+                    .foregroundStyle(.tertiary)
+                Button {
+                    beginEditing()
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(OpenTypeL10n.text("编辑这个词条", english: "Edit this term"))
+                Button {
+                    showingDeleteConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(OpenTypeL10n.text("删除这个词条", english: "Delete this term"))
+            }
+            if !term.aliases.isEmpty {
+                Text(term.aliases.joined(separator: " · "))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            MemoryOriginBadge(origin: term.origin)
+        }
+    }
+
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            TextField(
+                OpenTypeL10n.text("词条", english: "Term"),
+                text: $draftCanonicalTerm
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10))
+
+            TextField(
+                OpenTypeL10n.text("别名，用逗号分隔", english: "Aliases, comma-separated"),
+                text: $draftAliases
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10))
+
+            HStack(spacing: 6) {
+                Text(OpenTypeL10n.text("置信度", english: "Confidence"))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                // A slider rather than a text field: confidence is 0..1 on the
+                // sidecar side, and anything outside that is a 400 — so the
+                // control simply cannot express an invalid value.
+                Slider(value: $draftConfidence, in: 0...1)
+                Text(String(format: "%.0f%%", draftConfidence * 100))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            HStack(spacing: 6) {
+                Spacer()
+                Button(OpenTypeL10n.text("取消", english: "Cancel")) {
+                    isEditing = false
+                }
+                .controlSize(.small)
+                Button(OpenTypeL10n.text("保存", english: "Save")) {
+                    save()
+                }
+                .controlSize(.small)
+                .keyboardShortcut(.defaultAction)
+                .disabled(draftCanonicalTerm.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+    }
+
+    private func beginEditing() {
+        draftCanonicalTerm = term.canonicalTerm
+        draftAliases = term.aliases.joined(separator: ", ")
+        draftConfidence = term.confidence
+        isEditing = true
+    }
+
+    private func save() {
+        let canonical = draftCanonicalTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonical.isEmpty else { return }
+        let aliases = Self.parseAliases(draftAliases)
+        let confidence = draftConfidence
+        Task {
+            if await model.updateMemoryTerm(
+                id: term.id,
+                canonicalTerm: canonical,
+                aliases: aliases,
+                confidence: confidence
+            ) {
+                isEditing = false
+            }
+        }
+    }
+
+    /// Splits the comma-separated alias field. Accepts the full-width comma
+    /// too — the aliases people type here are frequently Chinese, and a
+    /// Chinese keyboard produces "，" without the user thinking about it.
+    static func parseAliases(_ raw: String) -> [String] {
+        raw
+            .split(whereSeparator: { $0 == "," || $0 == "，" || $0 == "\n" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+/// One free-text owner fact: its content, its provenance badge, and a delete.
+/// Facts have no edit affordance — they are arbitrary prose rather than a
+/// canonical-name-plus-aliases shape, and `owner_facts` has no update endpoint;
+/// the operation a user actually needs here is removing a fact the agent
+/// planted (P1-12), which delete covers.
+private struct MemoryOwnerFactRow: View {
+    @ObservedObject var model: AppModel
+    let fact: OwnerFactSummary
+
+    @State private var showingDeleteConfirmation = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(fact.content)
+                    .font(.system(size: 9.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                MemoryOriginBadge(origin: fact.origin)
+            }
+            Spacer(minLength: 6)
+            Button {
+                showingDeleteConfirmation = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(OpenTypeL10n.text("删除这条记忆", english: "Delete this fact"))
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color.primary.opacity(0.028),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        // Same irreversible-delete guard as `MemoryTermRow`.
+        .confirmationDialog(
+            OpenTypeL10n.text("删除这条记忆？", english: "Delete this fact?"),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                Task { await model.deleteMemoryOwnerFact(id: fact.id) }
+            }
+            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(OpenTypeL10n.text(
+                "此操作不可撤销。删除后助理不会再把这条记忆带进上下文。",
+                english: "This cannot be undone. The assistant will stop carrying this fact into its context."
+            ))
+        }
+    }
+}
+
+/// Provenance badge for a memory row. `owner` means the user vouched for it in
+/// person; `untrusted` means it came out of the agent loop, where content can
+/// originate from hostile context (P1-12) — which is why it is drawn in orange
+/// rather than as one more grey label.
+private struct MemoryOriginBadge: View {
+    let origin: String?
+
+    var body: some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 8.5, weight: .medium))
+            .foregroundStyle(origin == "untrusted" ? Color.orange : Color.secondary)
+    }
+
+    private var title: String {
+        switch origin {
+        case "owner":
+            return OpenTypeL10n.text("你确认过", english: "Confirmed by you")
+        case "untrusted":
+            return OpenTypeL10n.text("未经确认", english: "Unverified")
+        case "agent":
+            return OpenTypeL10n.text("助理写入", english: "Written by the agent")
+        case "system":
+            return OpenTypeL10n.text("自动整理", english: "Auto-consolidated")
+        default:
+            return OpenTypeL10n.text("来源未知", english: "Unknown source")
+        }
+    }
+
+    private var symbol: String {
+        switch origin {
+        case "owner":
+            return "checkmark.seal"
+        case "untrusted":
+            return "exclamationmark.triangle"
+        case "agent":
+            return "sparkles"
+        case "system":
+            return "gearshape"
+        default:
+            return "questionmark.circle"
+        }
+    }
 }
 
 /// A single row in the Agent tab's "in progress" strip

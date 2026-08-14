@@ -325,6 +325,163 @@ describe("upsertEntityTerm", () => {
   });
 });
 
+/**
+ * origin is promoted one way only, and the rule lives in `upsertEntityTerm`
+ * because that is the single shared merge path (2026-08-14 batch plan, P0-4
+ * "origin 的单向提升").
+ *
+ * Before this batch the merge branch left `origin` alone entirely. That was
+ * harmless while every write came from a machine path, but the batch adds two
+ * paths where the *user personally vouches* for the term — typing it into the
+ * dictionary panel (P0-4) and voice-correcting into it (P0-2). Merging either
+ * of those into a row the agent's `remember_fact` wrote as "untrusted" would
+ * leave that row flagged untrusted forever, right after the owner endorsed it.
+ * A provenance flag exists to make the user review something; one that stays
+ * lit after review is noise, and users learn to ignore noise.
+ *
+ * Both P0-2's correction path and P0-4's POST route depend on this, so it is
+ * pinned here rather than in either caller's tests.
+ */
+describe("upsertEntityTerm origin promotion", () => {
+  function seedTerm(
+    store: MemoryStore,
+    values: {
+      canonicalTerm: string;
+      aliases: string[];
+      confidence: number;
+      origin: string;
+    }
+  ): number {
+    const now = Date.now();
+    const result = store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        values.canonicalTerm,
+        JSON.stringify(values.aliases),
+        "term",
+        values.confidence,
+        values.origin,
+        "[]",
+        now,
+        now,
+        null,
+      ]
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  test("an owner-origin upsert promotes a merged untrusted term to owner", () => {
+    const store = makeStore();
+    // How `remember_fact` writes a term: full confidence, but provenance
+    // "untrusted" because the agent loop may have read it out of hostile
+    // context (P1-12).
+    const id = seedTerm(store, {
+      canonicalTerm: "PayPal",
+      aliases: ["贝宝"],
+      confidence: 1.0,
+      origin: "untrusted",
+    });
+
+    const { term, merged } = upsertEntityTerm(store, store.allTerms(), {
+      canonicalTerm: "PayPal",
+      aliases: ["拍拍宝"],
+      category: "term",
+      confidence: 0.8,
+      sourceEventIds: [],
+      origin: "owner",
+    });
+
+    expect(merged).toBe(true);
+    expect(term.origin).toBe("owner");
+    // Promotion must be written, not merely reflected in the returned object:
+    // the next reader of the dictionary is a fresh SELECT, not this value.
+    const persisted = store.allTerms().find((t) => t.id === id);
+    expect(persisted?.origin).toBe("owner");
+    // ...and the rest of the merge is unchanged by the promotion.
+    expect(persisted?.confidence).toBe(1.0);
+    expect(persisted?.aliases.sort()).toEqual(["拍拍宝", "贝宝"].sort());
+  });
+
+  test("an untrusted upsert never downgrades an existing owner term", () => {
+    const store = makeStore();
+    const id = seedTerm(store, {
+      canonicalTerm: "PayPal",
+      aliases: ["贝宝"],
+      confidence: 0.8,
+      origin: "owner",
+    });
+
+    // `remember_fact` touching a term the owner already confirmed.
+    const { term, merged } = upsertEntityTerm(store, store.allTerms(), {
+      canonicalTerm: "PayPal",
+      aliases: ["拍拍宝"],
+      category: "term",
+      confidence: 1.0,
+      sourceEventIds: [],
+      origin: "untrusted",
+    });
+
+    expect(merged).toBe(true);
+    expect(term.origin).toBe("owner");
+    const persisted = store.allTerms().find((t) => t.id === id);
+    expect(persisted?.origin).toBe("owner");
+    // Guard against a vacuous pass: the merge really did happen, it just
+    // didn't touch origin.
+    expect(persisted?.aliases).toContain("拍拍宝");
+    expect(persisted?.confidence).toBe(1.0);
+  });
+
+  test("a non-owner upsert leaves a non-owner origin exactly as it was", () => {
+    const store = makeStore();
+    // Consolidation ("system") merging into a remember_fact row ("untrusted"):
+    // neither side is the owner, so nothing is promoted in either direction.
+    const id = seedTerm(store, {
+      canonicalTerm: "天润",
+      aliases: ["tianrun"],
+      confidence: 0.7,
+      origin: "untrusted",
+    });
+
+    const { term } = upsertEntityTerm(store, store.allTerms(), {
+      canonicalTerm: "天润",
+      aliases: ["添润"],
+      category: "org",
+      confidence: 0.9,
+      sourceEventIds: [],
+      origin: "system",
+    });
+
+    expect(term.origin).toBe("untrusted");
+    expect(store.allTerms().find((t) => t.id === id)?.origin).toBe("untrusted");
+  });
+
+  test("an upsert with no origin promotes too, matching the insert branch's 'owner' default", () => {
+    const store = makeStore();
+    // `origin` is optional on the input, and the insert branch already reads an
+    // omitted one as "owner". The merge branch has to read it the same way, or
+    // one function would mean two different things by "no origin given".
+    const id = seedTerm(store, {
+      canonicalTerm: "Anthropic",
+      aliases: ["安思罗匹克"],
+      confidence: 0.6,
+      origin: "untrusted",
+    });
+
+    const { term } = upsertEntityTerm(store, store.allTerms(), {
+      canonicalTerm: "Anthropic",
+      aliases: [],
+      category: "term",
+      confidence: 0.6,
+      sourceEventIds: [],
+    });
+
+    expect(term.origin).toBe("owner");
+    expect(store.allTerms().find((t) => t.id === id)?.origin).toBe("owner");
+  });
+});
+
 describe("rollbackRun", () => {
   test("restores entity_terms to the pre-run snapshot and un-consolidates only that run's events", async () => {
     const store = makeStore();

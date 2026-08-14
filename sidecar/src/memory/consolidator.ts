@@ -217,6 +217,23 @@ function unionCaseInsensitive(a: string[], b: string[]): string[] {
   return Array.from(seen.values());
 }
 
+/**
+ * `origin` is promoted one way only: an incoming `"owner"` write raises the
+ * merged row to `"owner"`, anything else leaves the existing provenance
+ * exactly as it was, and an existing `"owner"` is never downgraded.
+ *
+ * Two write paths mean "the user personally vouched for this term" — typing it
+ * into the dictionary panel (P0-4) and voice-correcting into it (P0-2). Merging
+ * either into a row `remember_fact` wrote as `"untrusted"` would leave that row
+ * flagged untrusted right after the owner endorsed it. A provenance flag exists
+ * to prompt review; one that stays lit after review is noise, and users learn
+ * to ignore noise. The rule lives here because this is the single shared merge
+ * path, not a special case of any one caller.
+ */
+function promoteOrigin(existing: EventOrigin, incoming: EventOrigin): EventOrigin {
+  return incoming === "owner" ? "owner" : existing;
+}
+
 export interface UpsertEntityTermInput {
   canonicalTerm: string;
   aliases: string[];
@@ -257,16 +274,25 @@ export function upsertEntityTerm(
     const mergedSourceEventIds = Array.from(
       new Set([...match.sourceEventIds, ...input.sourceEventIds])
     );
+    const mergedOrigin = promoteOrigin(match.origin, input.origin ?? "owner");
 
     store.db.run(
-      "UPDATE entity_terms SET aliases = ?, confidence = ?, sourceEventIds = ?, updatedAt = ? WHERE id = ?",
-      [JSON.stringify(mergedAliases), mergedConfidence, JSON.stringify(mergedSourceEventIds), now, match.id]
+      "UPDATE entity_terms SET aliases = ?, confidence = ?, origin = ?, sourceEventIds = ?, updatedAt = ? WHERE id = ?",
+      [
+        JSON.stringify(mergedAliases),
+        mergedConfidence,
+        mergedOrigin,
+        JSON.stringify(mergedSourceEventIds),
+        now,
+        match.id,
+      ]
     );
 
     const term: EntityTerm = {
       ...match,
       aliases: mergedAliases,
       confidence: mergedConfidence,
+      origin: mergedOrigin,
       sourceEventIds: mergedSourceEventIds,
       updatedAt: now,
     };

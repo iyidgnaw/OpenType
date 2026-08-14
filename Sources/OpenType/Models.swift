@@ -1240,15 +1240,65 @@ enum ErrorMessagePresenter {
 }
 
 /// One row of the sidecar's `GET /memory/terms` response — the entity
-/// dictionary shown read-only in the Settings "Memory" panel. Mirrors (a
-/// subset of) `EntityTerm` from `sidecar/src/memory/MemoryStore.ts`.
+/// dictionary the Settings "Memory" panel shows and (since P0-4) edits.
+/// Mirrors (a subset of) `EntityTerm` from `sidecar/src/memory/MemoryStore.ts`.
+///
+/// `id` is the sidecar's real `entity_terms.id`, not a value synthesized from
+/// `canonicalTerm`: it is what `PUT`/`DELETE /memory/terms/:id` address, and a
+/// canonical-term key could not survive a rename — which is precisely the edit
+/// the panel exists for. `origin` is optional because older payloads (and test
+/// fixtures) may omit it; the panel reads `nil` as unknown provenance.
 struct EntityTermSummary: Decodable, Identifiable {
+    let id: Int
     let canonicalTerm: String
     let aliases: [String]
     let category: String
     let confidence: Double
+    let origin: String?
+}
 
-    var id: String { canonicalTerm }
+/// One row of the sidecar's `GET /memory/owner-facts` response — the free-text
+/// owner facts (`OwnerFact` in `sidecar/src/memory/MemoryStore.ts`), listed for
+/// every origin so a user can find and delete one the agent planted from
+/// untrusted context (P1-12). `createdAt` is epoch milliseconds.
+struct OwnerFactSummary: Decodable, Identifiable {
+    let id: Int
+    let content: String
+    let createdAt: Int
+    let origin: String?
+}
+
+/// Body for `POST /memory/terms` — a term the user typed into the dictionary
+/// panel. Deliberately carries no `confidence`/`origin`: the sidecar pins an
+/// owner-created term at confidence 1.0 / origin "owner", and a client-claimed
+/// provenance would make the `origin` badge worthless.
+struct MemoryTermCreateRequest: Encodable {
+    let canonicalTerm: String
+    let aliases: [String]
+}
+
+/// Body for `PUT /memory/terms/:id` — a *patch*. A field the user did not touch
+/// must be absent from the JSON rather than encoded as `null`: the sidecar
+/// reads a present key as "set this field", so a null `canonicalTerm` would be
+/// a 400 and a null `aliases` would silently wipe every alias. Synthesized
+/// `Encodable` already omits a nil optional; this spells the `encodeIfPresent`
+/// calls out by hand so the patch semantics survive someone later adding a
+/// field or a custom `CodingKeys`, rather than resting on synthesis.
+struct MemoryTermUpdateRequest: Encodable {
+    let canonicalTerm: String?
+    let aliases: [String]?
+    let confidence: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case canonicalTerm, aliases, confidence
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(canonicalTerm, forKey: .canonicalTerm)
+        try container.encodeIfPresent(aliases, forKey: .aliases)
+        try container.encodeIfPresent(confidence, forKey: .confidence)
+    }
 }
 
 /// One row of the sidecar's `GET /memory/consolidation-runs` response — the

@@ -73,6 +73,13 @@ you're debugging packaging specifically.
   server configured.
 - `src/asr/` — `/asr/transcribe`; proxies to the persistent local
   MLX-Whisper python process (`whisper/serve.py`) over its own Unix socket.
+  `dictionaryBias.ts` feeds the entity dictionary back into recognition from
+  this one place: `buildInitialPrompt` biases the local decoder toward known
+  canonical spellings via `initial_prompt` (sent as a percent-encoded query
+  parameter, since headers must be latin-1 safe and the terms are routinely
+  CJK), and `applyAliasCorrections` rewrites known alias → canonical in the
+  transcript afterwards — the latter on both the local and remote backends,
+  since a remote provider never sees our prompt.
 - `src/memory/` — the entity-dictionary + owner-facts `MemoryStore`
   (SQLite-backed), consolidation (`consolidator.ts`), and the memory HTTP
   routes: read-only `GET /memory/terms` / `GET /memory/consolidation-runs`,

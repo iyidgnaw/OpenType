@@ -42,6 +42,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastDeliveryNotice: String?
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
+    /// Free-text owner facts (`GET /memory/owner-facts`, every origin), shown
+    /// alongside the entity dictionary in the Settings "Memory" panel so a
+    /// planted (non-owner) fact is findable and deletable (P1-12).
+    @Published private(set) var memoryOwnerFacts: [OwnerFactSummary] = []
+    /// Last failure from a dictionary-panel edit (add/edit/delete), shown
+    /// in-place in that panel and cleared by the next successful edit. Editing
+    /// is a deliberate user action, so a failed one must say so rather than
+    /// look like nothing happened.
+    @Published private(set) var memoryEditError: String?
     /// Set when an append to the immutable audit trail throws. The audit log is
     /// the app's local "source of truth"; a failed write must not be silent, so
     /// this surfaces a small warning in the Home / menubar status area. It stays
@@ -1490,11 +1499,14 @@ final class AppModel: ObservableObject {
 
     private struct MemoryTermsResponseBody: Decodable { let terms: [EntityTermSummary] }
     private struct MemoryConsolidationRunsResponseBody: Decodable { let runs: [ConsolidationRunSummary] }
+    private struct MemoryOwnerFactsResponseBody: Decodable { let ownerFacts: [OwnerFactSummary] }
 
-    /// Refreshes the read-only Settings "Memory" panel (design doc §4.1: the
-    /// human-review surface over the sidecar's entity dictionary and
-    /// consolidation run log) by hitting `GET /memory/terms` and
-    /// `GET /memory/consolidation-runs`. This backs a convenience display,
+    /// Reloads the Settings "Memory" panel (design doc §4.1: the human-review
+    /// surface over the sidecar's entity dictionary, owner facts and
+    /// consolidation run log) from `GET /memory/terms`,
+    /// `/memory/consolidation-runs` and `/memory/owner-facts`. Read half only —
+    /// the panel's edits go through the mutation methods below, which reconcile
+    /// their own row rather than refetching. This backs a convenience display,
     /// not the critical recording/transcription path, so a sidecar hiccup
     /// (not started yet, transient failure) just yields an empty list plus a
     /// logged message rather than throwing.
@@ -1521,6 +1533,18 @@ final class AppModel: ObservableObject {
         } catch {
             memoryConsolidationRuns = AppModel.mergedRefresh(previous: previousRuns, incoming: nil)
             print("OpenType: failed to refresh memory consolidation runs from sidecar: \(error.localizedDescription)")
+        }
+
+        let previousFacts = memoryOwnerFacts
+        do {
+            let response: MemoryOwnerFactsResponseBody = try await sidecarClient.request(
+                method: "GET",
+                path: "/memory/owner-facts"
+            )
+            memoryOwnerFacts = AppModel.mergedRefresh(previous: previousFacts, incoming: response.ownerFacts)
+        } catch {
+            memoryOwnerFacts = AppModel.mergedRefresh(previous: previousFacts, incoming: nil)
+            print("OpenType: failed to refresh memory owner facts from sidecar: \(error.localizedDescription)")
         }
     }
 
@@ -1559,6 +1583,131 @@ final class AppModel: ObservableObject {
             } catch {
                 self.consolidateNowStatus = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    // MARK: - Memory dictionary management (P0-4)
+    //
+    // The write half of the Settings "Memory" panel: the entity dictionary
+    // stopped being a read-only list and became an editable table, so a user
+    // can fix a term the machine mis-learned (or delete one the agent planted
+    // from untrusted context, P1-12) instead of only watching it be wrong.
+    // Thin wrappers around `POST/PUT/DELETE /memory/terms` and
+    // `DELETE /memory/owner-facts/:id`, in the same shape as the provider
+    // section below: call the sidecar, then reconcile local state.
+
+    private struct MemoryTermMutationResponseBody: Decodable { let term: EntityTermSummary }
+
+    /// Creates a term from what the user typed into the dictionary panel.
+    /// Deliberately sends no confidence/origin — the sidecar pins an
+    /// owner-typed term at confidence 1.0 / origin "owner".
+    ///
+    /// The sidecar merges by canonical-or-alias match, so the response may be
+    /// an *existing* row rather than a new one; the reconcile below is keyed on
+    /// its id precisely for that case, since blindly appending would render a
+    /// merged term twice.
+    @discardableResult
+    func createMemoryTerm(canonicalTerm: String, aliases: [String]) async -> Bool {
+        do {
+            let response: MemoryTermMutationResponseBody = try await sidecarClient.request(
+                method: "POST",
+                path: "/memory/terms",
+                body: MemoryTermCreateRequest(canonicalTerm: canonicalTerm, aliases: aliases)
+            )
+            applyMemoryTerm(response.term)
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("create", error)
+            return false
+        }
+    }
+
+    /// Applies an inline edit to one term. Every argument is a patch field:
+    /// `nil` means "leave it alone", which `MemoryTermUpdateRequest` encodes by
+    /// omitting the key rather than sending null.
+    @discardableResult
+    func updateMemoryTerm(
+        id: Int,
+        canonicalTerm: String? = nil,
+        aliases: [String]? = nil,
+        confidence: Double? = nil
+    ) async -> Bool {
+        do {
+            let response: MemoryTermMutationResponseBody = try await sidecarClient.request(
+                method: "PUT",
+                path: "/memory/terms/\(id)",
+                body: MemoryTermUpdateRequest(
+                    canonicalTerm: canonicalTerm,
+                    aliases: aliases,
+                    confidence: confidence
+                )
+            )
+            applyMemoryTerm(response.term)
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("update", error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteMemoryTerm(id: Int) async -> Bool {
+        do {
+            let _: MemoryDeletionResponseBody = try await sidecarClient.request(
+                method: "DELETE",
+                path: "/memory/terms/\(id)"
+            )
+            memoryTerms.removeAll { $0.id == id }
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("delete", error)
+            return false
+        }
+    }
+
+    /// Deletes one free-text owner fact. The endpoint has existed since the
+    /// memory-poisoning close (P1-12) with no UI in front of it; the dictionary
+    /// panel is where a user actually goes looking for a planted fact, so the
+    /// delete lives there.
+    @discardableResult
+    func deleteMemoryOwnerFact(id: Int) async -> Bool {
+        do {
+            let _: MemoryDeletionResponseBody = try await sidecarClient.request(
+                method: "DELETE",
+                path: "/memory/owner-facts/\(id)"
+            )
+            memoryOwnerFacts.removeAll { $0.id == id }
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("owner-fact delete", error)
+            return false
+        }
+    }
+
+    private struct MemoryDeletionResponseBody: Decodable { let deleted: Bool }
+
+    /// Records a failed dictionary edit: a readable line for the panel (via the
+    /// same `ErrorMessagePresenter` every other user-facing failure goes
+    /// through — a raw `SidecarClientError` description is English developer
+    /// text with the response body inlined), and the untranslated detail on the
+    /// console, which is the only place it is still diagnosable.
+    private func recordMemoryEditFailure(_ operation: String, _ error: Error) {
+        memoryEditError = ErrorMessagePresenter.message(for: error)
+        print("OpenType: memory dictionary \(operation) failed: \(error.localizedDescription)")
+    }
+
+    /// Folds a mutation's resulting term into `memoryTerms` by id — replacing
+    /// the row if it is already on screen (an edit, or a create that merged
+    /// into an existing term), appending it otherwise.
+    private func applyMemoryTerm(_ term: EntityTermSummary) {
+        if let index = memoryTerms.firstIndex(where: { $0.id == term.id }) {
+            memoryTerms[index] = term
+        } else {
+            memoryTerms.append(term)
         }
     }
 

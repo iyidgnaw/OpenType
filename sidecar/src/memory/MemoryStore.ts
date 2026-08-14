@@ -28,6 +28,19 @@ export interface EntityTerm {
 }
 
 /**
+ * The editable subset of an `EntityTerm`, as a patch: an omitted field is
+ * left exactly as it is. Deliberately narrower than `EntityTerm` — `origin`,
+ * `category`, `sourceEventIds` and the timestamps describe where a term came
+ * from, and letting the dictionary panel rewrite provenance would make the
+ * `origin` badge (P1-12) a client-asserted value.
+ */
+export interface EntityTermPatch {
+  canonicalTerm?: string;
+  aliases?: string[];
+  confidence?: number;
+}
+
+/**
  * A free-text fact remembered about the owner (e.g. "The owner's name is
  * Diyi.", "The owner prefers formal English."), distinct from `entity_terms`
  * which is specifically shaped for term/alias correction. Written either
@@ -124,6 +137,57 @@ export class MemoryStore {
       }
       return term.aliases.some((alias) => alias.toLowerCase().includes(needle));
     });
+  }
+
+  /**
+   * Applies a partial edit to one entity term (the dictionary panel's inline
+   * edit, P0-4). Returns the row as it now stands, or `null` when no such id
+   * exists — so the route can answer 404 rather than silently succeeding.
+   *
+   * An out-of-range confidence throws a `RangeError` instead of being clamped:
+   * 1.5 is a caller bug, and quietly storing 1.0 for it would hide that bug
+   * behind a value the user never chose. `createdAt`, `category`, `origin` and
+   * `sourceEventIds` are never touched by an edit.
+   */
+  updateEntityTerm(id: number, patch: EntityTermPatch): EntityTerm | null {
+    if (patch.confidence !== undefined) {
+      if (!Number.isFinite(patch.confidence) || patch.confidence < 0 || patch.confidence > 1) {
+        throw new RangeError(`confidence must be between 0 and 1, got ${patch.confidence}`);
+      }
+    }
+
+    const row = this.db
+      .query("SELECT * FROM entity_terms WHERE id = ?")
+      .get(id) as EntityTermRow | null;
+    if (!row) {
+      return null;
+    }
+
+    const current = rowToEntityTerm(row);
+    const next: EntityTerm = {
+      ...current,
+      canonicalTerm: patch.canonicalTerm ?? current.canonicalTerm,
+      aliases: patch.aliases ?? current.aliases,
+      confidence: patch.confidence ?? current.confidence,
+      updatedAt: Date.now(),
+    };
+
+    this.db.run(
+      "UPDATE entity_terms SET canonicalTerm = ?, aliases = ?, confidence = ?, updatedAt = ? WHERE id = ?",
+      [next.canonicalTerm, JSON.stringify(next.aliases), next.confidence, next.updatedAt, id]
+    );
+
+    return next;
+  }
+
+  /**
+   * Removes a single entity term by id. Returns whether a row was actually
+   * removed, so the management endpoint can tell a real delete from a
+   * missing id — the same contract as `deleteOwnerFact`.
+   */
+  deleteEntityTerm(id: number): boolean {
+    const result = this.db.run("DELETE FROM entity_terms WHERE id = ?", [id]);
+    return result.changes > 0;
   }
 
   /**

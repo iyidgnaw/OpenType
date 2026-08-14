@@ -56,77 +56,57 @@ struct RootView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HeaderView(model: model, configuration: model.configuration)
-
-            Group {
-                if model.needsProviderOnboarding {
-                    // First-run setup wizard (spec: "if the user hasn't
-                    // configured Whisper or LLM yet, opening the app should
-                    // enter a setup wizard") -- takes over the whole tab
-                    // content area, in place of the normal Home tab, until
-                    // both are configured. See `OnboardingWizardView`'s doc
-                    // comment (`ProviderSetupViews.swift`) for why no
-                    // explicit tab switch is needed once that happens.
-                    OnboardingWizardView(model: model)
-                } else {
-                    // Interim wiring: the four new destinations are served by
-                    // the existing views until the redesign's sidebar shell
-                    // replaces this whole `VStack` (phase B). `sessions` shows
-                    // the Q&A list for now — merging the two lists into one
-                    // screen is phase C — and `memory` is lifted out of
-                    // Settings in phase E. Kept deliberately dumb so this file
-                    // has exactly one job to undo later.
-                    switch model.selectedTab {
-                    case .sessions:
-                        QAConversationsView(model: model)
-                    case .dictation:
-                        HistoryView(model: model, history: model.history)
-                    case .memory:
-                        SettingsView(
-                            model: model,
-                            configuration: model.configuration,
-                            agentMemory: model.agentMemory
-                        )
-                    case .settings:
-                        SettingsView(
-                            model: model,
-                            configuration: model.configuration,
-                            agentMemory: model.agentMemory
-                        )
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if !model.needsProviderOnboarding {
-                TabBar(model: model)
-            }
-        }
-        .frame(
-            minWidth: 420,
-            idealWidth: 460,
-            maxWidth: .infinity,
-            minHeight: 480,
-            idealHeight: 600,
-            maxHeight: .infinity
-        )
-        .background {
-            ZStack {
-                Color(nsColor: .windowBackgroundColor)
-                LinearGradient(
-                    colors: [
-                        AppAccent.primary.opacity(0.045),
-                        AppAccent.secondary.opacity(0.018),
-                        .clear
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .center
+        Group {
+            if model.needsProviderOnboarding {
+                // The first-run wizard still takes the whole window: there is
+                // nothing to navigate between until a provider exists, and a
+                // sidebar offering four destinations that all say "configure
+                // something first" would be four ways to be told no.
+                OnboardingWizardView(model: model)
+            } else {
+                SidebarShell(
+                    model: model,
+                    showsDetail: model.hasOpenDetail,
+                    list: { destinationList },
+                    detail: { destinationDetail }
                 )
             }
         }
-        .tint(AppAccent.primary)
+        .frame(
+            minWidth: DS.Size.windowMinWidth,
+            idealWidth: 1120,
+            maxWidth: .infinity,
+            minHeight: 480,
+            idealHeight: 720,
+            maxHeight: .infinity
+        )
+        .background(DS.Colour.canvas)
+        .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
+    }
+
+    /// The middle column: whatever the selected destination lists.
+    @ViewBuilder
+    private var destinationList: some View {
+        switch model.selectedTab {
+        case .sessions:
+            QAConversationsView(model: model)
+        case .dictation:
+            HistoryView(model: model, history: model.history)
+        case .memory, .settings:
+            SettingsView(
+                model: model,
+                configuration: model.configuration,
+                agentMemory: model.agentMemory
+            )
+        }
+    }
+
+    /// The right column. Empty for destinations that are a single page —
+    /// filled in per screen as phases C–F land.
+    @ViewBuilder
+    private var destinationDetail: some View {
+        Color.clear
     }
 }
 

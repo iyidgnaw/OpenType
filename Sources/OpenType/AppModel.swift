@@ -84,6 +84,35 @@ final class AppModel: ObservableObject {
     /// past runs; it survives relaunch, the in-memory list does not.
     @Published private(set) var askConversations: [ConversationSummary] = []
     @Published private(set) var agentConversations: [ConversationSummary] = []
+
+    /// The two fetches as the redesigned 会话 screen shows them: one list,
+    /// most-recently-updated first. Derived rather than stored so it cannot
+    /// fall out of step with the two it comes from.
+    var sessionConversations: [ConversationSummary] {
+        SessionList.merged(ask: askConversations, agent: agentConversations)
+    }
+
+    /// Whether any remembered fact is still waiting to be vouched for.
+    ///
+    /// Drives the sidebar's warning dot on 记忆. `untrusted` facts are the ones
+    /// `remember_fact` wrote from inside an agent run, where the content could
+    /// have come from a web page — P1-12 recorded the provenance precisely so a
+    /// user could review it, and a badge is what makes reviewing it something
+    /// that happens rather than something available.
+    var hasUnconfirmedMemory: Bool {
+        memoryOwnerFacts.contains { $0.origin != "owner" }
+    }
+
+    /// Whether the right-hand column has something in it — a thread open, a
+    /// settings sub-page pushed. Drives the narrow layout's push.
+    var hasOpenDetail: Bool {
+        focusedAskConversationId != nil || focusedAgentConversationId != nil
+    }
+
+    /// The hotkey gesture, for the sidebar's mode card.
+    var shortcutHintText: String {
+        configuration.hotKeyPreset.modeSwitchHint ?? shortcutStatus
+    }
     /// The currently-open thread in the Q&A/Agent tab, if any -- fetched by
     /// `openAskConversation(_:)`/`openAgentConversation(_:)`.
     @Published private(set) var askConversationDetail: ConversationDetail?

@@ -71,6 +71,21 @@ const PYTHON_DESTRUCTIVE: readonly RegExp[] = [
   /\bshutil\s*\.\s*rmtree\s*\(/,
   // Covers both `os.unlink(p)` and `Path("x").unlink()`.
   /\.\s*unlink\s*\(/,
+  /\.\s*rmdir\s*\(/,
+  // Bare names with no benign second meaning, which is what catches the
+  // module-alias spellings the dotted rules above miss: `from shutil import
+  // rmtree` and `import shutil as sh; sh.rmtree(...)` both end up here.
+  /\brmtree\s*\(/,
+  /\bcopytree\s*\(/,
+  /\bremovedirs\s*\(/,
+  // The import line, for the names that DO have a benign second meaning as a
+  // bare call -- `remove`, `move`, `copy`, `run`. `list.remove(x)` is far too
+  // common to match at the call site, but `from os import remove` states the
+  // intent unambiguously and is what a model writes naturally, not only
+  // evasively.
+  /\bfrom\s+os\s+import\b[^\n]*\b(?:remove|removedirs|rmdir|unlink|rename|renames|replace|system|popen|truncate|exec\w*|spawn\w*)\b/,
+  /\bfrom\s+shutil\s+import\b[^\n]*\b(?:rmtree|move|copy|copy2|copyfile|copyfileobj|copytree)\b/,
+  /\bfrom\s+subprocess\s+import\b/,
   // Moves and overwriting copies -- `mv` and `cp` in python's spelling. Left
   // in for the same reason `cp` is destructive in bash: a model told to
   // overwrite a file must not discover that the python tool is the quiet way
@@ -83,6 +98,13 @@ const PYTHON_DESTRUCTIVE: readonly RegExp[] = [
   /\bos\s*\.\s*(?:system|popen|exec\w*|spawn\w*)\s*\(/,
   /\bsubprocess\s*\./,
   /\bpty\s*\.\s*spawn\s*\(/,
+  // Python assembling its own bytes after we stopped looking -- bash's `eval`
+  // rule in python's spelling, and destructive for the same reason: what runs
+  // is not what is written. `ast.literal_eval(` and `cursor.execute(` do not
+  // match (`_` is a word character, and `execute` is not `exec`).
+  /\b(?:exec|eval)\s*\(/,
+  /\b__import__\s*\(/,
+  /\brunpy\s*\./,
 ];
 
 function classifyPythonSource(code: string): CommandRisk {
@@ -124,6 +146,9 @@ interface Segment {
 function newSegment(pipedInto: boolean): Segment {
   return { words: [], redirects: [], substitutions: [], pipedInto };
 }
+
+/** `$IFS` / `${IFS}`, anchored at the start of the remaining line. */
+const IFS_EXPANSION = /^\$(?:IFS(?![A-Za-z0-9_])|\{IFS\})/;
 
 /** Index of the `)` closing the `(` at `open`, or -1. Skips quoted regions. */
 function matchClosingParen(line: string, open: number): number {
@@ -310,6 +335,27 @@ function tokenize(line: string): Segment[] | null {
       i += 1;
       continue;
     }
+    if (c === "#" && word.length === 0 && !quoted) {
+      // Bash's rule exactly: `#` starts a comment only at the start of a word,
+      // which is why `https://example.com/#anchor` is not one. Skipping the
+      // rest of the line is a false-positive fix rather than a hole -- a
+      // comment runs nothing, so nothing can hide in it, while `ls ~/Desktop
+      // # 别删 rm 掉的那些` would otherwise put a card in front of a listing.
+      const end = line.indexOf("\n", i);
+      i = end < 0 ? line.length : end;
+      continue;
+    }
+    if (c === "(" || c === ")") {
+      // A subshell is a segment boundary. `(` is a metacharacter, so it needs
+      // no space around it -- `(rm -rf ~)` is an ordinary command line, and
+      // one that reads as a single unrecognisable word without this.
+      //
+      // A paren opening where the command itself would go inherits the pipe
+      // status, so `curl … | (sh)` stays the `curl … | sh` it is.
+      endSegment(segmentIsEmpty() ? current.pipedInto : false);
+      i += 1;
+      continue;
+    }
     if (c === "\\") {
       const next = line[i + 1];
       if (next === undefined) {
@@ -357,6 +403,18 @@ function tokenize(line: string): Segment[] | null {
       i = end + 1;
       continue;
     }
+    if (c === "$") {
+      // `$IFS` unquoted IS the word separator, so `rm${IFS}-rf${IFS}~/build`
+      // runs rm while reading as one meaningless token. Splitting on it is the
+      // whole trick, and it only applies unquoted -- `"$IFS"` does not split in
+      // bash either, and `readDoubleQuoted` keeps it as text.
+      const ifs = IFS_EXPANSION.exec(line.slice(i));
+      if (ifs) {
+        endWord();
+        i += ifs[0].length;
+        continue;
+      }
+    }
     if (c === ";") {
       endSegment(false);
       i += 1;
@@ -386,7 +444,7 @@ function tokenize(line: string): Segment[] | null {
           op = "&>>";
           j += 1;
         }
-        const read = readRedirectTarget(line, j);
+        const read = readRedirectTarget(line, j, current.substitutions);
         if (!read) return null;
         endWord();
         current.redirects.push({ op, target: read.target });
@@ -429,7 +487,7 @@ function tokenize(line: string): Segment[] | null {
         op = ">&";
         j += 1;
       }
-      const read = readRedirectTarget(line, j);
+      const read = readRedirectTarget(line, j, current.substitutions);
       if (!read) return null;
       current.redirects.push({ op: fd + op, target: read.target });
       i = read.next;
@@ -505,6 +563,13 @@ const WRAPPERS = new Set([
 /** Wrapper options that consume the following word. */
 const WRAPPER_OPTIONS_WITH_VALUE = /^-(?:n|u|I|L|P|s|a|E|i)$/;
 
+/**
+ * `timeout`'s duration is positional, not a flag, so without this `timeout 5
+ * cp a b` finds `5` where the command should be and the head rules see
+ * nothing. The other wrappers spell their values as options.
+ */
+const TIMEOUT_DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+
 const SHELLS = new Set([
   "sh",
   "bash",
@@ -519,6 +584,24 @@ const SHELLS = new Set([
 ]);
 
 const PYTHON_INTERPRETER = /^python[\d.]*$/;
+
+/**
+ * Interpreters that are not shells but run a program handed to them, so that
+ * `curl … | python3` is the same mechanism as `curl … | sh`. Their code is not
+ * classified (we have no perl/js rules) -- only the fact that bytes nobody
+ * read are about to be executed.
+ */
+const OTHER_INTERPRETERS = new Set(["perl", "ruby", "node", "php", "osascript"]);
+
+/**
+ * A short-option cluster carrying the interpreter's inline program: `-c`, and
+ * also `-lc` / `-xc` / `-cx`, which bash accepts and which read as an ordinary
+ * unrelated flag to anything matching `-c` exactly.
+ */
+const INLINE_CODE_FLAG = /^-[A-Za-z]*c[A-Za-z]*$/;
+
+/** Perl/ruby/node's spelling of the same thing. */
+const INLINE_SCRIPT_FLAG = /^-[A-Za-z]*e[A-Za-z]*$/;
 
 /** Redirect targets that discard output rather than writing a file. */
 const DISCARDING_TARGETS = new Set([
@@ -568,13 +651,15 @@ function headIndex(words: readonly Word[]): number {
       i += 1;
       continue;
     }
-    if (!WRAPPERS.has(basename(token))) break;
+    const wrapper = basename(token);
+    if (!WRAPPERS.has(wrapper)) break;
     i += 1;
     while (i < words.length && textAt(words, i).startsWith("-")) {
       const flag = textAt(words, i);
       i += 1;
       if (WRAPPER_OPTIONS_WITH_VALUE.test(flag) && i < words.length) i += 1;
     }
+    if (wrapper === "timeout" && TIMEOUT_DURATION.test(textAt(words, i))) i += 1;
     // `env FOO=1 cmd`
     while (i < words.length && ASSIGNMENT.test(textAt(words, i))) i += 1;
   }
@@ -614,7 +699,7 @@ function truncatesAFile(redirect: Redirect): boolean {
  */
 function interpreterPayloadIsDestructive(words: readonly Word[], depth: number): boolean {
   for (let i = 0; i + 1 < words.length; i += 1) {
-    if (textAt(words, i) !== "-c") continue;
+    if (!INLINE_CODE_FLAG.test(textAt(words, i))) continue;
     let interpreter: string | undefined;
     for (let j = i - 1; j >= 0; j -= 1) {
       const name = basename(textAt(words, j));
@@ -624,14 +709,35 @@ function interpreterPayloadIsDestructive(words: readonly Word[], depth: number):
       }
     }
     if (!interpreter) continue;
-    const payload = textAt(words, i + 1);
-    if (SHELLS.has(interpreter)) {
-      if (classifyBashCommand(payload, depth + 1) === "destructive") return true;
-    } else if (classifyPythonSource(payload) === "destructive") {
-      return true;
-    }
+    if (payloadIsDestructive(interpreter, textAt(words, i + 1), depth)) return true;
   }
   return false;
+}
+
+/** One interpreter plus the program text it was handed, judged in its own language. */
+function payloadIsDestructive(interpreter: string, payload: string, depth: number): boolean {
+  return SHELLS.has(interpreter)
+    ? classifyBashCommand(payload, depth + 1) === "destructive"
+    : classifyPythonSource(payload) === "destructive";
+}
+
+/**
+ * True when a piped-into interpreter would take its PROGRAM from that pipe:
+ * no inline `-c`/`-e` code, no script path, or an explicit `-`.
+ *
+ * The distinction is what keeps the rule off ordinary work: `cat data.json |
+ * python3 -c '…'` pipes *data* into a program that is right there to be read
+ * (and is read, by the `-c` rule above), while `curl … | python3` pipes the
+ * program itself.
+ */
+function readsProgramFromStdin(words: readonly Word[], head: number): boolean {
+  for (let i = head + 1; i < words.length; i += 1) {
+    const text = textAt(words, i);
+    if (text === "-") return true;
+    if (!text.startsWith("-")) return false;
+    if (INLINE_CODE_FLAG.test(text) || INLINE_SCRIPT_FLAG.test(text)) return false;
+  }
+  return true;
 }
 
 function segmentIsDestructive(segment: Segment, depth: number): boolean {
@@ -670,6 +776,29 @@ function segmentIsDestructive(segment: Segment, depth: number): boolean {
   // `bash setup.sh`, whose contents would need a file read this function has
   // no business doing (see the module comment's gaps).
   if (segment.pipedInto && SHELLS.has(headName)) return true;
+  // Same mechanism, non-shell spelling: `curl … | python3` runs the download.
+  // Narrower than the shell rule above only because these interpreters are
+  // also ordinary data sinks -- `cat data.json | python3 -c '…'` is routine,
+  // and the flag is what tells the two apart.
+  if (
+    segment.pipedInto &&
+    (PYTHON_INTERPRETER.test(headName) || OTHER_INTERPRETERS.has(headName)) &&
+    readsProgramFromStdin(words, head)
+  ) {
+    return true;
+  }
+
+  // `sh <<< 'rm -rf ~'`: a here-string is an inline payload spelled as a
+  // redirect. Unlike `sh script.sh`, its bytes are right here to be read, so
+  // the reason `bash setup.sh` goes unclassified does not apply. Shells and
+  // python only -- those are the two languages this file has rules for.
+  if (SHELLS.has(headName) || PYTHON_INTERPRETER.test(headName)) {
+    for (const redirect of segment.redirects) {
+      if (redirect.op.replace(/^\d+/, "") !== "<<<") continue;
+      if (redirect.target === undefined) continue;
+      if (payloadIsDestructive(headName, redirect.target, depth)) return true;
+    }
+  }
 
   if (OVERWRITING_HEADS.has(headName)) {
     if (headName === "tee") {

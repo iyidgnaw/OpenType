@@ -461,7 +461,15 @@ struct AgentToolsPage: View {
 
     // MARK: The two standing cards
 
+    /// The handoff gives this the same `0 1px 2px rgba(0,0,0,.04)` every other
+    /// card on the page carries — it is a white card that happens to have an
+    /// orange edge, not a flat callout — so it takes the card shadow too. It
+    /// cannot use `dsCard()`, which hard-codes the neutral border.
     private var riskCard: some View {
+        DS.Shadow.card(riskCardBody)
+    }
+
+    private var riskCardBody: some View {
         HStack(alignment: .top, spacing: 11) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: McpIcon.cardGlyph))
@@ -815,8 +823,11 @@ struct McpServerSheet: View {
     let onClose: () -> Void
     let onSaved: (SaveOutcome) -> Void
 
-    @State private var draft = McpServerDraft()
-    @State private var didSeed = false
+    /// Seeded at construction rather than in `onAppear`, because the sheet's
+    /// width is a function of `draft.transport`: filling it in after the first
+    /// layout would open every http server at the stdio sheet's 560pt and snap
+    /// it to 460 a frame later.
+    @State private var draft: McpServerDraft
     @State private var test: McpTestOutcome?
     /// The draft signature the result in `test` describes. Any later edit to
     /// the connection makes that result stale, and a stale pass must never
@@ -828,15 +839,27 @@ struct McpServerSheet: View {
     @State private var confirmingDelete = false
     @State private var formHeight: CGFloat = 0
 
+    init(
+        model: AppModel,
+        existing: McpServerSummary?,
+        onClose: @escaping () -> Void,
+        onSaved: @escaping (SaveOutcome) -> Void
+    ) {
+        _model = ObservedObject(wrappedValue: model)
+        self.existing = existing
+        self.onClose = onClose
+        self.onSaved = onSaved
+        _draft = State(initialValue: McpServerDraft(seededFrom: existing))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             sheetHeader
             form
             footer
         }
-        .frame(width: 560)
+        .frame(width: sheetWidth)
         .background(DS.Colour.canvas)
-        .onAppear(perform: seed)
         .confirmationDialog(
             OpenTypeL10n.text(
                 "删除 MCP 服务器「\(existing?.name ?? "")」？",
@@ -856,6 +879,29 @@ struct McpServerSheet: View {
             ))
         }
     }
+
+    // MARK: Metrics
+
+    /// 560 for the stdio form, 460 for http.
+    ///
+    /// The handoff draws §7B at 560 and §7C at 460, and the thing it names as
+    /// the difference between them is the transport, not add-versus-edit: stdio
+    /// has to fit a command, an ordered argument list and an environment map,
+    /// http has an address and a header map. Sizing the sheet to the form it is
+    /// actually showing is why the http variant does not sit in 100pt of empty
+    /// gutter.
+    private var sheetWidth: CGFloat { draft.transport == .stdio ? 560 : 460 }
+
+    /// The width inside the test-result block: the sheet less the form's 20pt
+    /// gutters and the block's own 12pt ones. The tool chips pack themselves,
+    /// so they need the number rather than a container to measure.
+    private var resultContentWidth: CGFloat { sheetWidth - 64 }
+
+    /// The fixed key column in an env/header row — 150 in the stdio sheet, 110
+    /// in the narrower http one, both from the handoff. It is a fixed width
+    /// rather than an intrinsic one so the masked values line up down the
+    /// column instead of stepping in and out with each key's length.
+    private var secretKeyWidth: CGFloat { draft.transport == .stdio ? 150 : 110 }
 
     // MARK: Header
 
@@ -904,7 +950,7 @@ struct McpServerSheet: View {
                     )
                 }
                 if let test, testedSignature == draft.signature {
-                    McpTestResultBlock(outcome: test)
+                    McpTestResultBlock(outcome: test, contentWidth: resultContentWidth)
                     if !test.success {
                         failureAdvice
                     }
@@ -1017,7 +1063,11 @@ struct McpServerSheet: View {
             if !entries.wrappedValue.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(entries.enumerated()), id: \.element.id) { index, $entry in
-                        McpSecretRowView(entry: $entry, isFirst: index == 0) {
+                        McpSecretRowView(
+                            entry: $entry,
+                            isFirst: index == 0,
+                            keyWidth: secretKeyWidth
+                        ) {
                             entries.wrappedValue.removeAll { $0.id == entry.id }
                         }
                     }
@@ -1166,23 +1216,6 @@ struct McpServerSheet: View {
         .padding(.vertical, 14)
         .background(DS.Colour.inset)
         .dsHairline(.top)
-    }
-
-    // MARK: Seeding
-
-    private func seed() {
-        guard !didSeed else { return }
-        didSeed = true
-        guard let existing else { return }
-        draft = McpServerDraft(
-            name: existing.name,
-            transport: existing.transport,
-            command: existing.command ?? "",
-            args: (existing.args ?? []).map { McpArgument(value: $0) },
-            url: existing.url ?? "",
-            env: McpSecretField.saved(from: existing.envMasked),
-            headers: McpSecretField.saved(from: existing.headersMasked)
-        )
     }
 
     // MARK: Validation
@@ -1400,6 +1433,22 @@ private struct McpServerDraft: Equatable {
     var env: [McpSecretField] = []
     var headers: [McpSecretField] = []
 
+    /// An empty draft when adding, or the stored server's fields when editing.
+    ///
+    /// Secrets come across as `.saved` masks — the only form they exist in on
+    /// this Mac — so the form starts out unable to show a real credential even
+    /// before anything decides how to render one.
+    init(seededFrom existing: McpServerSummary?) {
+        guard let existing else { return }
+        name = existing.name
+        transport = existing.transport
+        command = existing.command ?? ""
+        args = (existing.args ?? []).map { McpArgument(value: $0) }
+        url = existing.url ?? ""
+        env = McpSecretField.saved(from: existing.envMasked)
+        headers = McpSecretField.saved(from: existing.headersMasked)
+    }
+
     var activeSecrets: [McpSecretField] {
         transport == .stdio ? env : headers
     }
@@ -1492,11 +1541,17 @@ private struct McpTestOutcome: Equatable {
 
 private struct McpTestResultBlock: View {
     let outcome: McpTestOutcome
+    /// Usable width inside the block, which the tool chips pack against.
+    let contentWidth: CGFloat
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: outcome.success ? "checkmark" : "exclamationmark.triangle")
+                // The handoff's symbol table splits `warning` and `error`:
+                // advice takes the hollow triangle, a thing that actually went
+                // wrong takes the filled one. This header is the only `error`
+                // on the page — the orange block below it is advice.
+                Image(systemName: outcome.success ? "checkmark" : "exclamationmark.triangle.fill")
                     .font(.system(size: McpIcon.inlineGlyph))
                     .foregroundStyle(outcome.success ? AnyShapeStyle(.secondary) : AnyShapeStyle(DS.Colour.error))
                 Text(title)
@@ -1552,7 +1607,7 @@ private struct McpTestResultBlock: View {
                 .font(DS.Text.caption())
                 .foregroundStyle(.secondary)
             } else {
-                McpWrappingTags(titles: outcome.tools)
+                McpWrappingTags(titles: outcome.tools, available: contentWidth)
             }
         } else {
             Text(outcome.message ?? OpenTypeL10n.text("没有更多信息", english: "No further detail"))
@@ -1569,6 +1624,9 @@ private struct McpTestResultBlock: View {
 /// of wildly different lengths.
 private struct McpWrappingTags: View {
     let titles: [String]
+    /// Width to pack into — the sheet is 560 for stdio and 460 for http, so
+    /// this cannot be a constant.
+    let available: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1594,8 +1652,6 @@ private struct McpWrappingTags: View {
     /// Greedy packing on an estimated width — mono glyphs are a fixed advance,
     /// so the estimate is exact enough for chips.
     private var rows: [[String]] {
-        // 560 sheet − 20/20 form padding − 12/12 block padding.
-        let available: CGFloat = 496
         var rows: [[String]] = []
         var current: [String] = []
         var used: CGFloat = 0
@@ -1654,6 +1710,9 @@ private struct McpArgumentRow: View {
 private struct McpSecretRowView: View {
     @Binding var entry: McpSecretField
     let isFirst: Bool
+    /// The handoff's fixed key column: 150 in the 560pt stdio sheet, 110 in the
+    /// 460pt http one.
+    let keyWidth: CGFloat
     let onRemove: () -> Void
 
     var body: some View {
@@ -1663,7 +1722,7 @@ private struct McpSecretRowView: View {
                 Text(entry.key)
                     .font(DS.Text.mono(12))
                     .lineLimit(1)
-                    .frame(width: 150, alignment: .leading)
+                    .frame(width: keyWidth, alignment: .leading)
                 Text(mask)
                     .font(DS.Text.mono(12))
                     .foregroundStyle(.tertiary)
@@ -1682,7 +1741,7 @@ private struct McpSecretRowView: View {
                 TextField(OpenTypeL10n.text("键名", english: "Key"), text: $entry.key)
                     .textFieldStyle(.plain)
                     .font(DS.Text.mono(12))
-                    .frame(width: 150, alignment: .leading)
+                    .frame(width: keyWidth, alignment: .leading)
                 SecureField(
                     OpenTypeL10n.text("值", english: "Value"),
                     text: Binding(
@@ -1920,16 +1979,21 @@ private struct McpTextField: View {
     var placeholder: String = ""
 
     var body: some View {
-        TextField(placeholder, text: $text)
-            .textFieldStyle(.plain)
-            .font(DS.Text.mono(12))
-            .padding(.horizontal, 9)
-            .frame(height: 28)
-            .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
-                    .strokeBorder(DS.Colour.border, lineWidth: 0.75)
-            )
+        // Lifted, like every other 28pt control in the handoff — a field with
+        // no shadow reads as a flat inset panel rather than as something you
+        // type into.
+        DS.Shadow.control(
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(DS.Text.mono(12))
+                .padding(.horizontal, 9)
+                .frame(height: 28)
+                .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                        .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                )
+        )
     }
 }
 
@@ -1993,7 +2057,23 @@ private struct McpSegmentedControl: View {
 /// itself in exactly the copy that exists to show the user its literal
 /// spelling.
 private func McpCodeSentence(_ prefix: String, _ code: String, _ suffix: String) -> Text {
-    Text(prefix) + Text(code).font(DS.Text.mono()) + Text(suffix)
+    Text(prefix) + Text(McpCodeChip(code)) + Text(suffix)
+}
+
+/// The identifier itself, tinted the way the handoff chips it inside body copy.
+///
+/// A run inside a concatenated `Text` can carry a font and a background colour
+/// but not a box model, so the mockup's `padding: 1.5px 5px` and
+/// `border-radius: 4px` have no direct expression. The horizontal breathing
+/// room is approximated with thin spaces inside the tinted run — without them
+/// the fill sits flush against the first and last glyph and reads as a
+/// highlight rather than as a chip. The rounded corners are simply absent; see
+/// `docs/design-review/07-mcp.md`.
+private func McpCodeChip(_ code: String) -> AttributedString {
+    var chip = AttributedString("\u{2009}\(code)\u{2009}")
+    chip.font = DS.Text.mono()
+    chip.backgroundColor = DS.Colour.inset
+    return chip
 }
 
 private struct McpFormHeightKey: PreferenceKey {

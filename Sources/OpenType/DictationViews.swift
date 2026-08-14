@@ -134,43 +134,49 @@ struct DictationColumn: View {
 
     @ViewBuilder
     private func header(narrow: Bool) -> some View {
+        // One child rather than four, because `ColumnHeader` spaces its children
+        // at 8 and this header's gap is 14 (handoff 3A). Nesting the row keeps
+        // the shared header's height and page padding without every other
+        // column having to agree about the gap.
         ColumnHeader(narrow: narrow) {
-            Text(AppTab.dictation.title)
-                .font(DS.Text.title())
-                .tracking(DS.Tracking.title)
+            HStack(spacing: 14) {
+                Text(AppTab.dictation.title)
+                    .font(DS.Text.title())
+                    .tracking(DS.Tracking.title)
 
-            if narrow {
-                Spacer(minLength: 8)
-            } else {
-                // 「248 条 · 全部保存在本机」 — the count and where it lives, in
-                // one line. Dropped in the narrow layout: at 460pt the search
-                // field is the thing the user came to the header for, and a
-                // count that truncates to 「248 条 · 全部保…」 tells them less
-                // than the list under it already does.
-                Text(OpenTypeL10n.text(
-                    "\(displayedCount) 条 · 全部保存在本机",
-                    english: "\(displayedCount) entries · all kept on this Mac"
-                ))
-                .font(DS.Text.mono())
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
+                if narrow {
+                    Spacer(minLength: 0)
+                } else {
+                    // 「248 条 · 全部保存在本机」 — the count and where it lives,
+                    // in one line. `maxWidth: .infinity` is the mock's `flex:1`:
+                    // the count takes the slack, so the search field sits at the
+                    // right edge. Dropped in the narrow layout: at 460pt the
+                    // search field is the thing the user came to the header for,
+                    // and a count that truncates to 「248 条 · 全部保…」 tells
+                    // them less than the list under it already does.
+                    Text(OpenTypeL10n.text(
+                        "\(displayedCount) 条 · 全部保存在本机",
+                        english: "\(displayedCount) entries · all kept on this Mac"
+                    ))
+                    .font(DS.Text.mono())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
 
-                Spacer(minLength: 8)
+                searchField(narrow: narrow)
+                sourceFilter
             }
-
-            searchField(narrow: narrow)
-            sourceFilter
         }
-        // `ColumnHeader` pads to `DS.Space.content` (16) for the 334pt list
-        // column; this page's padding is 24 when wide. Added outside rather
-        // than by reaching into the shared header, which other columns rely on.
-        .padding(.horizontal, narrow ? 0 : DS.Space.pageWide - DS.Space.content)
     }
 
     private func searchField(narrow: Bool) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(DS.Text.section())
+                // 15pt, and regular rather than `DS.Text.section()`'s semibold:
+                // the token's weight is for headings, and a semibold glyph reads
+                // heavier than the mock's icon at the same size.
+                .font(.system(size: 15))
                 .foregroundStyle(.secondary)
             TextField(
                 OpenTypeL10n.text("搜索转写内容", english: "Search transcripts"),
@@ -224,7 +230,10 @@ struct DictationColumn: View {
                     .font(DS.Text.caption())
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(DS.Text.body())
+                    // 14pt: the mock's `unfold_more`. Off `DS.Text`'s scale
+                    // because the scale sizes text, and this is a glyph sized
+                    // against the 26pt control it sits in.
+                    .font(.system(size: 14))
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 11)
@@ -402,21 +411,19 @@ private struct DictationRow: View {
             HStack(spacing: 8) {
                 DictationRowAction(
                     symbol: "doc.on.doc",
-                    label: OpenTypeL10n.text("复制", english: "Copy")
+                    label: OpenTypeL10n.text("复制", english: "Copy"),
+                    rowHovering: hovering
                 ) {
                     model.copy(entry.result)
                 }
                 DictationRowAction(
                     symbol: "arrow.counterclockwise",
-                    label: OpenTypeL10n.text("重新使用", english: "Re-use")
+                    label: OpenTypeL10n.text("重新使用", english: "Re-use"),
+                    rowHovering: hovering
                 ) {
                     model.reuse(entry)
                 }
             }
-            // Hidden until the row is hovered, but never removed: the width
-            // stays reserved so the transcript beside it does not reflow the
-            // instant the pointer arrives.
-            .opacity(hovering ? 1 : 0)
             .padding(.top, 1)
         }
         .padding(.vertical, 13)
@@ -426,22 +433,33 @@ private struct DictationRow: View {
     }
 }
 
+/// A row action.
+///
+/// Present in every row rather than revealed on hover — the handoff draws both
+/// glyphs in the resting row and specifies the hover as a *darkening* (`.32` →
+/// `.55`), not an appearance. That distinction is deliberate on its side: the
+/// 记忆 page's edit/delete actions are the ones spelled 「改为 hover 出现，不常驻」,
+/// and these are not. A user scanning a week of transcripts can see that a row
+/// is copyable without discovering it with the pointer.
 private struct DictationRowAction: View {
     let symbol: String
     let label: String
+    /// Darkens with the row, not with the glyph: the handoff's hover state is a
+    /// property of the row, so both icons answer together.
+    let rowHovering: Bool
     let action: () -> Void
-
-    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(DS.Text.section())
-                .foregroundStyle(hovering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                // 16pt regular. `DS.Text.section()` is 15pt semibold — the wrong
+                // size and the wrong weight for a glyph, and it was reading as a
+                // heading-sized mark next to 13pt body.
+                .font(.system(size: 16))
+                .foregroundStyle(rowHovering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 }
         .help(label)
         .accessibilityLabel(label)
     }
@@ -570,7 +588,7 @@ struct UsageStatsBand: View {
     private func figure(_ item: Figure) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
-                value(item, size: 26)
+                value(item, wide: true)
                 if let trend = item.trend {
                     HStack(spacing: 2) {
                         Image(systemName: trend.symbol)
@@ -590,12 +608,16 @@ struct UsageStatsBand: View {
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Natural width, not an equal share of the row. The mock packs the four
+        // figures at the left of a `flex:1` container with exactly 28pt between
+        // them and leaves the slack on the right; splitting the row four ways
+        // instead puts a different, wider gap after each figure, which is the
+        // one thing a set of separated figures must not have.
     }
 
     private func compactFigure(_ item: Figure) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            value(item, size: 22)
+            value(item, wide: false)
             Text(item.label)
                 .font(DS.Text.caption())
                 .foregroundStyle(item.hasData ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
@@ -605,20 +627,29 @@ struct UsageStatsBand: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func value(_ item: Figure, size: CGFloat) -> some View {
+    /// The number, and 「秒」 riding on it.
+    ///
+    /// The two variants differ by more than the point size, which is why this
+    /// takes `wide` rather than a size: the handoff tracks the 26pt figure at
+    /// `-.02em` and the 22pt one not at all, and sets the unit at 15pt with 2pt
+    /// of lead in the band against 13pt flush in the grid.
+    private func value(_ item: Figure, wide: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             Text(item.value)
-                .font(DS.Text.mono(size, weight: .semibold))
-                .tracking(DS.Tracking.title)
+                .font(DS.Text.mono(wide ? 26 : 22, weight: .semibold))
+                // Resolved against this step rather than reusing
+                // `DS.Tracking.title`, which is the same `-.02em` already
+                // resolved at 20pt and so 0.12pt short at 26.
+                .tracking(wide ? -0.02 * 26 : 0)
                 .foregroundStyle(item.valueStyle)
             if let unit = item.unit {
                 Text(unit)
-                    // `DS.Text.section()` is the scale's 15pt step; the handoff
-                    // draws the unit one weight lighter, which the token does
-                    // not express. `.secondary` carries the same demotion.
-                    .font(DS.Text.section())
+                    // Medium, not `DS.Text.section()`'s semibold: the handoff
+                    // draws the unit a weight lighter than the number so it
+                    // reads as prose. `.secondary` carries the same demotion.
+                    .font(wide ? DS.Text.section().weight(.medium) : DS.Text.body(.medium))
                     .foregroundStyle(.secondary)
-                    .padding(.leading, 2)
+                    .padding(.leading, wide ? 2 : 0)
             }
         }
         .accessibilityElement(children: .combine)
@@ -672,11 +703,10 @@ struct UsageStatsBand: View {
             : 0
 
         return VStack(spacing: 5) {
+            // No baseline rule under the bars: the handoff draws the column as
+            // an empty 34pt box with the bar sitting in the bottom of it, and a
+            // hairline across all seven adds an axis the design does not have.
             ZStack(alignment: .bottom) {
-                Rectangle()
-                    .fill(DS.Colour.hairline)
-                    .frame(height: 0.75)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
                 UnevenRoundedTop(radius: 3)
                     .fill(DS.Colour.accent.opacity(0.55))
                     .frame(height: height)
@@ -684,15 +714,13 @@ struct UsageStatsBand: View {
             .frame(height: Self.barHeight)
             .frame(maxWidth: .infinity)
 
-            Text(isToday
-                 ? OpenTypeL10n.text("今", english: "Now")
-                 : DictationFormat.weekday.string(from: day))
+            // Seven weekday letters in one neutral colour. The last bucket is
+            // the day the user is standing in and so is always short — but that
+            // belongs in the tooltip below, not in a second blue on a band whose
+            // whole point is that 每 100 字纠错 owns the only accent.
+            Text(DictationFormat.weekday.string(from: day))
                 .font(DS.Text.mono(10))
-                // The last bucket is the day the user is standing in, so it is
-                // always short — it has had fewer hours to fill than the six
-                // beside it. Marking it rather than letting it read as a
-                // collapse is the whole reason this label differs.
-                .foregroundStyle(isToday ? AnyShapeStyle(DS.Colour.accent) : AnyShapeStyle(.tertiary))
+                .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }
         .help(isToday

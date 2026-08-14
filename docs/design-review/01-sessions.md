@@ -59,28 +59,28 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Brand row | gap | 9 | `HStack(spacing: 8)` | ⛔ (§12.2) |
 | Brand mark | size / radius | 24×24, r7 | 24×24, r7 | ✅ |
 | Brand mark | gradient | `135deg #0D73FA → #5751FA` | `.topLeading→.bottomTrailing`, accent → `DS.Colour.agent` `#4B45E8` | ⛔ (§12.2) — `#5751FA` has no token |
-| Brand glyph | `graphic_eq` 14px white | `waveform` | `waveform`, 14pt `.medium`, white | ✅ |
-| Brand label | 13 / 600 | `DS.Text.body(.semibold)` | ✅ |
+| Brand glyph | name / size / colour | `graphic_eq`→`waveform`, 14px, white | `waveform`, 14pt `.medium`, white | ✅ |
+| Brand label | size / weight | 13 / 600 | `DS.Text.body(.semibold)` | ✅ |
 | Nav list | padding / item gap | `0 10`, gap 2 | `.horizontal 10`, `VStack(spacing: 2)` | ✅ |
 | Nav item | height / radius / padding / gap | 30, r6, `0 9`, gap 9 | 30, `DS.Radius.control` 6, 9, 9 | ✅ |
 | Nav item | icon / label size | 16 / 13 | 16 / 13 | ✅ |
 | Nav item selected | fill / text | `#0D73FA`, white, 500 | accent, white, `.medium` | ✅ |
 | Nav item unselected | icon colour | `rgba(28,28,30,.55)` | `.secondary` | ✅ |
-| Nav badge | 11 mono | `DS.Text.mono()` | ✅ |
-| Nav badge selected | `rgba(255,255,255,.7)` | `.white.opacity(0.85)` | ⛔ (§12.2) |
-| 记忆 attention dot | 5pt `#E8973A` | `DS.Colour.warning` = `#E8973A`, 5pt | ✅ |
-| Nav items | four: 会话/听写/记忆/设置 | `AppTab.allCases` | ✅ |
+| Nav badge | font | 11 mono | `DS.Text.mono()` | ✅ |
+| Nav badge selected | colour | `rgba(255,255,255,.7)` | `.white.opacity(0.85)` | ⛔ (§12.2) |
+| 记忆 attention dot | size / colour | 5pt `#E8973A` | `DS.Colour.warning` = `#E8973A`, 5pt | ✅ |
+| Nav items | membership | four: 会话/听写/记忆/设置 | `AppTab.allCases` | ✅ |
 | Mode card | container padding | 12 | `.padding(12)` | ✅ |
 | Mode card | radius / border | r10, 0.75 `rgba(0,0,0,.07)` | `DS.Radius.inset` 10, `DS.Colour.border` | ✅ |
 | Mode card | shadow | `0 1px 2px rgba(0,0,0,.04)` | none | ⛔ (§12.2) |
 | Mode card top row | padding / gap | `9 10 8`, gap 7 | `9/10/8`, gap 8 | ⛔ (§12.2) |
-| Mode card top row | `mic` filled 15px accent | `mic.fill` | mode symbol, 15pt, accent | ✅ |
-| Mode card top row | title 12 / 600 | `.system(size: 12, weight: .semibold)` | ✅ |
-| Mode card top row | hint 10 mono | `DS.Text.mono(10)` | ✅ |
-| Mode card top row | `unfold_more` 14px | `chevron.up.chevron.down` | 10pt `.semibold` | ⛔ (§12.2) |
-| Mode card bottom row | top hairline, padding `7 10` | `dsHairline(.top)`, 7/10 | ✅ |
-| Mode card bottom row | dot 5pt `#34A853` | `DS.Colour.ok` = `#34A853` | ✅ |
-| Mode card bottom row | text 10 mono | `DS.Text.mono(10)` | ✅ |
+| Mode card top row | icon name / size / colour | `mic` filled→`mic.fill`, 15px, accent | mode symbol, 15pt, accent | ✅ |
+| Mode card top row | title size / weight | 12 / 600 | `.system(size: 12, weight: .semibold)` | ✅ |
+| Mode card top row | hint font | 10 mono | `DS.Text.mono(10)` | ✅ |
+| Mode card top row | disclosure icon | `unfold_more`→`chevron.up.chevron.down`, 14px | 10pt `.semibold` | ⛔ (§12.2) |
+| Mode card bottom row | separator / padding | top hairline, `7 10` | `dsHairline(.top)`, 7/10 | ✅ |
+| Mode card bottom row | dot size / colour | 5pt `#34A853` | `DS.Colour.ok` = `#34A853`, 5pt | ✅ |
+| Mode card bottom row | text font | 10 mono | `DS.Text.mono(10)` | ✅ |
 
 ---
 
@@ -123,7 +123,7 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Chip dot | Agent colour | `#4B45E8` | `DS.Colour.agent` | ✅ |
 | Chip dot | 问答 colour | `#0D73FA` | `DS.Colour.accent` | ✅ |
 | Chip dot | 全部 has none | — | `filter.kind == nil` | ✅ |
-| Chip copy | 全部 / Agent / 问答 | `SessionFilter.title` | ✅ |
+| Chip | copy | 全部 / Agent / 问答 | `SessionFilter.title` | ✅ |
 
 ---
 
@@ -327,7 +327,7 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Icon rail | width | 52 | `DS.Size.iconRail` = 52 | ✅ |
 | Icon rail | background / right border | `#EAEAE7`, 0.75 `rgba(0,0,0,.09)` | `DS.Colour.sidebar`, hairline 0.06 | ⛔ (§12.2) |
 | Icon rail | top padding / item gap | 14 / 4 | 52pt clear strip, `VStack(spacing: 2)` | ⛔ (§12.2) |
-| Icon rail | brand 24×24 r7, `margin-bottom:10` | 24×24 r7, `.padding(.bottom, 14)` | ⛔ (§12.2) |
+| Icon rail | brand size / radius / bottom margin | 24×24, r7, 10 | 24×24, r7, `.padding(.bottom, 14)` | ⛔ (§12.2) |
 | Icon rail | nav item size / radius | 34×30, r7 | 34×30, r7 | ✅ |
 | Icon rail | nav icon size | 17 | 17 | ✅ |
 | Icon rail | selected fill | accent | accent | ✅ |

@@ -50,33 +50,31 @@ struct SessionsListColumn: View {
     // MARK: Header
 
     private var header: some View {
-        // Deliberately not `ColumnHeader(narrow:)`: the handoff gives this
-        // column a 16pt header gutter in *both* layouts (only the scrolling
-        // content below tightens to 14), so passing `narrow` here would move
-        // the title relative to the chips it heads.
-        ColumnHeader {
-            HStack(spacing: 10) {
-                Text(OpenTypeL10n.text("会话", english: "Sessions"))
-                    .font(DS.Text.title())
-                    .tracking(DS.Tracking.title)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        // Deliberately not `ColumnHeader(narrow:)`: that component hardcodes the
+        // page gutter (24 wide / 14 narrow) and the handoff gives this column 16
+        // in *both* layouts — only the scrolling content below tightens to 14.
+        // Passing `narrow` would move the title relative to the chips it heads.
+        SessionColumnHeader(leading: DS.Space.content, trailing: DS.Space.content, spacing: 10) {
+            Text(OpenTypeL10n.text("会话", english: "Sessions"))
+                .font(DS.Text.title())
+                .tracking(DS.Tracking.title)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                SessionIconButton(
-                    symbol: "magnifyingglass",
-                    filled: false,
-                    help: OpenTypeL10n.text("搜索会话", english: "Search sessions")
-                ) {
-                    searching.toggle()
-                    if !searching { query = "" }
-                }
+            SessionIconButton(
+                symbol: "magnifyingglass",
+                filled: false,
+                help: OpenTypeL10n.text("搜索会话", english: "Search sessions")
+            ) {
+                searching.toggle()
+                if !searching { query = "" }
+            }
 
-                SessionIconButton(
-                    symbol: "plus",
-                    filled: true,
-                    help: OpenTypeL10n.text("新对话", english: "New conversation")
-                ) {
-                    startNewConversation()
-                }
+            SessionIconButton(
+                symbol: "plus",
+                filled: true,
+                help: OpenTypeL10n.text("新对话", english: "New conversation")
+            ) {
+                startNewConversation()
             }
         }
     }
@@ -288,30 +286,41 @@ struct SessionThreadColumn: View {
     // MARK: Header
 
     private func header(_ focused: FocusedConversation) -> some View {
-        ColumnHeader(narrow: narrow) {
-            HStack(spacing: 10) {
-                if narrow {
-                    // Narrow pushes the thread over the list, so the only way
-                    // back is here. Wide keeps the list visible beside it.
-                    Button(action: clearFocus) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 20, weight: .regular))
-                            .foregroundStyle(DS.Colour.accent)
-                    }
-                    .buttonStyle(.plain)
-                    .help(OpenTypeL10n.text("返回列表", english: "Back to list"))
+        // The handoff gives this header its own gutters — 20 on both sides wide,
+        // and 10/14 narrow so the back chevron sits closer to the edge than the
+        // ellipsis does. `ColumnHeader`'s fixed 24/14 would put the type tag a
+        // step out from the content under it.
+        SessionColumnHeader(
+            leading: narrow ? 10 : 20,
+            trailing: narrow ? DS.Space.pageNarrow : 20,
+            spacing: narrow ? 8 : 10
+        ) {
+            if narrow {
+                // Narrow pushes the thread over the list, so the only way
+                // back is here. Wide keeps the list visible beside it.
+                Button(action: clearFocus) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .regular))
+                        .foregroundStyle(DS.Colour.accent)
                 }
+                .buttonStyle(.plain)
+                .help(OpenTypeL10n.text("返回列表", english: "Back to list"))
+            }
 
-                SessionKindTag(kind: focused.kind)
+            SessionKindTag(kind: focused.kind)
 
-                Text(detail(for: focused)?.title ?? OpenTypeL10n.text("对话", english: "Conversation"))
-                    // The mockup sets 14pt here; the scale has no 14, and one
-                    // exception per screen is how the old twelve-size UI
-                    // happened. 15/semibold is the nearest step.
-                    .font(DS.Text.section())
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            Text(detail(for: focused)?.title ?? OpenTypeL10n.text("对话", english: "Conversation"))
+                // The mockup sets 14pt here; the scale has no 14, and one
+                // exception per screen is how the old twelve-size UI
+                // happened. 15/semibold is the nearest step.
+                .font(DS.Text.section())
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Narrow drops the copy button and keeps only 「更多」: the back
+            // chevron has already taken a slot, and the same action is one row
+            // down the menu. The handoff draws it exactly this way.
+            if !narrow {
                 Button {
                     copyTranscript(focused)
                 } label: {
@@ -321,25 +330,25 @@ struct SessionThreadColumn: View {
                 }
                 .buttonStyle(.plain)
                 .help(OpenTypeL10n.text("复制全文", english: "Copy transcript"))
-
-                Menu {
-                    Button(OpenTypeL10n.text("新对话", english: "New conversation")) {
-                        clearFocus()
-                    }
-                    Button(OpenTypeL10n.text("复制全文", english: "Copy transcript")) {
-                        copyTranscript(focused)
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
             }
+
+            Menu {
+                Button(OpenTypeL10n.text("新对话", english: "New conversation")) {
+                    clearFocus()
+                }
+                Button(OpenTypeL10n.text("复制全文", english: "Copy transcript")) {
+                    copyTranscript(focused)
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 17))
+                    .foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
         }
-        .dsHairline(.bottom)
+        .modifier(SessionEdgeBorder(edge: .bottom))
     }
 
     // MARK: Messages
@@ -353,11 +362,19 @@ struct SessionThreadColumn: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: narrow ? 18 : 20) {
                         ForEach(Array(detail.messages.enumerated()), id: \.element.id) { index, message in
-                            if index == stepLogAnchor(in: detail), let log = stepLog(for: focused) {
-                                log
+                            // The log and the answer it produced are one turn at
+                            // 12pt, not two messages at 20 — they are the same
+                            // reply, seen from two distances.
+                            VStack(alignment: .leading, spacing: 12) {
+                                if index == stepLogAnchor(in: detail), let log = stepLog(for: focused) {
+                                    log
+                                }
+                                // 78% wide, 80% narrow: the same bubble reads as
+                                // narrower when the column is, so the handoff
+                                // gives the tighter layout the looser cap.
+                                SessionTurn(message: message, maxBubbleWidth: available * (narrow ? 0.80 : 0.78))
                             }
-                            SessionTurn(message: message, maxBubbleWidth: available * 0.78)
-                                .id(message.id)
+                            .id(message.id)
                         }
                         if isWorking(focused) {
                             SessionWorkingRow()
@@ -494,7 +511,7 @@ struct SessionThreadColumn: View {
         .padding(.horizontal, narrow ? DS.Space.content : 20)
         .padding(.top, narrow ? 12 : 14)
         .padding(.bottom, narrow ? DS.Space.content : 18)
-        .dsHairline(.top)
+        .modifier(SessionEdgeBorder(edge: .top))
     }
 
     private func send(_ focused: FocusedConversation) {
@@ -997,7 +1014,7 @@ private struct SessionKindTag: View {
 private struct SessionWorkingRow: View {
     var body: some View {
         HStack(spacing: 7) {
-            SessionPulseDot()
+            SessionPulseDot(period: 1.2)
             Text(OpenTypeL10n.text("正在检索…", english: "Working…"))
                 .font(DS.Text.mono())
                 .foregroundStyle(.tertiary)
@@ -1014,7 +1031,7 @@ private struct SessionComposerButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 15, weight: .medium))
+                .font(.system(size: SessionMetrics.glyph))
                 .foregroundStyle(filled ? AnyShapeStyle(Color.white) : AnyShapeStyle(DS.Colour.accent))
                 .frame(width: 30, height: 30)
                 .modifier(SessionButtonChrome(filled: filled, radius: SessionMetrics.composerButtonRadius))
@@ -1035,7 +1052,7 @@ private struct SessionIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 14, weight: .medium))
+                .font(.system(size: SessionMetrics.glyph))
                 .foregroundStyle(filled ? AnyShapeStyle(Color.white) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
                 .frame(width: 26, height: 26)
                 .modifier(SessionButtonChrome(filled: filled, radius: SessionMetrics.iconButtonRadius))
@@ -1082,8 +1099,15 @@ private struct SessionGroupLabel: View {
     }
 }
 
-/// The 1.4s breathing dot that marks something as live.
+/// The breathing dot that marks something as live.
+///
+/// Two periods, both from the handoff: 1.4s for the 进行中 group label, 1.2s for
+/// the 正在检索 row in a thread. The faster one is next to a line of text that
+/// is itself waiting, and matching them would have made the two read as one
+/// object blinking together.
 private struct SessionPulseDot: View {
+    var period: Double = 1.4
+
     @State private var pulsing = false
 
     var body: some View {
@@ -1092,7 +1116,7 @@ private struct SessionPulseDot: View {
             .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
             .opacity(pulsing ? 0.35 : 1)
             .scaleEffect(pulsing ? 0.82 : 1)
-            .animation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true), value: pulsing)
+            .animation(.easeInOut(duration: period).repeatForever(autoreverses: true), value: pulsing)
             .onAppear { pulsing = true }
     }
 }
@@ -1122,6 +1146,47 @@ private struct SessionIndeterminateBar: View {
     }
 }
 
+/// The 52pt strip a column starts with, at gutters this screen chooses.
+///
+/// `ColumnHeader` bakes in the page gutter (24 wide / 14 narrow). Both of this
+/// screen's headers want something else — 16/16 for the list, 20/20 then 10/14
+/// for the thread — and a header that does not share a left edge with the cards
+/// under it is the one misalignment a reader notices without being able to say
+/// why. Same height, so headers still line up across all three columns.
+private struct SessionColumnHeader<Content: View>: View {
+    var leading: CGFloat
+    var trailing: CGFloat
+    var spacing: CGFloat
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            content()
+        }
+        .padding(.leading, leading)
+        .padding(.trailing, trailing)
+        .frame(height: DS.Size.headerHeight)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A 0.75pt line at the *border* weight rather than the hairline one.
+///
+/// The design uses two: `border` (0.07) where one region ends and another
+/// begins — the thread header, the composer — and `hairline` (0.06) between
+/// rows inside a single card. `dsHairline` is the second; this is the first.
+private struct SessionEdgeBorder: ViewModifier {
+    let edge: Edge
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: edge == .top ? .top : .bottom) {
+            Rectangle()
+                .fill(DS.Colour.border)
+                .frame(height: 0.75)
+        }
+    }
+}
+
 /// `dsHairline` only when a condition holds — SwiftUI has no conditional
 /// modifier, and branching on the view itself would give the two branches
 /// different identities and re-create their state.
@@ -1146,6 +1211,10 @@ private enum SessionMetrics {
     static let iconButtonRadius: CGFloat = 7
     /// And 9 for the 30–34pt round buttons, matching `SidebarModeButton`.
     static let composerButtonRadius: CGFloat = 9
+    /// The glyph inside a 26 or 30pt button. One value because the handoff uses
+    /// one (`font-size:16px` for 搜索 / 新对话 / 口述 / 发送 alike) — the button
+    /// grows, the icon in it does not.
+    static let glyph: CGFloat = 16
 }
 
 private enum SessionKindStyle {

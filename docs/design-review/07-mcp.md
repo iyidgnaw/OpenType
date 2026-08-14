@@ -181,6 +181,7 @@ These are recorded per element below as ⚠️ with a back-reference here.
 | Element | Property | Design | Implemented | Status |
 |---|---|---|---|---|
 | Sheet | width | `560px` | `sheetWidth` = 560 when `transport == .stdio` | ✅ **fixed** — was a fixed 560 for both transports |
+| Sheet | width at open | — | draft seeded in `init` via `McpServerDraft(seededFrom:)`, not in `onAppear` | ✅ **fixed follow-on** — a width that reads `draft.transport` must not be measured before the draft exists, or every http edit opens at 560 and snaps to 460 |
 | Sheet | background | `#F7F7F5` | `DS.Colour.canvas` = `#F5F5F3` | ⚠️ **token gap** — no sheet-canvas token; 2/255 per channel |
 | Sheet | radius / border / shadow | `14px`, `.75px rgba(0,0,0,.08)`, `0 24px 70px rgba(0,0,0,.28)` | AppKit sheet chrome | ✅ n/a |
 | Header | padding | `16px 20px 14px` | `.horizontal 20`, `.top DS.Space.content` (16), `.bottom 14` | ✅ |

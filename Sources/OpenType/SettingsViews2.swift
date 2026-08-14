@@ -242,7 +242,8 @@ struct SettingsColumn: View {
                 } label: {
                     ControlChip(
                         text: OpenTypeL10n.text("试听", english: "Preview"),
-                        showsIndicator: false
+                        showsIndicator: false,
+                        horizontalPadding: 10
                     )
                 }
                 .menuStyle(.borderlessButton)
@@ -746,7 +747,12 @@ private struct SettingsGroup<Content: View>: View {
                 .foregroundStyle(.tertiary)
                 .padding(.horizontal, 4)
 
+            // `overflow:hidden` in the mockup, and not decorative: the
+            // ungranted permission row carries a full-bleed warning tint and is
+            // the last row of its card, so without the clip its square corners
+            // would poke out past the card's 14pt radius.
             VStack(spacing: 0) { content() }
+                .clipShape(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
                 .dsCard()
         }
     }
@@ -761,6 +767,11 @@ private struct SettingsGroup<Content: View>: View {
 /// drift.
 private struct SettingsRow<Trailing: View>: View {
     var divided = true
+    /// 11pt vertical padding instead of 12. The mockup gives the permission
+    /// rows — a dot, a name and a word — one point less than every other row,
+    /// which is what keeps a three-row card of one-line rows from reading as
+    /// taller than the two-row cards beside it.
+    var compact = false
     let title: String
     var subtitle: String?
     /// A machine-produced second line — provider and model, a path, a count.
@@ -798,7 +809,10 @@ private struct SettingsRow<Trailing: View>: View {
                     .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            // 2pt under a prose subtitle, 3pt under a mono one. The mono line
+            // sits on a smaller face with tighter leading, so the mockup buys
+            // the point back to keep the optical gap equal.
+            VStack(alignment: .leading, spacing: mono == nil ? 2 : 3) {
                 Text(title)
                     .font(DS.Text.body())
                     .foregroundStyle(destructive ? DS.Colour.error : Color.primary)
@@ -827,14 +841,18 @@ private struct SettingsRow<Trailing: View>: View {
                         .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
                 }
                 if pushes != nil {
+                    // The mockup's `chevron_right` is a 16px Material glyph.
+                    // Material sizes the em box; SF Symbols size the cap
+                    // height, and a chevron fills about two thirds of a
+                    // Material box — so 16px of box is ~13pt of symbol.
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.tertiary)
                 }
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, compact ? 11 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tinted ? DS.Colour.warning.opacity(0.05) : Color.clear)
         .contentShape(Rectangle())
@@ -845,6 +863,7 @@ private struct SettingsRow<Trailing: View>: View {
 extension SettingsRow where Trailing == EmptyView {
     init(
         divided: Bool = true,
+        compact: Bool = false,
         title: String,
         subtitle: String? = nil,
         mono: String? = nil,
@@ -857,6 +876,7 @@ extension SettingsRow where Trailing == EmptyView {
     ) {
         self.init(
             divided: divided,
+            compact: compact,
             title: title,
             subtitle: subtitle,
             mono: mono,
@@ -916,6 +936,7 @@ private struct PermissionRow: View {
     var body: some View {
         SettingsRow(
             divided: divided,
+            compact: true,
             title: title,
             subtitle: status == .granted ? nil : deniedNote,
             leadingDot: status == .granted ? DS.Colour.ok : DS.Colour.warning,
@@ -1028,8 +1049,14 @@ private struct SegmentedControl<Option: Identifiable & Equatable>: View {
         }
         .padding(2)
         .frame(height: 26)
+        // The mockup's track is `#F0F0EE`, which is darker than
+        // `DS.Colour.inset` (the token for a recessed block inside a card) and
+        // slightly warm. 6% black over the white card lands on `#F0F0F0` —
+        // right on two channels and 2/255 off on the third. Closing that last
+        // step needs a literal colour token the scale doesn't have yet; it is
+        // reported rather than invented here.
         .background(
-            Color.primary.opacity(0.05),
+            Color.primary.opacity(0.06),
             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
         )
     }
@@ -1040,6 +1067,10 @@ private struct ControlChip: View {
     let text: String
     var mono = false
     var showsIndicator = true
+    /// 8 with a chevron, 10 without. The mockup pads a bare label wider so the
+    /// two shapes end up the same optical size — the chevron already carries
+    /// the trailing 2pt of air that a plain word doesn't have.
+    var horizontalPadding: CGFloat = 8
 
     var body: some View {
         HStack(spacing: 6) {
@@ -1048,12 +1079,15 @@ private struct ControlChip: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
             if showsIndicator {
+                // `unfold_more` at 14px of Material em box. Two stacked
+                // chevrons fill a box more completely than one does, so this
+                // maps lower than the 16px `chevron.right` above, not higher.
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, horizontalPadding)
         .frame(height: 24)
         .background(
             DS.Colour.canvas,

@@ -20,8 +20,11 @@ struct MemoryColumn: View {
         GeometryReader { proxy in
             let narrow = proxy.size.width < MemoryMetrics.twoColumnMinimum
             // Matches `ColumnHeader`'s own padding so the title, the status
-            // line and every card below share one left edge.
-            let pagePadding = narrow ? DS.Space.pageNarrow : DS.Space.content
+            // line and every card below share one left edge. `content` (16) was
+            // a transcription slip: 03B's content area is `padding: 0 24 24`,
+            // and the header had already been corrected to 24, so the cards sat
+            // 8pt left of the title above them.
+            let pagePadding = narrow ? DS.Space.pageNarrow : DS.Space.pageWide
 
             VStack(spacing: 0) {
                 header(narrow: narrow)
@@ -218,10 +221,15 @@ private struct MemoryDictionaryCard: View {
 /// One dictionary row: term and aliases, how sure the app is, where it came
 /// from, and — only while the pointer is on the row — edit and delete.
 ///
-/// The two actions are hover-revealed but their space is *not*: an always-empty
-/// trailing slot costs a fixed strip of the column, while a slot that appears
-/// on hover reflows every row under the pointer. In a list you are scanning,
-/// the reflow is the more expensive of the two.
+/// 03B's row is exactly three columns (term/aliases, a 44pt confidence stack, a
+/// 52pt provenance slot) and leaves no room for a fourth, so the two actions
+/// take neither layout width nor a reserved strip: they ride in a trailing
+/// overlay that covers the provenance badge while the pointer is on the row.
+/// Reserving a permanent slot for them, which is what this used to do, pushed
+/// every row's badge 58pt left of the design; letting them join the `HStack`
+/// instead reflows every row under the pointer. An overlay is the only reading
+/// that is pixel-exact at rest *and* still on hover — and the badge it covers is
+/// the one thing on the row you are not reaching for when you reach for these.
 private struct MemoryTermRowView: View {
     @ObservedObject var model: AppModel
     let term: EntityTermSummary
@@ -253,7 +261,7 @@ private struct MemoryTermRowView: View {
 
             VStack(alignment: .trailing, spacing: 4) {
                 Text(String(format: "%.0f%%", term.confidence * 100))
-                    .font(DS.Text.mono())
+                    .font(DS.Text.mono(MemoryMetrics.confidenceType))
                     .foregroundStyle(.tertiary)
                 ConfidenceBar(value: term.confidence)
             }
@@ -261,47 +269,10 @@ private struct MemoryTermRowView: View {
 
             MemoryOriginTag(origin: term.origin, style: .compact)
                 .frame(width: MemoryMetrics.originColumn, alignment: .trailing)
-
-            HStack(spacing: 2) {
-                MemoryRowAction(
-                    symbol: "pencil",
-                    help: OpenTypeL10n.text("编辑这个词条", english: "Edit this term")
-                ) {
-                    showingEditor = true
-                }
-                .popover(isPresented: $showingEditor, arrowEdge: .bottom) {
-                    MemoryTermForm(
-                        title: OpenTypeL10n.text("编辑词条", english: "Edit term"),
-                        term: term
-                    ) { canonicalTerm, aliases, confidence in
-                        await model.updateMemoryTerm(
-                            id: term.id,
-                            canonicalTerm: canonicalTerm,
-                            aliases: aliases,
-                            confidence: confidence
-                        )
-                    } onDismiss: {
-                        showingEditor = false
-                    }
-                }
-
-                MemoryRowAction(
-                    symbol: "trash",
-                    help: OpenTypeL10n.text("删除这个词条", english: "Delete this term")
-                ) {
-                    showingDeleteConfirmation = true
-                }
-            }
-            .frame(width: MemoryMetrics.actionColumn, alignment: .trailing)
-            // The editor's popover has to survive the pointer leaving the row.
-            .opacity(revealsActions ? 1 : 0)
-            // An invisible view still takes clicks, and an invisible *delete*
-            // button that takes clicks is a way to lose a term without seeing
-            // what you hit.
-            .allowsHitTesting(revealsActions)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, MemoryMetrics.rowH)
         .padding(.vertical, DS.Space.rowV)
+        .overlay(alignment: .trailing) { actions }
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
         // `DELETE /memory/terms/:id` drops the row and there is no undo, so it
@@ -324,6 +295,53 @@ private struct MemoryTermRowView: View {
                 english: "This cannot be undone. The term will stop biasing recognition and stop being applied as a correction."
             ))
         }
+    }
+
+    /// Edit and delete, riding above the provenance badge rather than beside
+    /// it. The card colour behind them is what makes the overlay read as a
+    /// swap instead of a collision — 03B's row is white, so the block that
+    /// hides the badge is itself invisible.
+    private var actions: some View {
+        HStack(spacing: 2) {
+            MemoryRowAction(
+                symbol: "pencil",
+                help: OpenTypeL10n.text("编辑这个词条", english: "Edit this term")
+            ) {
+                showingEditor = true
+            }
+            .popover(isPresented: $showingEditor, arrowEdge: .bottom) {
+                MemoryTermForm(
+                    title: OpenTypeL10n.text("编辑词条", english: "Edit term"),
+                    term: term
+                ) { canonicalTerm, aliases, confidence in
+                    await model.updateMemoryTerm(
+                        id: term.id,
+                        canonicalTerm: canonicalTerm,
+                        aliases: aliases,
+                        confidence: confidence
+                    )
+                } onDismiss: {
+                    showingEditor = false
+                }
+            }
+
+            MemoryRowAction(
+                symbol: "trash",
+                help: OpenTypeL10n.text("删除这个词条", english: "Delete this term")
+            ) {
+                showingDeleteConfirmation = true
+            }
+        }
+        .padding(.leading, DS.Space.label)
+        .frame(maxHeight: .infinity)
+        .background(DS.Colour.card)
+        .padding(.trailing, MemoryMetrics.rowH)
+        // The editor's popover has to survive the pointer leaving the row.
+        .opacity(revealsActions ? 1 : 0)
+        // An invisible view still takes clicks, and an invisible *delete*
+        // button that takes clicks is a way to lose a term without seeing
+        // what you hit.
+        .allowsHitTesting(revealsActions)
     }
 }
 
@@ -457,8 +475,8 @@ private struct MemoryOwnerFactRowView: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.horizontal, MemoryMetrics.rowH)
+        .padding(.vertical, MemoryMetrics.factRowV)
         .frame(maxWidth: .infinity, alignment: .leading)
         // A tint rather than a border: it marks the row as needing a look
         // without competing with the accent, and it disappears the moment the
@@ -523,7 +541,7 @@ private struct MemoryConsolidationRunsCard: View {
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, MemoryMetrics.rowH)
                         .padding(.vertical, DS.Space.rowV)
                         .modifier(MemoryRowSeparator(isFirst: index == 0))
                     }
@@ -624,8 +642,8 @@ private struct MemoryEmptyRow: View {
             .font(DS.Text.caption())
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.horizontal, MemoryMetrics.rowH)
+            .padding(.vertical, MemoryMetrics.factRowV)
             .frame(maxWidth: .infinity, alignment: .leading)
             .dsCard()
     }
@@ -777,11 +795,19 @@ private enum MemoryMetrics {
     /// across its width; they stop fitting well before the window itself does.
     static let twoColumnMinimum: CGFloat = 640
 
+    /// 03B's rows are inset 14, not `DS.Space.rowH` (13, which is 会话's list
+    /// row) and not 听写's 16. Named here so the four cards on this page cannot
+    /// drift apart from each other.
+    static let rowH: CGFloat = 14
+    /// 「关于你」's rows are taller than the other three: 12, against 11.
+    static let factRowV: CGFloat = 12
+
     static let confidenceColumn: CGFloat = 44
     static let originColumn: CGFloat = 52
-    static let actionColumn: CGFloat = 46
     static let actionButton: CGFloat = 22
     static let logTimeColumn: CGFloat = 76
+    /// The one type size on this page that is below `DS.Text`'s smallest step.
+    static let confidenceType: CGFloat = 10.5
 
     static let barWidth: CGFloat = 40
     static let barHeight: CGFloat = 2

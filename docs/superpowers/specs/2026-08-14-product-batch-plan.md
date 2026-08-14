@@ -77,6 +77,23 @@ P1/P2 是围绕这个环的收敛与体感。
 
 **不做**：`language` 参数透传（「转写语言」名不副实那条）不在本批，单独处理。
 
+### 已核实的 mlx_whisper 签名（2026-08-14，本机 `sidecar/whisper-env`）
+
+不要靠猜。实测 `inspect.signature(mlx_whisper.transcribe)`：
+
+```
+['audio', 'path_or_hf_repo', 'verbose', 'temperature', 'compression_ratio_threshold',
+ 'logprob_threshold', 'no_speech_threshold', 'condition_on_previous_text',
+ 'initial_prompt', 'word_timestamps', 'prepend_punctuations', 'append_punctuations',
+ 'clip_timestamps', 'hallucination_silence_threshold', 'decode_options']
+```
+
+- `initial_prompt` 是**真实的具名参数**，本条设计成立。
+- `language` **不是**顶层参数，它走 `**decode_options`。将来做「转写语言」那条时按 `language=...` 传进
+  decode_options，别去加顶层参数。
+- 同时注意 `condition_on_previous_text` 存在——它和 initial_prompt 是相关旋钮，如果将来发现 prompt 文本
+  被回显进结果，这是第一个该看的开关。
+
 ---
 
 ## P0-2 纠错自动入词典

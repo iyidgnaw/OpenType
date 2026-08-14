@@ -1,5 +1,7 @@
 # OpenType
 
+**中文** · [English](README.en.md)
+
 OpenType 是一个本地优先的 macOS AI 语音输入工具，把自然口语变成可以直接使用的文字。按住一个快捷键说话，松开后直接转成文字、回答你的问题，或者把一个任务交给 Agent 去做。
 
 > 曾经有 iOS 与 Android 两端，原计划三端共享同一套模式/Prompt 安全规则/Provider 语义/审计协议。macOS 端经历了一次从零重写后，两端已被整体移除（产品决定，不是遗漏）——本仓库现在只有 macOS 一个平台。
@@ -8,13 +10,27 @@ OpenType 是一个本地优先的 macOS AI 语音输入工具，把自然口语�
 
 ## 安装
 
-还没有打包发行版，安装方式是 clone 仓库后本地编译。有两条路：
+从 [Releases](https://github.com/iyidgnaw/OpenType/releases/latest) 下载 `OpenType-<版本>-macos-arm64.zip`（约 24 MB），解压后在该目录里运行：
 
-**A. 交给你自己的 coding agent（推荐给非工程师）**
+```bash
+./install.sh
+```
 
-把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 直接发给 Claude Code / Codex 等，让它把 clone、依赖安装、本地 Whisper 环境搭建、编译、首次授权和应用内设置引导全部走一遍。那份 prompt 除了驱动下面的脚本，还覆盖了脚本做不了的部分——macOS 两项权限授予、应用内设置向导，以及安装前需要先问你的两个选择（语音识别用本地还是远程、用哪家 LLM）。
+它会把 app 装进 `/Applications`、用 Homebrew 装好 `python@3.12` 和 `ffmpeg`、在 app 内部搭建本地语音识别环境，然后重新签名。可以反复运行，重跑时会保留已经建好的语音环境而不是重建。加 `--skip-whisper` 可以跳过本地识别（改在应用内配置远程识别服务）。
 
-**B. 自己动手**
+**不想自己盯着这套流程**，可以把 [`docs/onboarding/coding-agent-setup-prompt.md`](docs/onboarding/coding-agent-setup-prompt.md) 里的 prompt 交给 Claude Code / Codex 等，让它把下载、安装、两项 macOS 权限授予和应用内设置向导全程带你走一遍——那份 prompt 覆盖了脚本做不了的部分，也包括安装前该先问你的两个选择（语音识别用本地还是远程、用哪家 LLM）。
+
+> 发布包是 ad-hoc 签名、**未经过 Apple 公证**的。`install.sh` 会替你清掉下载隔离标记，所以正常流程不会看到 Gatekeeper 警告；但这也意味着你是在信任这个仓库的作者，介意的话请自行从源码构建。
+
+### 环境要求
+
+- **Apple Silicon Mac**：本地语音识别基于 Apple 的 MLX，没有 Intel 版本，这条没有变通办法。
+- **macOS 13 (Ventura) 或更新**。
+- **[Homebrew](https://brew.sh)**（本地识别需要，用来装 Python 和 ffmpeg；纯远程识别可以不装）。
+- **磁盘**：app 本体约 74 MB，本地语音环境约 1.1 GB（大头是 mlx-whisper 的依赖树，mlx-whisper 本身还不到 2 MB），首次转写另需在 `~/.cache/huggingface` 下载约 460 MB 的模型——这是一次性开销，不是卡死。
+- **LLM API Key 只有「问答」和「Agent」模式需要**；纯听写不需要任何 Key、不需要联网。
+
+### 从源码构建（开发者）
 
 ```bash
 git clone https://github.com/iyidgnaw/OpenType.git
@@ -22,34 +38,19 @@ cd OpenType
 ./scripts/setup.sh
 ```
 
-[`scripts/setup.sh`](scripts/setup.sh) 是幂等的：检查环境 → 用 Homebrew 装好 `bun` / `python@3.12` / `ffmpeg` → 搭建本地 Whisper venv → 编译出 `dist/OpenType.app`。随时可以重跑，也可以用 `--check` 只体检不改动：
+[`scripts/setup.sh`](scripts/setup.sh) 是幂等的：检查环境 → 用 Homebrew 装好 `bun` / `python@3.12` / `ffmpeg` → 搭建本地 Whisper venv → 编译出 `dist/OpenType.app`。除上面的环境要求外还需要 **Xcode 命令行工具**（`xcode-select --install`），完整 checkout 加编译产物约占 3.4 GB。
 
 | 参数 | 作用 |
 |---|---|
-| `--skip-whisper` | 跳过本地 Whisper 环境（改在应用内配置远程识别服务） |
+| `--skip-whisper` | 跳过本地 Whisper 环境 |
 | `--no-build` | 只装依赖，不编译 |
 | `--check` | 只检查并报告，不做任何改动 |
 
-编译完成后：
-
-```bash
-cp -R dist/OpenType.app /Applications/
-open /Applications/OpenType.app
-```
-
-（放到 `/Applications` 再运行，可以让 macOS 的权限授权在后续重新编译后依然有效。）
-
-## 环境要求
-
-- **Apple Silicon Mac**：本地语音识别基于 Apple 的 MLX，没有 Intel 版本，这条没有变通办法。
-- **macOS 13 (Ventura) 或更新**。
-- **Xcode 命令行工具**（`xcode-select --install`）和 **[Homebrew](https://brew.sh)**；其余依赖由 `setup.sh` 安装。
-- **约 4 GB 磁盘空间**（Python 机器学习栈和编译产物占大头），另外首次转写会在 `~/.cache/huggingface` 下载约 460 MB 的语音模型——这是一次性开销，不是卡死。
-- **LLM API Key 只有「问答」和「Agent」模式需要**；纯听写不需要任何 Key、不需要联网。
+打发布包用 [`scripts/build-release.sh`](scripts/build-release.sh)。它会构建 app、**剥掉本地 Whisper venv**（venv 会把创建它的解释器绝对路径写死，换台机器就跑不起来，所以只能由 `install.sh` 在目标机器上现建）、重新签名并打成 zip。
 
 ## 当前交付状态
 
-经历过一次从零重写（旧的 5/6 模式系统已删除，改为下方的 3 模式设计），本机通过 `./scripts/build-app.sh` 构建为 `dist/OpenType.app`。默认是 ad-hoc 本地签名版本；`build-app.sh` 也支持一个可选的 Developer ID 签名 + 公证流程（`OPENTYPE_NOTARIZE=1`，需要 Developer ID 证书与 notarytool 凭证），但目前还没有对外发行的 Release —— 一般只能 clone 仓库本地编译，见上方的新用户安装入口。默认构建**不再打包开发者的 `sidecar/.env.local`/API Key**（需要显式 `--bundle-env` 才会打进去，仅供私有本地构建）。Swift 单测与 sidecar 单测均全绿；production app 已本地构建并真实运行验证。
+经历过一次从零重写（旧的 5/6 模式系统已删除，改为下方的 3 模式设计），通过 `./scripts/build-app.sh` 构建为 `dist/OpenType.app`，通过 `./scripts/build-release.sh` 打成对外发布的 zip。发布包是 ad-hoc 签名的；`build-app.sh` 另外支持一个可选的 Developer ID 签名 + 公证流程（`OPENTYPE_NOTARIZE=1`，需要 Developer ID 证书与 notarytool 凭证），但当前发布的包尚未走公证。默认构建**不打包开发者的 `sidecar/.env.local`/API Key**（需要显式 `--bundle-env` 才会打进去，仅供私有本地构建）。Swift 单测（183 项）与 sidecar 单测（474 项）均全绿；发布包已在干净目录完整走过一遍安装并实测转写成功。
 
 ## 当前功能
 
@@ -98,3 +99,7 @@ Agent 最终产出的**文字答案**始终只是草稿——复制到剪贴板�
 - 输入历史、Q&A/Agent 对话记录、审计日志等均保存在本机 `~/Library/Application Support/OpenType/`：`memory.sqlite3`（Swift 侧的任务历史与“已学到的偏好”）和 `opentype.sqlite3`（sidecar 侧的实体词典、owner facts 与 Q&A/Agent 会话记录）是两套独立的数据库，另有 `context-debug.log`（上面提到的 ask/agent 输入调试日志）；历史可以在设置的二级数据管理中重置（`context-debug.log` 不在重置范围内）。
 - 每一次识别、每一次修正（Review 转写模式下的语音纠错）、以及最终完成或取消，都会追加写入本机一份不可修改的 `audit-events.v1.jsonl`，不受历史重置影响。
 - Agent 模式的结果只复制到剪贴板并生成草稿，永远不会自动回车、发布或对外执行；是否额外写入当前输入框由“自动写入”开关单独控制。
+
+## 许可证
+
+[MIT](LICENSE)

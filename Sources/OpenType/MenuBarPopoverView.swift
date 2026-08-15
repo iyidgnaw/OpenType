@@ -57,6 +57,8 @@ struct MenuBarPopoverView: View {
         .background(DS.Colour.insetSurface)
         .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
+        // §F: see `RootView.body`'s identical seam for why.
+        .id(configuration.interfaceLanguageToken)
     }
 
     // MARK: - Header

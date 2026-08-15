@@ -13,6 +13,12 @@ private final class OverlayPresentation: ObservableObject {
     /// Non-nil while the toast on screen *is* the correction-window affordance
     /// (P0-3) rather than a plain success toast.
     @Published var correctionHint: CorrectionHint?
+    /// The §H escalation the current `surface` offers, or `nil` when it must
+    /// not be drawn — computed by whichever caller has the panel state
+    /// (`AppModel.presentVoiceSurface()`) and stored here alongside `surface`
+    /// rather than re-derived from it, since `ResultCard` itself carries no
+    /// `conversationId` (see `AssistantEscalation`'s own doc comment).
+    @Published var escalation: AssistantEscalation?
     /// Non-nil while the pre-dispatch confirmation window is open (P1-6). It
     /// preempts everything below — surface included — because for its 1.5
     /// seconds it is the only thing on this panel worth reading.
@@ -66,6 +72,14 @@ private final class OverlayPresentation: ObservableObject {
     /// and a pill that advertises a key that does nothing is worse than one
     /// that stays quiet.
     @Published var modeSwitchHintAvailable = true
+
+    /// Mirrors `AppConfiguration.interfaceLanguageToken` (§F). This panel is
+    /// not `@ObservedObject` on `AppConfiguration` the way `RootView`/
+    /// `MenuBarPopoverView` are — `AppModel.changeInterfaceLanguage` pushes it
+    /// explicitly — so `.id(languageToken)` on `OverlayView.body` is the only
+    /// way this panel learns a live language switch happened while it wasn't
+    /// necessarily on screen at the time.
+    @Published var languageToken = 0
 
     // MARK: - The learning loop, made visible (2026-08-15 §D)
 
@@ -345,6 +359,12 @@ final class OverlayController {
         set { presentation.modeSwitchHintAvailable = newValue }
     }
 
+    /// §F live language switch — see `OverlayPresentation.languageToken`.
+    var languageToken: Int {
+        get { presentation.languageToken }
+        set { presentation.languageToken = newValue }
+    }
+
     /// What the dictionary rewrote in the delivery this toast is about (D-1).
     /// Set alongside `correctionWindowArmed`, and for the same reason: the undo
     /// it offers is live for exactly as long as that window is.
@@ -439,6 +459,12 @@ final class OverlayController {
     /// reported rather than performed because starting a recording is
     /// `AppModel`'s job.
     var onFollowUpByVoice: (() -> Void)?
+    /// 「交给助理去做」 (§H): the ask result card's one-way exit into the full
+    /// toolset. Reported rather than performed, same non-self-closing
+    /// contract as everything above — `AppModel` owns the dispatch
+    /// (`escalateToAgent(_:)`), this controller only ever forwards the
+    /// `AssistantEscalation` the card was built to offer.
+    var onEscalate: ((AssistantEscalation) -> Void)?
 
     private lazy var hostingView = OverlayHostingView(
         rootView: OverlayView(
@@ -456,7 +482,8 @@ final class OverlayController {
             onUndoReplacement: { [weak self] replacement in
                 self?.onUndoAliasReplacement?(replacement)
             },
-            onOpenLearnedTerm: { [weak self] term in self?.onOpenLearnedTerm?(term) }
+            onOpenLearnedTerm: { [weak self] term in self?.onOpenLearnedTerm?(term) },
+            onEscalate: { [weak self] escalation in self?.onEscalate?(escalation) }
         )
     )
 
@@ -476,7 +503,8 @@ final class OverlayController {
     func apply(
         _ surface: VoiceSurfaceState,
         state: ProcessingState,
-        mode: InputMode
+        mode: InputMode,
+        escalation: AssistantEscalation? = nil
     ) {
         let previous = surfaceState
         let previousProcessing = presentation.state
@@ -525,6 +553,7 @@ final class OverlayController {
 
         guard surface != .hidden else {
             presentation.surface = .hidden
+            presentation.escalation = nil
             presentLegacy(state: state, mode: mode)
             return
         }
@@ -535,6 +564,7 @@ final class OverlayController {
             presentation.audioLevel = 0
         }
         presentation.surface = surface
+        presentation.escalation = escalation
         presentSurface(surface, grewFrom: previous)
     }
 
@@ -1247,6 +1277,7 @@ private struct OverlayView: View {
     let onToggleReplacements: () -> Void
     let onUndoReplacement: (AliasReplacement) -> Void
     let onOpenLearnedTerm: (String) -> Void
+    let onEscalate: (AssistantEscalation) -> Void
 
     var body: some View {
         Group {
@@ -1271,6 +1302,12 @@ private struct OverlayView: View {
         )
         .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
+        // §F: tears down and rebuilds the whole subtree on a live language
+        // switch, the same seam `RootView`/`MenuBarPopoverView` use via
+        // `configuration.interfaceLanguageToken` — this panel has no
+        // `configuration` in scope, so `OverlayController.languageToken`
+        // mirrors it instead (`AppModel.changeInterfaceLanguage`).
+        .id(presentation.languageToken)
         // The content crossfade half of the morph: the panel's frame animates
         // (`setFrame(_:display:animate:)`), the contents fade between states.
         .animation(.easeInOut(duration: 0.2), value: presentation.surface)
@@ -1328,22 +1365,26 @@ private struct OverlayView: View {
                     card: card,
                     failed: false,
                     elapsed: presentation.finishedElapsed,
+                    escalation: presentation.escalation,
                     onClose: onClose,
                     onCopy: onCopy,
                     onOpenMainWindow: onOpenMainWindow,
                     onFollowUp: onFollowUp,
-                    onFollowUpByVoice: onFollowUpByVoice
+                    onFollowUpByVoice: onFollowUpByVoice,
+                    onEscalate: onEscalate
                 )
             case .failed(let card):
                 VoiceSurfaceCard(
                     card: card,
                     failed: true,
                     elapsed: presentation.finishedElapsed,
+                    escalation: presentation.escalation,
                     onClose: onClose,
                     onCopy: onCopy,
                     onOpenMainWindow: onOpenMainWindow,
                     onFollowUp: onFollowUp,
-                    onFollowUpByVoice: onFollowUpByVoice
+                    onFollowUpByVoice: onFollowUpByVoice,
+                    onEscalate: onEscalate
                 )
             }
         }
@@ -2432,11 +2473,17 @@ private struct VoiceSurfaceCard: View {
     let failed: Bool
     /// How long the run took, frozen when the card appeared.
     let elapsed: TimeInterval?
+    /// §H's 「交给助理去做」 payload, or `nil` when the button must not be
+    /// drawn — `AssistantEscalation.offered` already refuses anything but a
+    /// finished ask card, so this is `nil` for every `.failed` card and most
+    /// `.result` ones.
+    let escalation: AssistantEscalation?
     let onClose: () -> Void
     let onCopy: (String) -> Void
     let onOpenMainWindow: () -> Void
     let onFollowUp: (String) -> Void
     let onFollowUpByVoice: () -> Void
+    let onEscalate: (AssistantEscalation) -> Void
 
     @State private var stepsExpanded = false
     @State private var draft = ""
@@ -2678,6 +2725,25 @@ private struct VoiceSurfaceCard: View {
                             DS.Colour.control,
                             in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
                         )
+                }
+
+                if let escalation {
+                    // §H: the card's exit for "I picked the wrong mode" — same
+                    // action-row chrome as `actions` above, offered alongside
+                    // rather than replacing them, since 展开说说/换个说法 stay
+                    // useful right up to the moment this is pressed.
+                    Button(OpenTypeL10n.text("交给助理去做", english: "Hand off to the assistant")) {
+                        onEscalate(escalation)
+                    }
+                    .buttonStyle(.plain)
+                    .font(DS.Text.size(11.5))
+                    .foregroundStyle(DS.Colour.ink(0.6))
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .background(
+                        DS.Colour.control,
+                        in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                    )
                 }
 
                 Spacer(minLength: 0)

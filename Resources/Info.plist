@@ -3,7 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>OpenType</string>
     <key>CFBundleExecutable</key>
@@ -29,10 +34,10 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>OpenType 需要使用麦克风，把你的语音转成整理后的文字。</string>
+    <string>OpenType needs the microphone to turn your speech into ready-to-use text.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>OpenType 使用语音识别在录音浮层中显示实时字幕；最终文字由本机的语音识别模型处理，不会上传到云端。</string>
+    <string>OpenType uses speech recognition to show live captions on the recording overlay; the final text is processed by the on-device speech model and is never uploaded.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>OpenType 需要把整理后的文字写回你正在使用的应用。</string>
+    <string>OpenType needs this to write the finished text back into the app you're using.</string>
 </dict>
 </plist>

@@ -1,0 +1,9 @@
+/* §F — explicit English mirror of the base Info.plist usage descriptions
+   (CFBundleDevelopmentRegion is `en`, so this file is redundant with the
+   fallback in most cases, but present on purpose: symmetry with
+   ../zh-Hans.lproj/InfoPlist.strings, and independence from
+   CFBundleDevelopmentRegion resolution semantics changing under us. */
+
+"NSMicrophoneUsageDescription" = "OpenType needs the microphone to turn your speech into ready-to-use text.";
+"NSSpeechRecognitionUsageDescription" = "OpenType uses speech recognition to show live captions on the recording overlay; the final text is processed by the on-device speech model and is never uploaded.";
+"NSAppleEventsUsageDescription" = "OpenType needs this to write the finished text back into the app you're using.";

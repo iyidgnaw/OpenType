@@ -254,6 +254,21 @@ final class SessionListMergeTests: XCTestCase {
 /// next refresh diff.
 final class SessionFilterTests: XCTestCase {
 
+    /// §F made `OpenTypeL10n.text(_:english:)` depend on
+    /// `OpenTypeL10n.current` rather than unconditionally returning Chinese —
+    /// pinned here so `testEachChipCarriesItsDesignedChineseTitle`'s assertion
+    /// about the Chinese copy doesn't depend on whatever locale the test
+    /// runner's process happens to report.
+    override func setUp() {
+        super.setUp()
+        OpenTypeL10n.current = .chinese
+    }
+
+    override func tearDown() {
+        OpenTypeL10n.current = .system
+        super.tearDown()
+    }
+
     private let base = 1_760_000_000_000
 
     private lazy var list: [ConversationSummary] = [
@@ -381,6 +396,21 @@ final class SessionFilterTests: XCTestCase {
 /// itself. Splitting those two answers across two lookups is how an ask thread
 /// ends up dispatched to `/agent/run`.
 final class SessionContinuationTests: XCTestCase {
+
+    /// §F made `OpenTypeL10n.text(_:english:)` depend on
+    /// `OpenTypeL10n.current` rather than unconditionally returning Chinese —
+    /// pinned here so `testSessionKindsCarryTheirDesignedChineseTitles`'s
+    /// assertion about the Chinese copy doesn't depend on whatever locale the
+    /// test runner's process happens to report.
+    override func setUp() {
+        super.setUp()
+        OpenTypeL10n.current = .chinese
+    }
+
+    override func tearDown() {
+        OpenTypeL10n.current = .system
+        super.tearDown()
+    }
 
     // MARK: - Routing by the focused conversation's kind
 

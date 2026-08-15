@@ -42,6 +42,21 @@ import XCTest
 /// compile error.
 final class AppTabTests: XCTestCase {
 
+    /// §F made `OpenTypeL10n.text(_:english:)` depend on
+    /// `OpenTypeL10n.current` rather than unconditionally returning Chinese —
+    /// pinned here so `testEachTabCarriesItsDesignedChineseTitle`'s assertion
+    /// about the Chinese copy itself doesn't depend on whatever locale the
+    /// test runner's process happens to report.
+    override func setUp() {
+        super.setUp()
+        OpenTypeL10n.current = .chinese
+    }
+
+    override func tearDown() {
+        OpenTypeL10n.current = .system
+        super.tearDown()
+    }
+
     // MARK: - The case set
 
     func testTheSidebarHasExactlyFourTabsInDesignOrder() {

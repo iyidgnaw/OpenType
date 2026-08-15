@@ -50,6 +50,16 @@ rm -rf "$resources_dir/en.lproj"
 ditto \
   "$project_dir/Resources/Localization/en.lproj" \
   "$resources_dir/en.lproj"
+# §F: CFBundleDevelopmentRegion is `en`, but zh-Hans has to ship too — this is
+# what lets a Chinese-system user see 「OpenType 需要使用麦克风…」 in the
+# microphone/speech-recognition/AppleEvents system dialogs instead of the
+# English base copy in Info.plist (InfoPlist.strings localisation, not the
+# interface language switch, which those dialogs are out of SwiftUI's reach
+# to affect).
+rm -rf "$resources_dir/zh-Hans.lproj"
+ditto \
+  "$project_dir/Resources/Localization/zh-Hans.lproj" \
+  "$resources_dir/zh-Hans.lproj"
 chmod +x "$binary_dir/OpenType"
 
 cp "$project_dir/sidecar/dist/opentype-sidecar" "$resources_dir/opentype-sidecar"

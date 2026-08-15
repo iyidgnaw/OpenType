@@ -163,6 +163,34 @@ final class AppConfiguration: ObservableObject {
         }
     }
 
+    /// 界面语言（§F）— 跟随系统 / 中文 / English. See `OpenTypeL10n` for how
+    /// `.system` resolves and how every `text(_:english:)`/`.locale` call site
+    /// consults `OpenTypeL10n.current`, which this keeps in sync: nothing
+    /// downstream reads this property directly, so a `didSet` that forgot the
+    /// push would leave the setting silently inert.
+    @Published var interfaceLanguage: InterfaceLanguage {
+        didSet {
+            defaults.set(interfaceLanguage.rawValue, forKey: Keys.interfaceLanguage)
+            OpenTypeL10n.current = interfaceLanguage
+            // Bumped on every change so `.id()` on the root view / popover /
+            // floating panels — see those files' `body` — always sees a fresh
+            // value and rebuilds the tree, which is what makes a language
+            // switch take effect immediately rather than needing a relaunch.
+            // A plain `interfaceLanguage` read at those call sites would not
+            // be enough on its own: two of the four roots (the overlay panel,
+            // the review panel) are not `@ObservedObject` on this object at
+            // all, and mirror the token instead — see
+            // `OverlayController.languageToken`.
+            interfaceLanguageToken += 1
+        }
+    }
+
+    /// Exists only to give `.id()` something that reliably changes when
+    /// `interfaceLanguage` does — see that property's `didSet`. Not itself
+    /// persisted: nothing downstream reads its value, only whether it
+    /// changed.
+    @Published var interfaceLanguageToken: Int = 0
+
     private let defaults: UserDefaults
 
     var isMuted: Bool {
@@ -205,6 +233,16 @@ final class AppConfiguration: ObservableObject {
             forKey: Keys.localTranscriptionOnlyAcknowledged
         ) as? Bool ?? false
         perAppRulesEnabled = defaults.object(forKey: Keys.perAppRulesEnabled) as? Bool ?? true
+        interfaceLanguage = InterfaceLanguage(
+            rawValue: defaults.string(forKey: Keys.interfaceLanguage) ?? ""
+        ) ?? .system
+        // `didSet` does not fire during `init` (same rule as
+        // `transcribeVariant` above), so the initial sync to `OpenTypeL10n`
+        // has to happen explicitly here — otherwise a fresh process would
+        // read a persisted English preference correctly into this property
+        // and then render every screen in Chinese anyway, until the first
+        // in-process change.
+        OpenTypeL10n.current = interfaceLanguage
     }
 
     /// The stored variant as stored: `nil` for an absent key and `nil` for a
@@ -234,5 +272,6 @@ final class AppConfiguration: ObservableObject {
         static let lastSeenUpdateVersion = "lastSeenUpdateVersion"
         static let localTranscriptionOnlyAcknowledged = "localTranscriptionOnlyAcknowledged"
         static let perAppRulesEnabled = "perAppRulesEnabled"
+        static let interfaceLanguage = "interfaceLanguage"
     }
 }

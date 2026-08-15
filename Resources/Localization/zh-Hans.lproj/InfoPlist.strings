@@ -1,0 +1,10 @@
+/* §F — Info.plist's own three system-permission dialogs, which OpenTypeL10n
+   cannot reach (they render before the app's own SwiftUI environment locale
+   is in the picture at all). CFBundleDevelopmentRegion is now `en`, so this
+   file is what a Chinese-system user sees instead of the English base
+   strings in ../../Info.plist — keep both in sync by hand; there is no
+   `english:`-argument mechanism for this catalog. */
+
+"NSMicrophoneUsageDescription" = "OpenType 需要使用麦克风，把你的语音转成整理后的文字。";
+"NSSpeechRecognitionUsageDescription" = "OpenType 使用语音识别在录音浮层中显示实时字幕；最终文字由本机的语音识别模型处理，不会上传到云端。";
+"NSAppleEventsUsageDescription" = "OpenType 需要把整理后的文字写回你正在使用的应用。";

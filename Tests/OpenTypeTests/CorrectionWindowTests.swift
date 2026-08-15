@@ -580,6 +580,21 @@ final class CorrectionWindowTests: XCTestCase {
 @MainActor
 final class CorrectionWindowAffordanceTests: XCTestCase {
 
+    /// §F made `OpenTypeL10n.text(_:english:)` depend on
+    /// `OpenTypeL10n.current` rather than unconditionally returning Chinese —
+    /// pinned here so `testTheHintTellsTheUserWhatToDoRatherThanJustSayingDone`'s
+    /// assertion about the Chinese hint copy doesn't depend on whatever locale
+    /// the test runner's process happens to report.
+    override func setUp() {
+        super.setUp()
+        OpenTypeL10n.current = .chinese
+    }
+
+    override func tearDown() {
+        OpenTypeL10n.current = .system
+        super.tearDown()
+    }
+
     func testAnArmedWindowKeepsTheSuccessToastUpForTheWholeWindow() {
         XCTAssertEqual(
             OverlayController.hideBehavior(for: .success, correctionWindowArmed: true),

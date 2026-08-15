@@ -14,6 +14,11 @@ private final class ReviewPanelPresentation: ObservableObject {
     @Published var text = ""
     @Published var isCorrecting = false
     @Published var correctionHint: String?
+    /// Mirrors `AppConfiguration.interfaceLanguageToken` (§F) — see
+    /// `OverlayPresentation.languageToken`'s doc comment for why this panel,
+    /// same as that one, needs its own copy rather than observing
+    /// `AppConfiguration` directly.
+    @Published var languageToken = 0
 }
 
 /// Where the Review panel sits inside a chosen screen's usable area: centred.
@@ -81,6 +86,12 @@ final class ReviewPanelController {
     var onCancel: (() -> Void)?
 
     var isOpen: Bool { panel?.isVisible ?? false }
+
+    /// §F live language switch — see `ReviewPanelPresentation.languageToken`.
+    var languageToken: Int {
+        get { presentation.languageToken }
+        set { presentation.languageToken = newValue }
+    }
 
     /// Retained strongly (in addition to the panel's own `contentView`
     /// reference) and rebuilt on every `show(...)` — see `show(...)` for why.
@@ -355,6 +366,8 @@ private struct ReviewPanelView: View {
         )
         .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
+        // §F: see `OverlayView.body`'s identical seam for why.
+        .id(presentation.languageToken)
         .onExitCommand(perform: onCancel)
     }
 

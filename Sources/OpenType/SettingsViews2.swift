@@ -137,6 +137,29 @@ struct SettingsColumn: View {
     private var generalGroup: some View {
         SettingsGroup(OpenTypeL10n.text("通用", english: "General")) {
             launchAtLoginRow
+            interfaceLanguageRow
+        }
+    }
+
+    /// 界面语言（§F）— 跟随系统 / 中文 / English. A `SegmentedControl`, the same
+    /// shape 听写输出's 松开之后 picker uses, because both are "exactly one of a
+    /// small closed set" choices that deserve a permanently visible control
+    /// rather than a menu that hides the current value behind a click.
+    private var interfaceLanguageRow: some View {
+        SettingsStackedRow(
+            title: OpenTypeL10n.text("界面语言", english: "Interface language"),
+            note: OpenTypeL10n.text(
+                "系统自身的权限弹窗（麦克风、语音识别）跟随系统语言，不受这里影响",
+                english: "The system's own permission dialogs (microphone, speech recognition) follow the system language and are unaffected by this setting"
+            )
+        ) {
+            SegmentedControl(
+                options: InterfaceLanguage.allCases,
+                selection: configuration.interfaceLanguage,
+                title: { $0.title },
+                help: { $0.explanation },
+                select: { model.changeInterfaceLanguage($0) }
+            )
         }
     }
 

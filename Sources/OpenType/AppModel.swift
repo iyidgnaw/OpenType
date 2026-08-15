@@ -575,6 +575,12 @@ final class AppModel: ObservableObject {
         self.overlay.onCancelPendingDispatch = { [weak self] in
             self?.recordPendingDispatchEscape()
         }
+        // §H's 「交给助理去做」: the card only ever hands back the
+        // `AssistantEscalation` it was offered, and `escalateToAgent(_:)` is
+        // the one place that turns that into a dispatch.
+        self.overlay.onEscalate = { [weak self] escalation in
+            self?.escalateToAgent(escalation)
+        }
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
         microphonePermission = audioRecorder.permissionStatus
@@ -1173,6 +1179,17 @@ final class AppModel: ObservableObject {
         configuration.transcribeVariant = variant
     }
 
+    /// §F. `RootView`/`MenuBarPopoverView` are `@ObservedObject` on
+    /// `configuration` and pick up `interfaceLanguageToken`'s bump on their
+    /// own via `.id()`, but `overlay`/`reviewPanel` are plain classes that
+    /// never observe it — pushing the token here is how a live switch reaches
+    /// whichever of those two panels happens to be on screen.
+    func changeInterfaceLanguage(_ language: InterfaceLanguage) {
+        configuration.interfaceLanguage = language
+        overlay.languageToken = configuration.interfaceLanguageToken
+        reviewPanel.languageToken = configuration.interfaceLanguageToken
+    }
+
     /// Re-read the login item's registration. Called whenever the Settings pane
     /// appears, which is what makes a change the user made in System Settings
     /// while our window was closed show up on the row.
@@ -1526,10 +1543,53 @@ final class AppModel: ObservableObject {
     /// A `.hidden` result hands the panel back to the legacy transcribe
     /// HUD/toast path inside `OverlayController`.
     private func presentVoiceSurface() {
+        let surface = currentVoiceSurfaceState()
         overlay.apply(
-            currentVoiceSurfaceState(),
+            surface,
             state: state,
-            mode: voiceSurfaceMode
+            mode: voiceSurfaceMode,
+            escalation: AssistantEscalationWiring.forVoiceSurface(
+                surface,
+                askConversationId: askPanelState?.conversationId,
+                agentConversationId: agentPanelState?.conversationId
+            )
+        )
+    }
+
+    /// 「交给助理去做」 (§H): re-dispatches `escalation.task` to `/agent/run`,
+    /// continuing `escalation.conversation`'s thread when it has one. This is
+    /// the exact `dispatchAgentRun` path every other Agent dispatch already
+    /// takes (the same one `submitTypedTurn`'s `.agent` case reuses) — a
+    /// second, escalate-only dispatch path would be a second place for
+    /// "agent dispatch" to mean something slightly different, which is what
+    /// the rejected P1-5 merge would have grown into by the back door.
+    ///
+    /// Deliberately touches neither `askPanelState` nor `focusedConversation`:
+    /// `AssistantEscalation`'s whole guarantee is that the thread keeps its
+    /// `.ask` kind, and both of those are exactly what a later turn reads to
+    /// decide where it goes next (`VoiceFollowUp.conversationId` for a spoken
+    /// follow-up, `SessionsListColumn.open(_:)`/`focusedConversation` for the
+    /// thread column). Leaving them alone — `dispatchAgentRun` only ever
+    /// writes `agentPanelState` — is what keeps that guarantee true here, not
+    /// a check performed at this call site.
+    ///
+    /// The captured context is a placeholder, same reasoning as
+    /// `submitTypedTurn`'s: a button press has no other app's selection to
+    /// read, and nothing here should be treated as one.
+    func escalateToAgent(_ escalation: AssistantEscalation) {
+        guard !isBusy else { return }
+        let context = CapturedContext(
+            selectedText: nil,
+            applicationName: "OpenType",
+            bundleIdentifier: "ai.rain.opentype"
+        )
+        lastTranscript = escalation.task
+        dispatchAgentRun(
+            transcript: escalation.task,
+            context: context,
+            practice: false,
+            requestID: UUID(),
+            conversationId: escalation.conversation?.id
         )
     }
 
@@ -4421,6 +4481,34 @@ final class AppModel: ObservableObject {
         }
 
         NSSound(named: NSSound.Name(cue.fallbackSystemSound))?.play()
+    }
+}
+
+/// §H (`docs/superpowers/specs/2026-08-15-product-batch-plan.md`):
+/// `AppModel.presentVoiceSurface()`'s escalation decision, pulled out as a
+/// pure function of state rather than left inline. `AppModel.init` has side
+/// effects and is not instantiable in tests — the same constraint
+/// `DispatchConfirmation`/`OutputDeliveryPolicy`/`VoiceSurfaceState` are
+/// factored out of this file's class for — so this is what makes the one
+/// thing that must never happen provable without it: reading
+/// `agentPanelState`'s id here instead of the ask thread's own would be
+/// exactly the "whichever panel is live" hazard `AssistantEscalation`'s own
+/// doc comment warns callers about.
+enum AssistantEscalationWiring {
+    /// What the unified voice surface offers to escalate. Both live panel ids
+    /// are taken explicitly — mirroring `VoiceFollowUp.continuation`'s own
+    /// two-inputs-one-winner shape — so a test can force them to disagree:
+    /// only `askConversationId` is ever consulted, since
+    /// `AssistantEscalation.offered` already refuses anything but a finished
+    /// ask card, which makes the agent panel's id (`agentConversationId`)
+    /// name an unrelated or nonexistent thread that must play no part in the
+    /// decision.
+    static func forVoiceSurface(
+        _ surface: VoiceSurfaceState,
+        askConversationId: Int?,
+        agentConversationId: Int?
+    ) -> AssistantEscalation? {
+        AssistantEscalation.offered(for: surface, conversationId: askConversationId)
     }
 }
 

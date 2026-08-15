@@ -423,6 +423,16 @@ struct SessionThreadColumn: View {
                                 // narrower when the column is, so the handoff
                                 // gives the tighter layout the looser cap.
                                 SessionTurn(message: message, maxBubbleWidth: available * (narrow ? 0.80 : 0.78))
+                                // §H: the detail page's copy of the result
+                                // card's 「交给助理去做」 — same decision
+                                // (`AssistantEscalation.offered(forAssistantMessage:in:)`),
+                                // so an ask thread offers it here exactly when
+                                // the floating card would have offered it too.
+                                if let escalation = AssistantEscalation.offered(
+                                    forAssistantMessage: message, in: detail
+                                ) {
+                                    escalateRow(escalation)
+                                }
                             }
                             .id(message.id)
                         }
@@ -482,6 +492,28 @@ struct SessionThreadColumn: View {
               !run.steps.isEmpty
         else { return nil }
         return StepLog(steps: run.steps, elapsed: SessionFormat.elapsed(of: run))
+    }
+
+    /// §H's button, styled to match the unified voice surface's result-card
+    /// action row (`OverlayController.swift`'s `VoiceSurfaceCard.footer`) —
+    /// the same feature reached from a second surface should look like the
+    /// same button, not grow a second convention.
+    private func escalateRow(_ escalation: AssistantEscalation) -> some View {
+        HStack {
+            Spacer(minLength: 0)
+            Button(OpenTypeL10n.text("交给助理去做", english: "Hand off to the assistant")) {
+                model.escalateToAgent(escalation)
+            }
+            .buttonStyle(.plain)
+            .font(DS.Text.size(11.5))
+            .foregroundStyle(DS.Colour.ink(0.6))
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(
+                DS.Colour.control,
+                in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+            )
+        }
     }
 
     private func isWorking(_ focused: FocusedConversation) -> Bool {

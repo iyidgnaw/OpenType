@@ -227,6 +227,21 @@ final class RecordingElapsedTextTests: XCTestCase {
 ///   "throw away". See the `Termination` section.
 final class RecordingLimitsTests: XCTestCase {
 
+    /// §F made `OpenTypeL10n.text(_:english:)` depend on
+    /// `OpenTypeL10n.current` rather than unconditionally returning Chinese —
+    /// pinned here so `testTheWarningTellsTheUserWhatIsAboutToHappen`'s
+    /// assertion about the Chinese warning copy doesn't depend on whatever
+    /// locale the test runner's process happens to report.
+    override func setUp() {
+        super.setUp()
+        OpenTypeL10n.current = .chinese
+    }
+
+    override func tearDown() {
+        OpenTypeL10n.current = .system
+        super.tearDown()
+    }
+
     // MARK: - The two numbers
 
     func testTheWarningIsAtTwoMinutesAndTheStopIsAtFive() {

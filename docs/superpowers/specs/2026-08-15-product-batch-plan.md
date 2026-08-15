@@ -219,7 +219,7 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 ---
 
-## F. 界面语言跟随系统（review #10）
+## F. 界面语言跟随系统（review #10）—— 已完成（2026-08-15）
 
 **目标**：英文用户装完看到英文。**文案已经写好了**——670 个调用点都带着 `english:` 参数。
 
@@ -281,7 +281,7 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 ---
 
-## H. Ask 结果卡片的「交给助理去做」（review #6）—— 类型层已完成，UI 未接线（2026-08-15）
+## H. Ask 结果卡片的「交给助理去做」（review #6）—— 已完成（2026-08-15）
 
 - 结果卡片（`OverlayController` 的 result card）与会话详情页各加一个按钮：
   把**同一个问题**用完整工具集重跑一次，复用 `conversationId`。
@@ -289,7 +289,7 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 - **单向**：只有 ask → agent，没有反向（agent 跑完发现只是个问题，没有代价）。
 - 不改模式数量、不改热键。这不是 P1-5 合并的复活——那条已被否决，此处只给「我选错了」一个出口。
 
-**测试**：会话 `kind` 的迁移语义（ask 会话被升级后，后续轮次走哪条路）——这是唯一有歧义的地方，
+**测试**：会话 `kind` 的迁移语义(ask 会话被升级后，后续轮次走哪条路)——这是唯一有歧义的地方，
 决定：**升级只影响这一轮，会话 kind 不变**，否则用户问一次工具类问题就把整个会话变成 agent 了。
 
 **落地**：`Sources/OpenType/AssistantEscalation.swift` —— `struct AssistantEscalation { task, conversation }`
@@ -298,14 +298,30 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 「会话 kind 不变」以及会话详情页要找的是「产生这条答案的那一轮」而不是最后一轮。详见
 `docs/superpowers/specs/2026-08-09-current-system-state.md` §9 的新增小节。
 
-**没接的部分**：卡片和会话详情页上真正的按钮——把这个类型接到 `OverlayController`/`SessionsViews`
-并调用 `/agent/run`。追下去发现 `OverlayController.onFollowUp`/`onFollowUpByVoice` 这两个回调本身
-在 `AppModel.init` 里没有被赋值，是这一项之前就存在、这一项发现而非造成的缺口（`VoiceFollowUp.
-continuation` 同样没有生产调用方，`AssistantEscalationTests.swift` 的文件头注释也点明了这一点）。
-在一个死回调上面接按钮等于要么顺手把整条 follow-up 线接上（范围明显更大，且与同批修 §E 的另一个
-agent 在同一批文件里改动），要么另起一条并行的分发路径（重复 `submitTypedTurn`/`dispatchAgentRun`
-已有的逻辑）。两者都该是单独复核的一块工作，而不是顺带做掉——所以这里止步于类型层，UI 接线记在
-`docs/superpowers/specs/2026-08-09-current-system-state.md` §11 的已知缺口里。
+**UI 接线（2026-08-15，同批次内补齐）**：`AppModel.escalateToAgent(_:)` 直接复用
+`dispatchAgentRun`——和 `submitTypedTurn` 的 `.agent` 分支走的是同一条路径，没有另起一条并行的分发。
+不碰 `askPanelState`/`focusedConversation`：`dispatchAgentRun` 只写 `agentPanelState`，这正是
+"thread 的 `kind` 不变" 这条保证在真实调用点仍然成立的原因，而不是靠一次额外检查。之前担心的
+`OverlayController.onFollowUp`/`onFollowUpByVoice` 死回调问题是个假选项——`AppModel` 已经有一条真实的
+agent 分发路径（`dispatchAgentRun`），escalate 只是给它加一个窄回调，`onFollowUp` 那条线仍然是未接的
+已知缺口（见下）。
+
+按钮出现在两处，样式取自结果卡片 footer 的 action row（`VoiceSurfaceCard.footer`）：
+- 悬浮语音面板的 ask 结果卡（`OverlayController.swift`）：`OverlayPresentation.escalation` 与
+  `presentation.surface` 同时由 `AppModel.presentVoiceSurface()` 写入，`AssistantEscalationWiring.
+  forVoiceSurface(surface, askConversationId:, agentConversationId:)`(`AppModel.swift`)是这里唯一的
+  决策点——显式接收两个面板各自的 `conversationId`（呼应 `VoiceFollowUp.continuation` 自己的
+  "两个输入、一个赢家" 形状），只用 `askConversationId`，`agentConversationId` 绝不参与判断。这就是
+  §H 原文里 "whichever panel is live" 那个坑的具体样子：`askPanelState` 和 `agentPanelState` 随时可能同时
+  非空，谁的 id 才是这个 ask 线程自己的 id 不是靠巧合对的。`AppModel.init` 有副作用、测试里不能实例化
+  （`DispatchConfirmationTests` 记录的同一条限制），所以这个决策被拆成纯函数，`Tests/OpenTypeTests/
+  AssistantEscalationWiringTests.swift`(4 例)专门测"两个面板 id 不一致时选哪个"。
+- 会话详情页的助手消息（`SessionsViews.swift`，`SessionThreadColumn.escalateRow`）：直接用
+  `AssistantEscalation.offered(forAssistantMessage:in:)` 已有的判断，没有第二套面板 id 需要挑选，
+  所以不需要额外的 wiring 层。
+
+`onFollowUp`/`onFollowUpByVoice` 仍然是未接的已知缺口，记在
+`docs/superpowers/specs/2026-08-09-current-system-state.md` §11。
 
 ---
 

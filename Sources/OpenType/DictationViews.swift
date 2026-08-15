@@ -39,13 +39,15 @@ struct DictationColumn: View {
     /// open across midnight without the numbers beside them moving too.
     @State private var now = Date()
 
-    /// Below this the band drops its bar strip and folds to a 2×2 grid.
+    /// Below this the band drops its bar strip and folds to a grid.
     ///
-    /// Four figures plus three rules plus the 190pt strip need roughly 780pt;
-    /// under 700 the figures start colliding with their own labels. It is a
-    /// property of this band's contents, not of the window, which is why it is
-    /// not `DS.Size.narrowBreakpoint`.
-    private static let bandFoldWidth: CGFloat = 700
+    /// Four figures plus three rules plus the 190pt strip needed roughly 780pt;
+    /// under 700 the figures started colliding with their own labels. D-3's
+    /// fifth figure (「词典已学会」) and its rule add about 90pt to that, so the
+    /// fold moves with it rather than letting the wide layout keep a width it no
+    /// longer fits in. It is a property of this band's contents, not of the
+    /// window, which is why it is not `DS.Size.narrowBreakpoint`.
+    private static let bandFoldWidth: CGFloat = 790
 
     var body: some View {
         GeometryReader { proxy in
@@ -59,6 +61,7 @@ struct DictationColumn: View {
                     VStack(alignment: .leading, spacing: DS.Space.group) {
                         UsageStatsBand(
                             summary: model.usageSummary,
+                            dictionary: DictionaryStats.counts(for: model.memoryTerms),
                             narrow: narrow,
                             now: now
                         )
@@ -107,6 +110,10 @@ struct DictationColumn: View {
             now = Date()
             model.refreshUsageStats()
         }
+        // 「词典已学会 N 个词」 counts rows the 记忆 page fetches; a user who has
+        // never opened that page would otherwise be told the dictionary has
+        // learned nothing (D-3).
+        .task { await model.refreshMemoryTerms() }
         // Keyed on the newest entry's identity, not on `entries.count`:
         // `HistoryStore` caps at 100 and drops the oldest, so past that cap the
         // count never changes again and a count-watch would silently stop
@@ -474,6 +481,11 @@ private struct DictationRowAction: View {
 /// all four were accented, none of them would be the one to watch.
 struct UsageStatsBand: View {
     let summary: UsageStats.Summary
+    /// 「词典已学会 N 个词」 (D-3) — counted over `AppModel.memoryTerms`, the rows
+    /// the 记忆 page already fetches. The band's one figure that is not derived
+    /// from the audit trail, and the one that means something on day three,
+    /// before a week of history exists for the trend line to have a slope.
+    let dictionary: DictionaryStats.LearnedTermCounts
     let narrow: Bool
     /// Injected so the bar labels are stable across re-renders and testable
     /// without waiting for a real midnight.
@@ -528,6 +540,8 @@ struct UsageStatsBand: View {
                 figure(response)
                 rule
                 figure(rate)
+                rule
+                figure(learned)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -567,11 +581,12 @@ struct UsageStatsBand: View {
                 alignment: .leading,
                 spacing: 14
             ) {
-                // The bar strip and the week-over-week trend both go: at this
-                // width a 7-bar strip is 7 slivers, and the trend is the one
-                // part of the fourth figure that can be dropped without the
-                // figure itself stopping making sense.
-                ForEach([words, endToEnd, response, rate]) { item in
+                // The bar strip, the week-over-week trend and D-3's seven-point
+                // line all go: at this width a 7-bar strip is 7 slivers and a
+                // 7-point line is a squiggle, and both are the parts of a figure
+                // that can be dropped without the figure itself stopping making
+                // sense. The numbers all stay.
+                ForEach([words, endToEnd, response, rate, learned]) { item in
                     compactFigure(item)
                 }
             }
@@ -595,6 +610,16 @@ struct UsageStatsBand: View {
                     }
                     .foregroundStyle(DS.Colour.ink(0.42))
                 }
+            }
+            // The whole point of D-3: the number above is where this week
+            // landed, and the line is whether it is falling. Drawn between the
+            // value and its label so it reads as part of the figure rather than
+            // as a chart parked next to it.
+            if let series = item.series {
+                CorrectionTrendLine(values: series)
+                    .frame(width: Self.trendWidth, height: Self.trendHeight)
+                    .padding(.top, 2)
+                    .padding(.bottom, 1)
             }
             Text(item.label)
                 .font(DS.Text.caption().weight(.medium))
@@ -736,6 +761,12 @@ struct UsageStatsBand: View {
 
     // MARK: The four figures
 
+    /// The 7-point line's box. Narrow enough to sit inside a figure's own
+    /// column rather than widening the row, tall enough that a real change of
+    /// slope is visible at a glance.
+    private static let trendWidth: CGFloat = 96
+    private static let trendHeight: CGFloat = 22
+
     private struct Figure: Identifiable {
         let id: String
         let value: String
@@ -748,6 +779,9 @@ struct UsageStatsBand: View {
         let hasData: Bool
         var accented = false
         var trend: Trend?
+        /// Seven days of this figure, oldest first, drawn as a line under the
+        /// number (D-3). `nil` for the figures that are not a series.
+        var series: [Double?]?
 
         var valueStyle: AnyShapeStyle {
             // 06C prints an unmeasurable figure at .3, and explicitly does not
@@ -824,7 +858,32 @@ struct UsageStatsBand: View {
             ),
             hasData: hasData,
             accented: true,
-            trend: trend(hasData: hasData)
+            trend: trend(hasData: hasData),
+            // Only in the wide band: `narrowBody` draws figures without their
+            // series, and a 96pt line squeezed into a 394pt two-column grid
+            // would be a squiggle nobody can read a slope off.
+            series: narrow ? nil : summary.dailyCorrectionsPerHundredWords
+        )
+    }
+
+    /// 「词典已学会 N 个词」 — what the loop has actually learned, as opposed to
+    /// whether it is helping yet.
+    private var learned: Figure {
+        Figure(
+            id: "learned",
+            value: Self.grouped(dictionary.total),
+            label: OpenTypeL10n.text("词典已学会", english: "Terms learned"),
+            // The owner's share, separately, because `remember_fact` can write
+            // terms out of agent context (P1-12) and a blended count would let a
+            // number the user reads as 「what I have taught it」 quietly include
+            // rows nobody taught it.
+            note: dictionary.total == 0
+                ? OpenTypeL10n.text("纠错一次就会记住", english: "One correction teaches it one")
+                : OpenTypeL10n.text(
+                    "其中 \(dictionary.owner) 个来自你",
+                    english: "\(dictionary.owner) taught by you"
+                ),
+            hasData: dictionary.total > 0
         )
     }
 
@@ -870,6 +929,131 @@ struct UsageStatsBand: View {
 
     private static func grouped(_ value: Int) -> String {
         DictationFormat.count.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+}
+
+// MARK: - The convergence line
+
+/// Seven days of 每 100 字纠错, drawn as a line (D-3).
+///
+/// The band already printed this week's rate and 「上周 N」 beside it, which is
+/// the weakest possible way to show a slope: two numbers a week apart cannot
+/// tell 「the dictionary is learning」 from 「I happened to talk less」. A line
+/// over the same seven buckets the bar strip uses can.
+///
+/// Drawn with `Path` rather than a charting dependency, per §D-3: seven points
+/// need no framework, and one would arrive with its own type scale, its own
+/// colours and its own idea of what an axis looks like — none of which are
+/// `DS`'s.
+///
+/// **A gap is not a zero.** `UsageStats` reports `nil` for a day that delivered
+/// nothing and a real `0` for a day that delivered and needed no corrections,
+/// and those two must not look alike: the second is the best day the product can
+/// have. So the line breaks across gaps, and a day that stands alone between two
+/// gaps is drawn as a dot — a single point has no segment, and dropping it would
+/// hide the only measurement a new user has.
+private struct CorrectionTrendLine: View {
+    let values: [Double?]
+
+    /// Dot radius for an isolated day, and the width of the line itself.
+    private static let dotRadius: CGFloat = 1.6
+    private static let lineWidth: CGFloat = 1.5
+
+    var body: some View {
+        GeometryReader { proxy in
+            let points = points(in: proxy.size)
+            ZStack {
+                // The baseline is what makes a falling line read as falling
+                // *towards* something rather than merely sloping. Drawn at the
+                // bottom of the box, which is where a rate of zero lands.
+                Rectangle()
+                    .fill(DS.Colour.border)
+                    .frame(height: 0.75)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
+
+                ForEach(Array(runs(of: points).enumerated()), id: \.offset) { _, run in
+                    if run.count == 1, let only = run.first {
+                        Circle()
+                            .fill(DS.Colour.accent)
+                            .frame(
+                                width: Self.dotRadius * 2,
+                                height: Self.dotRadius * 2
+                            )
+                            .position(only.point)
+                    } else {
+                        path(through: run.map(\.point))
+                            .stroke(
+                                DS.Colour.accent,
+                                style: StrokeStyle(
+                                    lineWidth: Self.lineWidth,
+                                    lineCap: .round,
+                                    lineJoin: .round
+                                )
+                            )
+                    }
+                }
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(OpenTypeL10n.text(
+            "最近 7 天每 100 字纠错趋势",
+            english: "Corrections per 100 words over the last 7 days"
+        ))
+    }
+
+    /// Where each measured day sits in the box. Days with no data have no point
+    /// at all, which is what produces the gaps.
+    ///
+    /// The scale is fixed at the week's own peak rather than at a constant, so a
+    /// week that improved from 6 to 1 and a week that improved from 0.6 to 0.1
+    /// both fill the box — the shape is the message, and the number above it is
+    /// the magnitude. `max(peak, …)` keeps a flat week of small values off the
+    /// baseline instead of drawing it as a line of zeroes.
+    private func points(in size: CGSize) -> [(index: Int, point: CGPoint)] {
+        let measured = values.compactMap { $0 }
+        guard !measured.isEmpty else { return [] }
+        let peak = max(measured.max() ?? 0, 0.0001)
+        let steps = max(values.count - 1, 1)
+        let inset = Self.dotRadius + Self.lineWidth / 2
+
+        return values.enumerated().compactMap { index, value in
+            guard let value else { return nil }
+            let x = size.width * CGFloat(index) / CGFloat(steps)
+            let usable = max(size.height - inset * 2, 1)
+            let y = size.height - inset - usable * CGFloat(value / peak)
+            return (
+                index,
+                CGPoint(
+                    x: min(max(x, inset), max(size.width - inset, inset)),
+                    y: y
+                )
+            )
+        }
+    }
+
+    /// Consecutive measured days, split wherever a day is missing.
+    private func runs(
+        of points: [(index: Int, point: CGPoint)]
+    ) -> [[(index: Int, point: CGPoint)]] {
+        var runs: [[(index: Int, point: CGPoint)]] = []
+        for entry in points {
+            if let last = runs.last?.last, last.index == entry.index - 1 {
+                runs[runs.count - 1].append(entry)
+            } else {
+                runs.append([entry])
+            }
+        }
+        return runs
+    }
+
+    private func path(through points: [CGPoint]) -> Path {
+        var path = Path()
+        guard let first = points.first else { return path }
+        path.move(to: first)
+        for point in points.dropFirst() {
+            path.addLine(to: point)
+        }
+        return path
     }
 }
 

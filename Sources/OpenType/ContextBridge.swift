@@ -76,6 +76,76 @@ final class ContextBridge {
         snapshot.restore(to: pasteboard)
     }
 
+    /// Selects the run of `text` sitting immediately before the caret in the
+    /// focused field, so that a following `insert(_:)` *replaces* it.
+    ///
+    /// The undo behind D-1's 「撤销并删除该词条」 needs to put the delivered text
+    /// back, and delivery/correction both write through `insert(_:)`, which is
+    /// Cmd+V: it replaces a selection and otherwise lands at the caret. Right
+    /// after a delivery nothing is selected, so pasting without this would
+    /// *append* the restored sentence to the one already there — the one
+    /// outcome worse than leaving the mis-transcription alone. Selecting first
+    /// keeps a single write-back route rather than adding a second one that
+    /// edits text some other way.
+    ///
+    /// Every condition below is a refusal to guess, because the cost of a wrong
+    /// guess is the user's own text: nothing may already be selected (that
+    /// selection is theirs, not ours), the field's value must still *end* at
+    /// the caret with exactly the characters we delivered, and the AX read must
+    /// succeed outright. `false` means the caller should leave the text alone
+    /// and say so — many apps (Electron, web fields) do not expose a usable
+    /// `AXValue`, and there the honest answer is that the paste cannot be
+    /// undone rather than a paste somewhere unintended.
+    ///
+    /// Ranges here are UTF-16 offsets, which is what `AXSelectedTextRange`
+    /// means on every AppKit-backed field — hence `NSString` rather than
+    /// `String.Index` arithmetic.
+    func selectTextEndingAtCaret(_ text: String) -> Bool {
+        guard accessibilityGranted,
+              let element = focusedElement(),
+              !text.isEmpty else { return false }
+
+        var selectionValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &selectionValue
+        ) == .success,
+            let selectionValue,
+            CFGetTypeID(selectionValue) == AXValueGetTypeID() else { return false }
+
+        var caret = CFRange()
+        guard AXValueGetValue(
+            unsafeBitCast(selectionValue, to: AXValue.self),
+            .cfRange,
+            &caret
+        ), caret.length == 0 else { return false }
+
+        var fieldValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            &fieldValue
+        ) == .success,
+            let contents = fieldValue as? String else { return false }
+
+        let delivered = (text as NSString).length
+        let start = caret.location - delivered
+        guard start >= 0,
+              caret.location <= (contents as NSString).length,
+              (contents as NSString).substring(
+                with: NSRange(location: start, length: delivered)
+              ) == text else { return false }
+
+        var target = CFRange(location: start, length: delivered)
+        guard let range = AXValueCreate(.cfRange, &target) else { return false }
+        return AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            range
+        ) == .success
+    }
+
     private func selectedText() -> String? {
         guard accessibilityGranted,
               let focusedElement = focusedElement() else { return nil }

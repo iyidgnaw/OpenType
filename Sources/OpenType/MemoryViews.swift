@@ -40,16 +40,20 @@ struct MemoryColumn: View {
                 }
 
                 if narrow {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: DS.Space.group) {
-                            dictionary
-                            ownerFacts
-                            consolidationRuns
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: DS.Space.group) {
+                                dictionary
+                                ownerFacts
+                                consolidationRuns
+                            }
+                            .padding(.horizontal, pagePadding)
+                            .padding(.bottom, pagePadding)
                         }
-                        .padding(.horizontal, pagePadding)
-                        .padding(.bottom, pagePadding)
+                        .scrollIndicators(.hidden)
+                        .onChange(of: revealTarget) { _ in reveal(with: proxy) }
+                        .onAppear { reveal(with: proxy) }
                     }
-                    .scrollIndicators(.hidden)
                 } else {
                     // Two independent scrollers, one per column: a 34-term
                     // dictionary must not push 「整理记录」 off the bottom of a
@@ -57,8 +61,12 @@ struct MemoryColumn: View {
                     HStack(alignment: .top, spacing: DS.Space.content) {
                         let available = proxy.size.width - pagePadding * 2 - DS.Space.content
 
-                        ScrollView { dictionary }
-                            .frame(width: available * MemoryMetrics.leftColumnShare)
+                        ScrollViewReader { proxy in
+                            ScrollView { dictionary }
+                                .onChange(of: revealTarget) { _ in reveal(with: proxy) }
+                                .onAppear { reveal(with: proxy) }
+                        }
+                        .frame(width: available * MemoryMetrics.leftColumnShare)
 
                         ScrollView {
                             VStack(alignment: .leading, spacing: DS.Space.group) {
@@ -77,6 +85,27 @@ struct MemoryColumn: View {
         }
         .background(DS.Colour.canvas)
         .task { await model.refreshMemoryPanel() }
+    }
+
+    // MARK: - Revealing one row (D-2)
+
+    /// The row 「已记住：呸泡 → PayPal」 asked for, once it actually exists.
+    ///
+    /// Keyed on the row's id rather than on the canonical spelling the click
+    /// carried, so this changes both when a *different* term is asked for and
+    /// when the term asked for finally arrives — the page fetches its terms in a
+    /// `.task`, so a click that opens this page asks for a row a moment before
+    /// there are any rows to scroll to.
+    private var revealTarget: Int? {
+        guard let canonical = model.highlightedMemoryTerm else { return nil }
+        return model.memoryTerms.first { $0.canonicalTerm == canonical }?.id
+    }
+
+    private func reveal(with proxy: ScrollViewProxy) {
+        guard let target = revealTarget else { return }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo(target, anchor: .center)
+        }
     }
 
     // MARK: - Header
@@ -245,6 +274,11 @@ private struct MemoryTermRowView: View {
     /// yanks its own anchor away.
     private var revealsActions: Bool { isHovered || showingEditor }
 
+    /// Whether this is the row a 「已记住」 click just asked to see (D-2).
+    private var isHighlighted: Bool {
+        model.highlightedMemoryTerm == term.canonicalTerm
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
@@ -274,6 +308,13 @@ private struct MemoryTermRowView: View {
         }
         .padding(.horizontal, MemoryMetrics.rowH)
         .padding(.vertical, DS.Space.rowV)
+        // The other half of D-2's click-through: scrolling to a row in a list of
+        // thirty and saying nothing about which one it was would leave the user
+        // to find it again by reading. A tint rather than a border or a badge,
+        // because it is temporary — `AppModel.revealMemoryTerm` clears it after
+        // a few seconds — and a temporary border would reflow the row.
+        .background(isHighlighted ? DS.Colour.accent.opacity(0.10) : .clear)
+        .animation(.easeInOut(duration: 0.2), value: isHighlighted)
         .overlay(alignment: .trailing) { actions }
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }

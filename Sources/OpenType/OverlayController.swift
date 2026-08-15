@@ -64,6 +64,24 @@ private final class OverlayPresentation: ObservableObject {
     /// that stays quiet.
     @Published var modeSwitchHintAvailable = true
 
+    // MARK: - The learning loop, made visible (2026-08-15 §D)
+
+    /// What the entity dictionary rewrote in the text this toast is about
+    /// (D-1), in text order. Empty for a delivery it left alone, which is the
+    /// common case and shows nothing at all.
+    @Published var aliasReplacements: [AliasReplacement] = []
+    /// Whether the list under 「自动修正 N 处」 is open. Lives here rather than as
+    /// the view's `@State` because the panel is fixed-height: the controller has
+    /// to resize it when the list opens, and it cannot see a `@State` toggle.
+    @Published var aliasReplacementsExpanded = false
+    /// One sentence about what the loop just did — 「已记住：呸泡 → PayPal」
+    /// (D-2), or how an undo turned out (D-1).
+    @Published var learningNote: LearningNote?
+
+    /// Whether the note is the panel's whole content right now, rather than a
+    /// row on a delivery toast. Set only by `presentNote()`.
+    @Published var learningNoteOwnsPanel = false
+
     /// What the delivery toast shows under its headline: what `AppModel` says
     /// it delivered, or failing that the caption of the recording that
     /// produced it. Derived from two `@Published` values, so the layout
@@ -92,6 +110,22 @@ private final class OverlayPresentation: ObservableObject {
         /// Identity for the countdown bar, same as `CorrectionHint.startedAt`.
         let startedAt: Date
     }
+}
+
+/// One sentence the voice surface shows about the learning loop (§D): 「已记
+/// 住：呸泡 → PayPal」 after a correction taught the dictionary something, or how
+/// an 「撤销并删除该词条」 click turned out.
+///
+/// File-scope rather than nested in the private presentation object because
+/// `AppModel` builds these — it owns the decisions (`LearnedTermNotice`,
+/// `AliasUndo`) and the controller only draws them, the same non-self-deciding
+/// contract every other thing on this panel has.
+struct LearningNote: Equatable {
+    let text: String
+    /// The canonical spelling of the term to reveal on the 记忆 page, or `nil`
+    /// for a note with nowhere to go — an undo's outcome, whose term has just
+    /// been deleted.
+    let term: String?
 }
 
 /// How `OverlayController.show(...)` should treat the HUD panel for a given
@@ -157,18 +191,41 @@ enum VoiceSurfacePanelMetrics {
     static let compactToast = NSSize(width: 420, height: 66)
     static let pendingDispatch = NSSize(width: 420, height: 96)
 
-    /// A delivery toast: the headline, optionally what was delivered, and —
-    /// while a correction window is open — the merged countdown/hint row.
+    /// A delivery toast: the headline, optionally what was delivered, the
+    /// learning loop's own rows (§D), and — while a correction window is open —
+    /// the merged countdown/hint row.
     ///
     /// Sized from what it will actually contain rather than to a worst case,
     /// because the panel is fixed-height and an absent row would otherwise
     /// leave a strip of blank material under the text.
-    static func delivery(hasText: Bool, hasHint: Bool) -> NSSize {
+    static func delivery(
+        hasText: Bool,
+        hasHint: Bool,
+        hasNote: Bool = false,
+        replacementCount: Int = 0,
+        replacementsExpanded: Bool = false
+    ) -> NSSize {
         var height: CGFloat = 66
         if hasText { height += 42 }
+        if hasNote { height += 26 }
+        if replacementCount > 0 { height += 26 }
+        if replacementsExpanded {
+            // Capped at the same six rows the question card caps its options
+            // at: past that the toast is taller than the thing it is describing,
+            // and a delivery that hit seven aliases has a dictionary problem the
+            // 记忆 page is the place to look at.
+            height += CGFloat(min(replacementCount, maxExpandedReplacements)) * 30
+        }
         if hasHint { height += 33 }
         return NSSize(width: 420, height: height)
     }
+
+    /// How many rewrite rows the expanded list draws before it stops growing.
+    static let maxExpandedReplacements = 6
+
+    /// A standalone learning-loop note (§D), wide enough for one sentence that
+    /// may wrap once.
+    static let note = NSSize(width: 420, height: 78)
 
     /// The question card grows with its options and stays 420 wide. A prompt,
     /// not a document — it never reaches the card's 640.
@@ -285,6 +342,63 @@ final class OverlayController {
         set { presentation.modeSwitchHintAvailable = newValue }
     }
 
+    /// What the dictionary rewrote in the delivery this toast is about (D-1).
+    /// Set alongside `correctionWindowArmed`, and for the same reason: the undo
+    /// it offers is live for exactly as long as that window is.
+    var aliasReplacements: [AliasReplacement] {
+        get { presentation.aliasReplacements }
+        set {
+            let previous = presentation.aliasReplacements
+            presentation.aliasReplacements = newValue
+            // A *new* report opens collapsed: the summary line is what a
+            // delivery that went right needs, and a list inherited open from the
+            // previous delivery would be a panel that opens itself. A list that
+            // only lost rows is the same list mid-undo, and collapsing it under
+            // the user's pointer after one click would make undoing a second
+            // rewrite cost an extra one.
+            let shrank = !newValue.isEmpty
+                && newValue.allSatisfy { previous.contains($0) }
+            if !shrank {
+                presentation.aliasReplacementsExpanded = false
+            }
+        }
+    }
+
+    /// The 「已记住」 / undo-outcome sentence riding under the delivery headline.
+    /// Plain property, so a delivery push that follows it renders it as part of
+    /// the same toast rather than replacing it — see `showLearningNote(_:)` for
+    /// the case where no such push is coming.
+    var learningNote: LearningNote? {
+        get { presentation.learningNote }
+        set { presentation.learningNote = newValue }
+    }
+
+    /// A note with nothing pushing a toast behind it — the outcome of an undo,
+    /// which happens while the panel may already be on its way out.
+    ///
+    /// Refreshes the delivery toast in place when one is up (it is the toast
+    /// this note is about, and preempting it would tear down the correction
+    /// window's own affordance), and otherwise takes the panel for a couple of
+    /// seconds on its own.
+    func showLearningNote(_ note: LearningNote) {
+        presentation.learningNote = note
+        if let legacyOnScreen,
+           legacyOnScreen.state == .success || legacyOnScreen.state == .copied {
+            resizeLegacyPanel(for: legacyOnScreen.state)
+            return
+        }
+        presentNote()
+    }
+
+    /// The disclosure control on 「自动修正 N 处」. Handled here rather than as
+    /// view state because opening the list changes the panel's height, and the
+    /// panel's height is the controller's to set.
+    func toggleAliasReplacements() {
+        presentation.aliasReplacementsExpanded.toggle()
+        guard let legacyOnScreen else { return }
+        resizeLegacyPanel(for: legacyOnScreen.state)
+    }
+
     /// Escape, the 关闭 button, or a click outside a finished card.
     var onRequestDismiss: (() -> Void)?
     /// The 复制 button, with the card's Markdown body.
@@ -295,6 +409,13 @@ final class OverlayController {
     var onStopAgentRun: (() -> Void)?
     /// The user's answer to an agent question (T5): run id plus the answer.
     var onAnswerAgentQuestion: ((String, AgentQuestionAnswerItem) -> Void)?
+    /// 「撤销并删除该词条」 on one rewrite row (D-1). Reported rather than acted
+    /// on, same contract as everything else here: whether the delivered text may
+    /// still be touched is `AliasUndo`'s decision and `AppModel`'s to make.
+    var onUndoAliasReplacement: ((AliasReplacement) -> Void)?
+    /// A click on 「已记住：呸泡 → PayPal」 (D-2), carrying the canonical spelling
+    /// the 记忆 page should reveal.
+    var onOpenLearnedTerm: ((String) -> Void)?
     /// Esc while the pre-dispatch confirmation is on screen (P1-6). Reported
     /// rather than acted on, same non-self-closing contract as everything
     /// above: `AppModel` owns the window and decides what a keypress at this
@@ -316,7 +437,7 @@ final class OverlayController {
     /// `AppModel`'s job.
     var onFollowUpByVoice: (() -> Void)?
 
-    private lazy var hostingView = NSHostingView(
+    private lazy var hostingView = OverlayHostingView(
         rootView: OverlayView(
             presentation: presentation,
             onClose: { [weak self] in self?.onRequestDismiss?() },
@@ -327,7 +448,12 @@ final class OverlayController {
                 self?.onAnswerAgentQuestion?(runId, answer)
             },
             onFollowUp: { [weak self] text in self?.onFollowUp?(text) },
-            onFollowUpByVoice: { [weak self] in self?.onFollowUpByVoice?() }
+            onFollowUpByVoice: { [weak self] in self?.onFollowUpByVoice?() },
+            onToggleReplacements: { [weak self] in self?.toggleAliasReplacements() },
+            onUndoReplacement: { [weak self] replacement in
+                self?.onUndoAliasReplacement?(replacement)
+            },
+            onOpenLearnedTerm: { [weak self] term in self?.onOpenLearnedTerm?(term) }
         )
     )
 
@@ -364,6 +490,13 @@ final class OverlayController {
         if state == .listening, previousProcessing != .listening {
             presentation.lastCaption = ""
             presentation.deliveredText = nil
+            // The learning loop's rows belong to the delivery that produced
+            // them (§D). A new recording is a new subject, and an undo offer
+            // for the previous one would act on text that is about to be
+            // superseded.
+            presentation.aliasReplacements = []
+            presentation.aliasReplacementsExpanded = false
+            presentation.learningNote = nil
         }
 
         // A new recording is a fresh, user-initiated action: it always wins
@@ -585,6 +718,7 @@ final class OverlayController {
         presentation.surface = .hidden
         presentation.correctionHint = nil
         presentation.pendingDispatch = nil
+        presentation.learningNoteOwnsPanel = false
         panel?.orderOut(nil)
     }
 
@@ -726,6 +860,9 @@ final class OverlayController {
         dismissWorkItem?.cancel()
         removeClickOutsideMonitor()
         removeQuestionKeyMonitors()
+        // Whatever is being pushed now owns the panel; a note that had it to
+        // itself is back to being a row on this toast, if it belongs on one.
+        presentation.learningNoteOwnsPanel = false
 
         let behavior = Self.hideBehavior(
             for: state,
@@ -751,19 +888,8 @@ final class OverlayController {
             presentation.correctionHint = nil
         }
 
-        let size: NSSize
-        switch state {
-        case .listening:
-            size = VoiceSurfacePanelMetrics.pill
-        case .success, .copied:
-            size = VoiceSurfacePanelMetrics.delivery(
-                hasText: !presentation.deliveryBody.isEmpty,
-                hasHint: presentation.correctionHint != nil
-            )
-        default:
-            size = VoiceSurfacePanelMetrics.compactToast
-        }
         let panel = panel ?? makePanel()
+        let size = legacySize(for: state)
         hostingView.frame = NSRect(origin: .zero, size: size)
         panel.setContentSize(size)
         position(panel)
@@ -781,6 +907,83 @@ final class OverlayController {
             legacyOnScreen = (state, mode)
         }
     }
+
+    /// How big the legacy panel has to be to hold `state`'s content, including
+    /// the learning-loop rows a delivery may have grown (§D).
+    private func legacySize(for state: ProcessingState) -> NSSize {
+        switch state {
+        case .listening:
+            return VoiceSurfacePanelMetrics.pill
+        case .success, .copied:
+            return VoiceSurfacePanelMetrics.delivery(
+                hasText: !presentation.deliveryBody.isEmpty,
+                hasHint: presentation.correctionHint != nil,
+                hasNote: presentation.learningNote != nil,
+                replacementCount: presentation.aliasReplacements.count,
+                replacementsExpanded: presentation.aliasReplacementsExpanded
+            )
+        default:
+            return VoiceSurfacePanelMetrics.compactToast
+        }
+    }
+
+    /// Re-sizes the panel around content that changed while it was up — the
+    /// rewrite list opening, an undo's outcome arriving — **without** touching
+    /// the dismiss timer. The delivery toast's clock is the correction window's
+    /// (P0-3), and re-presenting it to change its height would hand the user
+    /// eight fresh seconds of a window that is already half spent.
+    private func resizeLegacyPanel(for state: ProcessingState) {
+        guard let panel, panel.isVisible else { return }
+        let size = legacySize(for: state)
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        let frame = VoiceSurfacePanelLayout.frame(
+            for: size,
+            visibleFrame: visibleFrame() ?? panel.frame
+        )
+        panel.setFrame(frame, display: true, animate: true)
+    }
+
+    /// The learning-loop note as a toast of its own, for when there is no
+    /// delivery toast to hang it on (§D). Preempts and restores the unified
+    /// surface exactly like `presentToast` does, for the same reason: an undo's
+    /// outcome must neither be swallowed by a card that is still up nor tear
+    /// that card down.
+    private func presentNote() {
+        cancelToastOverride()
+        let preempted = surfaceState
+
+        dismissWorkItem?.cancel()
+        removeClickOutsideMonitor()
+        removeQuestionKeyMonitors()
+        presentation.surface = .hidden
+        presentation.correctionHint = nil
+        presentation.learningNoteOwnsPanel = true
+        legacyOnScreen = nil
+
+        let panel = panel ?? makePanel()
+        let size = VoiceSurfacePanelMetrics.note
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        panel.setContentSize(size)
+        position(panel)
+        panel.orderFrontRegardless()
+        self.panel = panel
+        dismiss(after: Self.learningNoteSeconds)
+
+        guard preempted != .hidden else { return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.toastOverride = nil
+            self.restoreSurfaceAfterToast()
+        }
+        toastOverride = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.learningNoteSeconds,
+            execute: item
+        )
+    }
+
+    /// Long enough to read one sentence naming a term and what happened to it.
+    private static let learningNoteSeconds: TimeInterval = 2.6
 
     /// Shows a transient legacy toast, preempting the unified surface when it
     /// owns the panel instead of being swallowed by it. The surface is put
@@ -846,9 +1049,11 @@ final class OverlayController {
     ) {
         let panel = panel ?? makePanel()
         self.panel = panel
-        // The surface owns the panel from here on; no legacy toast is up.
+        // The surface owns the panel from here on; no legacy toast is up, and
+        // no note has it to itself.
         legacyOnScreen = nil
         presentation.correctionHint = nil
+        presentation.learningNoteOwnsPanel = false
 
         let size = VoiceSurfacePanelMetrics.size(for: surface)
         let frame = VoiceSurfacePanelLayout.frame(
@@ -995,6 +1200,30 @@ private final class KeyableOverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+/// The panel's content view, with one behaviour AppKit does not give by
+/// default: a click that arrives while **another** application is frontmost
+/// lands on the control it hit, instead of being spent on bringing this window
+/// forward.
+///
+/// Every control on this panel exists to be clicked in exactly that situation —
+/// the user is in Notes looking at what was just delivered, and the panel is a
+/// `.nonactivatingPanel` precisely so acting on it does not pull them out of
+/// their app. Without `acceptsFirstMouse`, 「撤销并删除该词条」 (§D-1) would need
+/// two clicks inside an eight-second window, which for a control offered *once*
+/// per delivery is the same as not offering it.
+private final class OverlayHostingView: NSHostingView<OverlayView> {
+    required init(rootView: OverlayView) {
+        super.init(rootView: rootView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("OverlayHostingView is built in code, never from a nib")
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 private struct OverlayView: View {
     @ObservedObject var presentation: OverlayPresentation
     let onClose: () -> Void
@@ -1004,6 +1233,9 @@ private struct OverlayView: View {
     let onAnswer: (String, AgentQuestionAnswerItem) -> Void
     let onFollowUp: (String) -> Void
     let onFollowUpByVoice: () -> Void
+    let onToggleReplacements: () -> Void
+    let onUndoReplacement: (AliasReplacement) -> Void
+    let onOpenLearnedTerm: (String) -> Void
 
     var body: some View {
         Group {
@@ -1011,6 +1243,9 @@ private struct OverlayView: View {
             // its 1.5 seconds the only thing worth showing is what was heard.
             if let pending = presentation.pendingDispatch {
                 pendingDispatchContent(pending)
+            } else if presentation.learningNoteOwnsPanel,
+                      let note = presentation.learningNote {
+                noteContent(note)
             } else {
                 surfaceContent
             }
@@ -1312,6 +1547,16 @@ private struct OverlayView: View {
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
 
+            if let note = presentation.learningNote {
+                LearningNoteRow(note: note, onOpen: onOpenLearnedTerm)
+            }
+
+            if let summary = AliasReplacementNotice.summary(
+                for: presentation.aliasReplacements
+            ) {
+                replacementsSection(summary: summary)
+            }
+
             Spacer(minLength: 0)
 
             if let hint {
@@ -1334,6 +1579,77 @@ private struct OverlayView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// 「自动修正 N 处」, and — once opened — one row per rewrite with the way
+    /// out of it (D-1).
+    ///
+    /// Collapsed by default because the summary is what the user needs to see
+    /// on a delivery that went right, and expanded only on purpose because the
+    /// list is what they need when it went wrong. The whole affordance is up for
+    /// exactly as long as the correction window (`CorrectionWindow.windowSeconds`),
+    /// which is also exactly as long as the undo can still put the text back.
+    private func replacementsSection(summary: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: onToggleReplacements) {
+                HStack(spacing: 5) {
+                    Image(systemName: "text.badge.checkmark")
+                        .font(DS.Text.size(11))
+                    Text(summary)
+                        .font(DS.Text.size(11, .medium))
+                    Image(systemName: presentation.aliasReplacementsExpanded
+                          ? "chevron.down" : "chevron.right")
+                        .font(DS.Text.size(9, .semibold))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(DS.Colour.accent)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(OpenTypeL10n.text(
+                "展开可以撤销某一处替换，并删除对应的词典记录",
+                english: "Open to undo one replacement and delete the dictionary entry behind it"
+            ))
+
+            if presentation.aliasReplacementsExpanded {
+                ForEach(
+                    Array(
+                        presentation.aliasReplacements
+                            .prefix(VoiceSurfacePanelMetrics.maxExpandedReplacements)
+                            .enumerated()
+                    ),
+                    id: \.offset
+                ) { _, replacement in
+                    AliasReplacementRow(
+                        replacement: replacement,
+                        onUndo: { onUndoReplacement(replacement) }
+                    )
+                }
+            }
+        }
+        .padding(.top, 7)
+        .dsHairline(.top, color: DS.Colour.border)
+    }
+
+    /// The learning-loop note when it has the panel to itself — an undo's
+    /// outcome, which lands after the delivery toast it belongs to may already
+    /// have gone.
+    private func noteContent(_ note: LearningNote) -> some View {
+        HStack(spacing: 11) {
+            Image(systemName: "book.closed")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(DS.Colour.ink(0.55))
+
+            LearningNoteRow(note: note, onOpen: onOpenLearnedTerm, lineLimit: 3)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .frame(
+            width: VoiceSurfacePanelMetrics.note.width,
+            height: VoiceSurfacePanelMetrics.note.height,
+            alignment: .leading
+        )
     }
 
     /// 「已写入 Notes」 when the text went into an app, 「已复制」 when the
@@ -1393,6 +1709,101 @@ private struct OverlayView: View {
         case .cancelled: return .secondary
         default: return DS.Colour.accent
         }
+    }
+}
+
+/// 「已记住：呸泡 → PayPal」 (D-2), or how an undo turned out (D-1).
+///
+/// A button when it has somewhere to go and plain text when it does not, rather
+/// than a button that sometimes does nothing: the click-through exists so the
+/// user can go *check* what was just learned, and an undo's note has had its
+/// term deleted by the time it is drawn.
+private struct LearningNoteRow: View {
+    let note: LearningNote
+    let onOpen: (String) -> Void
+    var lineLimit = 1
+
+    var body: some View {
+        if let term = note.term {
+            Button {
+                onOpen(term)
+            } label: {
+                HStack(spacing: 5) {
+                    label
+                    Image(systemName: "arrow.up.forward")
+                        .font(DS.Text.size(9, .semibold))
+                        .foregroundStyle(DS.Colour.accent)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(OpenTypeL10n.text(
+                "在记忆页查看这个词条",
+                english: "Show this entry on the Memory page"
+            ))
+        } else {
+            label
+        }
+    }
+
+    private var label: some View {
+        Text(note.text)
+            .font(DS.Text.size(11.5))
+            .foregroundStyle(DS.Colour.ink(0.55))
+            .lineLimit(lineLimit)
+            .fixedSize(horizontal: false, vertical: true)
+            .multilineTextAlignment(.leading)
+    }
+}
+
+/// One rewrite, and the way out of it: 「呸泡 → PayPal · 撤销」.
+///
+/// The undo is the row's reason for existing, so it is a control rather than a
+/// context menu — a wrongly-learned alias is otherwise only reachable by
+/// hunting through the 记忆 page, which is where this feature's whole
+/// motivation came from (review §1).
+private struct AliasReplacementRow: View {
+    let replacement: AliasReplacement
+    let onUndo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text(replacement.from)
+                .font(DS.Text.mono())
+                .foregroundStyle(DS.Colour.ink(0.45))
+                .lineLimit(1)
+            Image(systemName: "arrow.right")
+                .font(DS.Text.size(9))
+                .foregroundStyle(DS.Colour.ink(0.3))
+            Text(replacement.to)
+                .font(DS.Text.mono(11, weight: .medium))
+                .foregroundStyle(DS.Colour.ink(0.7))
+                .lineLimit(1)
+
+            Spacer(minLength: 6)
+
+            Button(action: onUndo) {
+                Text(OpenTypeL10n.text("撤销并删除该词条", english: "Undo and forget"))
+                    .font(DS.Text.size(11, .medium))
+                    .foregroundStyle(DS.Colour.accent)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            // 「词条」 rather than 「别名」: `DELETE /memory/terms/:id` takes the
+            // whole row, canonical and every alias on it, and there is no
+            // endpoint that removes one alias. Saying otherwise would promise
+            // a narrower deletion than the click performs.
+            .help(OpenTypeL10n.text(
+                "把这处替换改回原话，并从词典中删除这条词条",
+                english: "Put the original words back and delete this entry from the dictionary"
+            ))
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 26)
+        .background(
+            DS.Colour.OnPanel.fill,
+            in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+        )
     }
 }
 

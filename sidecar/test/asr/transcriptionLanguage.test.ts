@@ -167,16 +167,23 @@ describe("POST /asr/transcribe language passthrough", () => {
     // The post-hoc half of the dictionary feedback is backend-agnostic and
     // must survive the new parameter.
     const transcribe = async () => "我用呸泡付款";
+    const term = makeTerm("PayPal", ["呸泡"]);
     const router = createRouter(
       buildAsrRoutes(transcribe, {
-        listTerms: () => [makeTerm("PayPal", ["呸泡"])],
+        listTerms: () => [term],
       })
     );
 
     const response = await router(post({ audioBase64: "aGk=", language: "zh" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ text: "我用PayPal付款" });
+    // Still the whole body, not one field of it: the rewrite report (D-1) is a
+    // key this response gained, and a language-scoped request must carry it
+    // exactly like an unscoped one.
+    expect(await response.json()).toEqual({
+      text: "我用PayPal付款",
+      replacements: [{ from: "呸泡", to: "PayPal", termId: term.id }],
+    });
   });
 });
 

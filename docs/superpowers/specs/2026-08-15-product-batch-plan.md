@@ -99,7 +99,7 @@ Swift 524 XCTest + 13 swift-testing 全绿，sidecar 831 pass / 0 fail。
 
 ---
 
-## D. 学习闭环可见化（review #1）—— 本批主线
+## D. 学习闭环可见化（review #1）—— 本批主线 —— 已完成（2026-08-15）
 
 三个出口，一起做。分开做没有意义。
 
@@ -135,6 +135,28 @@ Swift 524 XCTest + 13 swift-testing 全绿，sidecar 831 pass / 0 fail。
 **测试**：`applyAliasCorrections` 已有测试不动，新增响应形状测试；Swift 侧 `replacements`/`learned` 解码；
 撤销的时限判据（复用 `CorrectionWindow` 的纯函数，新增「超时只删词条不改文本」分支）；
 `UsageStats` 趋势聚合（含缺失 `recordingEndedAt` 的老行排除、不足 7 天的补齐行为）。
+
+**落地**（as-built 详述见 `2026-08-09-current-system-state.md` §2 的 `/asr/transcribe` 行、
+「The learning loop, made visible」一节、以及 §7 的统计band 段）：
+
+- 侧车：`sidecar/src/asr/routes.ts` 返回 `replacements`（无改写时**整个 key 不出现**，
+  与老响应逐字节一致），`dictionaryBias.ts` 新增 `termIdForReplacement`。
+  `sidecar/test/asr/replacements.test.ts` 全绿，`bun test` 869/869。
+- Swift 纯逻辑集中在新文件 `Sources/OpenType/LearningLoop.swift`：
+  `AliasReplacement` / `TranscribeResponse` / `AliasReplacementNotice` / `AliasUndo`（D-1）、
+  `LearnedTerm` / `CorrectionResponse` / `LearnedTermNotice`（D-2）、`DictionaryStats`（D-3）。
+- 与本节字面写法不同的三处，都是有意的：
+  - **撤销是三种结局而不是布尔**（`.restoreText` / `.forgetTermOnly(.windowExpired
+    | .targetApplicationChanged | .textNoLongerMatches)`），且**三种都删词条**。
+    本节只写了「超时或应用已变」两条；第三条是交付文本里该规范词的出现次数与报告对不上——
+    用户自己说对过一次、又被听错一次时，替换哪一处都是猜，而猜错会毁掉他说对的词。
+  - **趋势做成 `Summary` 的字段而不是 `correctionsPerHundredWordsTrend(days:)`**：
+    `summarize` 刻意只走一遍文件，而 `dailyWords` 已经确立了「7 格、最旧在前」这套分桶；
+    再开一个带自己 `days:` 的 API 等于给同一条带子两套分桶规则，迟早对不上。
+    值是 `[Double?]`——「有交付但零纠错」是真实的 0（线上的点），「当天没交付」是 `nil`（断口）。
+  - **还原文本需要先选中**：`insert` 是 Cmd+V，交付后光标在文末且没有选区，直接粘贴会把原句
+    **追加**在后面。所以加了 `ContextBridge.selectTextEndingAtCaret(_:)`（AX 读值 + 设选区），
+    写回仍然只有 `insert` 这一条路；AX 读不到（Electron/网页输入框）时如实告知没能改回。
 
 ---
 

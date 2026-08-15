@@ -251,3 +251,42 @@ export function applyAliasCorrections(
 
   return { text: out, replacements };
 }
+
+/**
+ * Which dictionary row a rewrite came from (D-1).
+ *
+ * `applyAliasCorrections` reports *what* changed; this answers *whose entry
+ * said so*, which is the one thing `DELETE /memory/terms/:id` needs and the
+ * only reason an 「撤销并删除该词条」 click can do the second half of its job.
+ *
+ * Resolved by looking the (alias, canonical) pair back up rather than by
+ * threading an id through the scan, because that pair already names the pattern
+ * that won: `compareAliasPatterns` ranks on alias length, then confidence, then
+ * recency, and any two terms it could have chosen between differ in at least
+ * one half of the pair unless they agree in *both* — in which case they would
+ * have produced the same rewrite whichever of them won, so neither is the
+ * innocent one.
+ *
+ * Those exact duplicates are reachable — the dictionary is written
+ * automatically, so the same alias can be learned onto the same canonical
+ * twice — and `allTerms()` is `SELECT * FROM entity_terms` with no `ORDER BY`.
+ * Picking by arrival order would let the id we report, and therefore the row an
+ * undo click deletes, change after an unrelated write. The lowest id is
+ * arbitrary but total and order-independent.
+ *
+ * `null` when nothing matches, which the scan's own output cannot produce (its
+ * replacements come from these very terms). The caller drops such a row rather
+ * than inventing an id for it.
+ */
+export function termIdForReplacement(
+  replacement: AliasReplacement,
+  terms: EntityTerm[]
+): number | null {
+  let lowest: number | null = null;
+  for (const term of terms) {
+    if (term.canonicalTerm !== replacement.canonicalTerm) continue;
+    if (!term.aliases.includes(replacement.alias)) continue;
+    if (lowest === null || term.id < lowest) lowest = term.id;
+  }
+  return lowest;
+}

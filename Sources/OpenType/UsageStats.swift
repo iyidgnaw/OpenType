@@ -67,6 +67,23 @@ enum UsageStats {
         /// printed beside it — which costs more trust than precise weekday
         /// labels buy. The view labels bar *i* from `now - (6 - i) * 86400`.
         let dailyWords: [Int]
+        /// `correctionsPerHundredWords` per day, over the same seven buckets as
+        /// `dailyWords`, oldest first (D-3).
+        ///
+        /// The headline rate answers 「how many corrections did I make」; the
+        /// question the learning loop actually poses is 「**is this falling**」,
+        /// and two numbers a week apart is the weakest possible way to show a
+        /// slope. Computed in the same pass as everything else here, on the same
+        /// buckets, so index *i* means the same day on the line as it does under
+        /// the bar drawn beside it.
+        ///
+        /// `nil` is a day that delivered nothing, and it is **not** the same as
+        /// a rate of zero — a day with words and no corrections is the best day
+        /// the product can have and is a real point on the line. Collapsing the
+        /// two would make a user who took the weekend off see the line dive on
+        /// Saturday and spike on Monday, which reads as "it got worse when I
+        /// came back" rather than as "there is no data here".
+        let dailyCorrectionsPerHundredWords: [Double?]
         /// `correctionsPerHundredWords` for the *previous* seven days, or `nil`
         /// when there is no prior week to compare against.
         ///
@@ -83,6 +100,10 @@ enum UsageStats {
             averageEndToEndLatency: nil,
             averageResponseLatency: nil,
             dailyWords: Array(repeating: 0, count: UsageStats.bucketCount),
+            dailyCorrectionsPerHundredWords: Array(
+                repeating: nil,
+                count: UsageStats.bucketCount
+            ),
             previousCorrectionsPerHundredWords: nil
         )
     }
@@ -242,6 +263,12 @@ enum UsageStats {
         var endToEndSpans: [TimeInterval] = []
         var responseSpans: [TimeInterval] = []
         var dailyWords = Array(repeating: 0, count: bucketCount)
+        // The trend's two other columns. Deliveries are counted per bucket as
+        // well as per week because they are what tells a day with a genuine
+        // zero rate apart from a day nothing happened on — words alone cannot,
+        // since an empty transcript can still be delivered.
+        var dailyCorrections = Array(repeating: 0, count: bucketCount)
+        var dailyDeliveries = Array(repeating: 0, count: bucketCount)
         // The seven days before the current window, for the trend. Gathered in
         // the same pass — a second walk over the file to compute one ratio
         // would double the cost of a panel whose whole job is to be cheap
@@ -295,9 +322,16 @@ enum UsageStats {
             )
             wordsDictated += sessionWords
             dailyWords[bucket] += sessionWords
+            dailyDeliveries[bucket] += 1
 
             let correctionRounds = session.filter { $0.status == .corrected }
             corrections += correctionRounds.count
+            // Attributed to the delivery's bucket, not to each correction's own
+            // timestamp. P0-3's post-delivery window puts `.corrected` rows
+            // *after* `.completed`, sometimes in the next 24-hour slice, and a
+            // correction that landed in a column with no words behind it would
+            // produce an infinite rate on a day the user never dictated.
+            dailyCorrections[bucket] += correctionRounds.count
 
             // Parsed once, for both figures below. `nil` for a mode string this
             // build no longer knows — rows from the old 5/6-mode era are still
@@ -357,6 +391,20 @@ enum UsageStats {
             averageEndToEndLatency: average(endToEndSpans),
             averageResponseLatency: average(responseSpans),
             dailyWords: dailyWords,
+            // Same three cases as the weekly figures, held apart per day: a day
+            // that delivered nothing has no rate (`nil`, drawn as a gap), a day
+            // that delivered but dictated no countable words has a real zero
+            // rather than a NaN, and everything else is the ratio. Rows lacking
+            // `recordingEndedAt` are absent only from the *timing* figures
+            // above; they count here in full, because dropping them would erase
+            // the early days of any user who upgraded mid-week — precisely the
+            // stretch that would show the improvement.
+            dailyCorrectionsPerHundredWords: (0..<bucketCount).map { bucket in
+                guard dailyDeliveries[bucket] > 0 else { return nil }
+                guard dailyWords[bucket] > 0 else { return 0 }
+                return Double(dailyCorrections[bucket]) * 100
+                    / Double(dailyWords[bucket])
+            },
             // `nil` when the prior week delivered nothing at all — there is no
             // trend to draw, and printing 0 would claim an improvement that
             // never happened. A week that delivered but dictated no words is a

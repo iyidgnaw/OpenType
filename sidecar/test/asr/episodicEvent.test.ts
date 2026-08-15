@@ -139,13 +139,20 @@ describe("POST /asr/transcribe records an episodic event", () => {
 
   test("rawTranscript is the pre-correction ASR text, correctedTranscript the delivered text", async () => {
     const { deps, recorded, terms } = recorder();
-    terms.push(makeTerm("PayPal", ["呸泡"]));
+    const term = makeTerm("PayPal", ["呸泡"]);
+    terms.push(term);
     const router = createRouter(buildAsrRoutes(async () => "我用呸泡付款", deps));
 
     const response = await router(post({ audioBase64: "aGk=" }));
 
-    // What the user got back.
-    expect(await response.json()).toEqual({ text: "我用PayPal付款" });
+    // What the user got back, whole. The rewrite is now reported alongside the
+    // text it changed (D-1), so this grew a key rather than losing its strict
+    // shape — the body is still pinned exactly, which is what lets this test
+    // notice a third key appearing.
+    expect(await response.json()).toEqual({
+      text: "我用PayPal付款",
+      replacements: [{ from: "呸泡", to: "PayPal", termId: term.id }],
+    });
     // What consolidation gets to mine: the mis-hearing AND its correction.
     expect(recorded).toHaveLength(1);
     expect(recorded[0]!.rawTranscript).toBe("我用呸泡付款");

@@ -76,6 +76,12 @@ final class AppModel: ObservableObject {
     /// "N running" affordance is used) so the app window's Task List panel
     /// can scroll to and briefly highlight that specific run.
     @Published var focusedAgentRunID: UUID?
+    /// The dictionary row the 记忆 page should scroll to and briefly highlight,
+    /// by canonical spelling — set by clicking 「已记住：呸泡 → PayPal」 on the
+    /// voice surface (D-2), cleared a few seconds later by `revealMemoryTerm`.
+    /// The canonical is the key because that is what the dictionary is keyed on;
+    /// an alias is one of several on a row and would match nothing.
+    @Published var highlightedMemoryTerm: String?
     @Published var selectedTab: AppTab = .sessions
     /// Past Ask/Agent conversations (`GET /conversations?kind=...`), backing
     /// the Q&A and Agent tabs (`Views.swift`) -- refreshed on tab appear and
@@ -523,6 +529,16 @@ final class AppModel: ObservableObject {
                     answers: [answer]
                 )
             }
+        }
+        // §D's two clicks. Both are reported here rather than acted on by the
+        // panel, the same contract the rest of the surface has: what an undo may
+        // touch is `AliasUndo`'s decision, and opening a window is not something
+        // a HUD gets to do on its own.
+        self.overlay.onUndoAliasReplacement = { [weak self] replacement in
+            self?.undoAliasReplacement(replacement)
+        }
+        self.overlay.onOpenLearnedTerm = { [weak self] term in
+            self?.revealMemoryTerm(term)
         }
         self.overlay.onStopAgentRun = { [weak self] in
             guard let state = self?.agentPanelState,
@@ -1614,14 +1630,17 @@ final class AppModel: ObservableObject {
 
         do {
             setState(.transcribing)
-            let instruction = try await transcribeLocally(audioURL: audioURL)
+            // `.text` only: a spoken correction instruction is never delivered,
+            // so whatever the dictionary rewrote inside it is not something the
+            // user is looking at and has nothing to offer an undo of.
+            let instruction = try await transcribeLocally(audioURL: audioURL).text
             try Task.checkCancellation()
 
             setState(.transforming)
             reviewPanel.beginCorrecting()
             let fullText = reviewPanel.currentText()
 
-            let response: CorrectionResponseBody
+            let response: CorrectionResponse
             do {
                 response = try await requestCorrection(
                     fullText: fullText,
@@ -1661,6 +1680,18 @@ final class AppModel: ObservableObject {
             )
             reviewSession?.lastEventId = eventId
 
+            // D-2: say what this correction taught the dictionary, when it
+            // taught anything. In this path the acknowledgement goes to the
+            // Review panel's own hint line rather than to the voice surface —
+            // the panel is on screen and holding the user's attention, and a
+            // toast at the bottom of the display for a change they are watching
+            // happen in front of them is a message half of them would miss. The
+            // in-place path has no panel, so its copy of this rides the delivery
+            // toast (see `processInPlaceCorrection`).
+            if let notice = LearnedTermNotice.notice(for: response.learned) {
+                reviewPanel.showHint(notice.text)
+            }
+
             playFeedbackSound(.done)
             setState(.idle)
         } catch is CancellationError {
@@ -1680,21 +1711,6 @@ final class AppModel: ObservableObject {
         let instruction: String
     }
 
-    private struct CorrectionResponseBody: Decodable {
-        let replacement: String
-        /// What this correction also taught the entity dictionary, when it
-        /// qualified (P0-2 — the sidecar omits the key entirely rather than
-        /// sending null). Decoded so the response is read as the shape it
-        /// actually has; the 「已记住」 affordance that will surface it is a
-        /// separate piece of work, so nothing reads this yet.
-        let learned: LearnedTerm?
-
-        struct LearnedTerm: Decodable {
-            let canonicalTerm: String
-            let alias: String
-        }
-    }
-
     /// The one `POST /transcribe/correct` call, shared by both correction
     /// paths — the Review panel's and Direct mode's in-place one. `range` is
     /// UTF-16 code units, which is what the sidecar's JS string slicing means
@@ -1703,7 +1719,7 @@ final class AppModel: ObservableObject {
         fullText: String,
         range: NSRange,
         instruction: String
-    ) async throws -> CorrectionResponseBody {
+    ) async throws -> CorrectionResponse {
         try await sidecarClient.request(
             method: "POST",
             path: "/transcribe/correct",
@@ -1736,12 +1752,13 @@ final class AppModel: ObservableObject {
 
         do {
             setState(.transcribing)
-            let instruction = try await transcribeLocally(audioURL: audioURL)
+            // `.text` only, for the same reason as the Review path above.
+            let instruction = try await transcribeLocally(audioURL: audioURL).text
             try Task.checkCancellation()
 
             setState(.transforming)
             let selected = session.selectedText
-            let response: CorrectionResponseBody
+            let response: CorrectionResponse
             do {
                 response = try await requestCorrection(
                     fullText: selected,
@@ -1823,6 +1840,15 @@ final class AppModel: ObservableObject {
             // the second fix should not cost a re-dictation.
             reArmCorrectionWindow(after: eventId)
 
+            // D-2: the acknowledgement rides the delivery toast the state push
+            // below raises, rather than preempting it — that toast is also the
+            // re-armed correction window's only visible affordance (P0-3), and
+            // a note that replaced it would buy 「已记住」 at the cost of the
+            // window nobody would then know was open. Set before the push so it
+            // is part of the toast rather than a second thing arriving after it.
+            overlay.learningNote = LearnedTermNotice.notice(for: response.learned)
+                .map { LearningNote(text: $0.text, term: $0.canonicalTerm) }
+
             playFeedbackSound(.done)
             setState(completionState)
             scheduleIdle(after: completionState, delay: correctionWindowIdleDelay)
@@ -1862,6 +1888,8 @@ final class AppModel: ObservableObject {
         context: CapturedContext,
         requestId: UUID,
         completedEventId: UUID,
+        deliveredText: String,
+        replacements: [AliasReplacement],
         at now: Date = Date()
     ) {
         let window = CorrectionWindow.reduce(
@@ -1877,7 +1905,14 @@ final class AppModel: ObservableObject {
             CorrectionWindowSession(
                 window: $0,
                 requestId: requestId,
-                supersedesEventId: completedEventId
+                supersedesEventId: completedEventId,
+                // Passed unconditionally and filtered here by the same reducer
+                // that decides whether a window exists at all: a delivery that
+                // does not arm one (ask, agent, Review) is also a delivery whose
+                // rewrites the undo could never put back, so the report goes
+                // exactly as far as the offer does.
+                replacements: replacements,
+                deliveredText: deliveredText
             )
         }
         syncCorrectionWindowAffordance()
@@ -1899,7 +1934,13 @@ final class AppModel: ObservableObject {
         correctionWindowSession = CorrectionWindowSession(
             window: window,
             requestId: session.requestId,
-            supersedesEventId: eventId
+            supersedesEventId: eventId,
+            // A correction rewrote the delivered text, so the rewrite report no
+            // longer describes what is on screen and its undo has nothing safe
+            // to put back. The dictionary entries it named are still deletable
+            // from the 记忆 page; what expires here is only the one-click offer.
+            replacements: [],
+            deliveredText: ""
         )
         syncCorrectionWindowAffordance()
     }
@@ -1928,6 +1969,137 @@ final class AppModel: ObservableObject {
         // wording when the app is unknown rather than naming the wrong one.
         overlay.deliveryTargetApp = correctionWindowSession != nil ? lastApplication : nil
         overlay.deliveredText = correctionWindowSession != nil ? lastResult : nil
+        // D-1: the rewrite report rides the same window, so it appears and
+        // disappears with the offer to act on it rather than on a clock of its
+        // own.
+        overlay.aliasReplacements = correctionWindowSession?.replacements ?? []
+    }
+
+    // MARK: - Undoing a dictionary rewrite (D-1)
+
+    /// 「撤销并删除该词条」 on one row of the delivery toast's rewrite report.
+    ///
+    /// The decision is taken synchronously, before any `await`: it depends on
+    /// the clock and on which app is in front, and both of those move while a
+    /// `DELETE` is in flight. Deciding first means the user gets the answer to
+    /// the question they asked when they clicked, not to a slightly later one.
+    func undoAliasReplacement(_ replacement: AliasReplacement) {
+        let session = correctionWindowSession
+        let decision = AliasUndo.decide(
+            undoing: replacement,
+            in: session?.deliveredText ?? "",
+            replacements: session?.replacements ?? [],
+            window: session?.window,
+            now: Date(),
+            frontmostBundleId: NSWorkspace.shared
+                .frontmostApplication?.bundleIdentifier
+        )
+        Task { [weak self] in
+            await self?.applyAliasUndo(replacement, decision: decision)
+        }
+    }
+
+    /// Carries out an undo and says what actually happened.
+    ///
+    /// The term is deleted in **every** outcome, including the ones that leave
+    /// the text alone: the alias is wrong regardless of whether this particular
+    /// paste can be taken back, and the alternative — telling the user to go
+    /// delete it themselves — is the exact chore this feature exists to remove.
+    /// The sentence then reports the two halves honestly rather than claiming
+    /// the happy path, because a click that silently did half of what it said
+    /// is worse than one that explains itself.
+    private func applyAliasUndo(
+        _ replacement: AliasReplacement,
+        decision: AliasUndo.Decision
+    ) async {
+        let deleted = await deleteMemoryTerm(id: replacement.termId)
+
+        var restored = false
+        if let text = decision.restoredText,
+           let delivered = correctionWindowSession?.deliveredText {
+            restored = await restoreDeliveredText(text, replacing: delivered)
+            if restored {
+                lastResult = text
+                correctionWindowSession?.deliveredText = text
+            }
+        }
+
+        // Whether or not the text moved, this term's rows are spent once the
+        // entry behind them is gone: a second click could only repeat the
+        // message. They survive a *failed* deletion, because then the entry is
+        // still there and the retry the user needs is the control they already
+        // have their pointer on — the 记忆 page is the fallback, not the only
+        // way back.
+        if deleted {
+            correctionWindowSession?.replacements.removeAll {
+                $0.termId == replacement.termId
+            }
+        }
+        syncCorrectionWindowAffordance()
+
+        let message: String
+        if !deleted {
+            // `deleteMemoryTerm` has already put the reason in `memoryEditError`
+            // for the 记忆 page; the toast says the part the user is standing in
+            // front of.
+            message = OpenTypeL10n.text(
+                "没能删除这条词典记录，请到记忆页再试一次",
+                english: "Could not delete the dictionary entry — try again from the Memory page."
+            )
+        } else if decision.restoredText != nil, !restored {
+            message = OpenTypeL10n.text(
+                "已删除这条词典记录，但没能改回这次的文本（光标或内容已经变了）",
+                english: "Deleted the dictionary entry, but the delivered text could not be put back — the caret or the text had moved."
+            )
+        } else {
+            message = AliasUndo.message(for: decision)
+        }
+        overlay.showLearningNote(LearningNote(text: message, term: nil))
+    }
+
+    /// Puts `restored` back over `delivered` in the app the delivery landed in.
+    ///
+    /// Goes out through the same `ContextBridge.insert` an ordinary delivery and
+    /// an in-place correction use — Cmd+V — with the delivered run selected
+    /// first, so the paste *replaces* it instead of appending to it
+    /// (`ContextBridge.selectTextEndingAtCaret`). The selection step is what
+    /// makes reusing that one write path possible at all; without it there is no
+    /// honest way to restore text the user never selected.
+    ///
+    /// The clipboard is refreshed on success for the same always-copy reason
+    /// every other delivery has: whatever the user last saw us produce should
+    /// be the thing they can paste again.
+    private func restoreDeliveredText(
+        _ restored: String,
+        replacing delivered: String
+    ) async -> Bool {
+        guard contextBridge.selectTextEndingAtCaret(delivered) else { return false }
+        do {
+            try await contextBridge.insert(restored)
+        } catch {
+            return false
+        }
+        contextBridge.copyToClipboard(restored)
+        return true
+    }
+
+    // MARK: - What a correction taught (D-2)
+
+    /// Opens the 记忆 page with `canonicalTerm`'s row revealed — where 「已记
+    /// 住：呸泡 → PayPal」 goes when clicked.
+    ///
+    /// Mirrors `focusAgentRun(_:)`: the id to reveal is published, the page
+    /// scrolls to it and highlights it briefly, and the highlight clears itself
+    /// so a later visit to the page is not still pointing at an old row.
+    func revealMemoryTerm(_ canonicalTerm: String) {
+        highlightedMemoryTerm = canonicalTerm
+        selectedTab = .memory
+        openMainWindow()
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self, self.highlightedMemoryTerm == canonicalTerm else { return }
+            self.highlightedMemoryTerm = nil
+        }
     }
 
     /// Commits the current Review-panel text (Enter button / Cmd+Return) —
@@ -2264,7 +2436,16 @@ final class AppModel: ObservableObject {
         let audioBase64: String
         let language: String?
     }
-    private struct TranscribeResponseBody: Decodable { let text: String }
+    /// What one ASR round produced: the transcript, and what the entity
+    /// dictionary rewrote on the way out (D-1).
+    ///
+    /// The two travel together because they describe the same string — a
+    /// replacement list divorced from the text it applies to cannot be checked
+    /// against it, and `AliasUndo` checks exactly that before touching anything.
+    struct Recognition {
+        let text: String
+        let replacements: [AliasReplacement]
+    }
 
     /// The one place the transcription-language setting becomes a wire field.
     ///
@@ -2320,17 +2501,7 @@ final class AppModel: ObservableObject {
     /// (not started yet, transient failure) just yields an empty list plus a
     /// logged message rather than throwing.
     func refreshMemoryPanel() async {
-        let previousTerms = memoryTerms
-        do {
-            let response: MemoryTermsResponseBody = try await sidecarClient.request(
-                method: "GET",
-                path: "/memory/terms"
-            )
-            memoryTerms = AppModel.mergedRefresh(previous: previousTerms, incoming: response.terms)
-        } catch {
-            memoryTerms = AppModel.mergedRefresh(previous: previousTerms, incoming: nil)
-            print("OpenType: failed to refresh memory terms from sidecar: \(error.localizedDescription)")
-        }
+        await refreshMemoryTerms()
 
         let previousRuns = memoryConsolidationRuns
         do {
@@ -2354,6 +2525,26 @@ final class AppModel: ObservableObject {
         } catch {
             memoryOwnerFacts = AppModel.mergedRefresh(previous: previousFacts, incoming: nil)
             print("OpenType: failed to refresh memory owner facts from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// Just the entity dictionary (`GET /memory/terms`).
+    ///
+    /// Split out of `refreshMemoryPanel()` for 听写's 「词典已学会 N 个词」 figure
+    /// (D-3), which needs the terms and nothing else — fetching owner facts and
+    /// the consolidation run log to draw one count would make opening 听写 cost
+    /// three round trips for two of which nothing on that page reads.
+    func refreshMemoryTerms() async {
+        let previousTerms = memoryTerms
+        do {
+            let response: MemoryTermsResponseBody = try await sidecarClient.request(
+                method: "GET",
+                path: "/memory/terms"
+            )
+            memoryTerms = AppModel.mergedRefresh(previous: previousTerms, incoming: response.terms)
+        } catch {
+            memoryTerms = AppModel.mergedRefresh(previous: previousTerms, incoming: nil)
+            print("OpenType: failed to refresh memory terms from sidecar: \(error.localizedDescription)")
         }
     }
 
@@ -2932,10 +3123,10 @@ final class AppModel: ObservableObject {
     ///
     /// Carries the transcription-language setting, so the picker governs the
     /// transcript the user keeps and not only the live-caption preview.
-    private func transcribeLocally(audioURL: URL) async throws -> String {
+    private func transcribeLocally(audioURL: URL) async throws -> Recognition {
         let audioData = try Data(contentsOf: audioURL)
         guard !audioData.isEmpty else { throw OpenTypeError.emptyRecording }
-        let response: TranscribeResponseBody = try await sidecarClient.request(
+        let response: TranscribeResponse = try await sidecarClient.request(
             method: "POST",
             path: "/asr/transcribe",
             body: AppModel.transcribeRequestBody(
@@ -2945,7 +3136,7 @@ final class AppModel: ObservableObject {
         )
         let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw OpenTypeError.emptyRecording }
-        return text
+        return Recognition(text: text, replacements: response.replacements)
     }
 
     /// - Parameter recordingEndedAt: When the recording this audio came from
@@ -3002,7 +3193,8 @@ final class AppModel: ObservableObject {
 
         do {
             setState(.transcribing)
-            let rawTranscript = try await transcribeLocally(audioURL: audioURL)
+            let recognition = try await transcribeLocally(audioURL: audioURL)
+            let rawTranscript = recognition.text
             try Task.checkCancellation()
             auditRawTranscript = rawTranscript
 
@@ -3194,6 +3386,9 @@ final class AppModel: ObservableObject {
             lastApplication = capturedContext.applicationName
             lastResultWasPractice = practice
             lastDeliveryNotice = nil
+            // A new delivery is a new subject: whatever the previous one taught
+            // or undid has been said already.
+            overlay.learningNote = nil
 
             if configuration.agentMemoryEnabled, !practice {
                 agentMemory.record(
@@ -3296,7 +3491,13 @@ final class AppModel: ObservableObject {
                 variant: configuration.transcribeVariant,
                 context: capturedContext,
                 requestId: auditRequestID,
-                completedEventId: completedEventId
+                completedEventId: completedEventId,
+                // The text as it went out, not the transcript as it came back:
+                // Tidy delivers a rewritten version of it, and an undo that
+                // reasoned about the wrong string would be pasting over words
+                // the user can see and we cannot.
+                deliveredText: result,
+                replacements: recognition.replacements
             )
 
             playFeedbackSound(.done)
@@ -4086,6 +4287,16 @@ private struct CorrectionWindowSession {
     /// event, or the previous correction's `.corrected` event once one has
     /// landed.
     var supersedesEventId: UUID
+    /// What the entity dictionary rewrote in this delivery (D-1), in text
+    /// order, and the text it rewrote them in.
+    ///
+    /// They live on the window rather than beside it because the undo they back
+    /// is live for exactly as long as the window is — same clock, same target
+    /// app, one lifetime — and because `AliasUndo` checks the report against
+    /// the text before touching anything, which it can only do if the two
+    /// cannot drift apart.
+    var replacements: [AliasReplacement]
+    var deliveredText: String
 }
 
 /// One in-place correction round — see `AppModel.inPlaceCorrection`.

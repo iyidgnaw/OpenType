@@ -119,16 +119,24 @@ describe("POST /asr/transcribe dictionary bias", () => {
 
   test("applies alias corrections to the transcribed text", async () => {
     const transcribe = async () => "我用呸泡付款";
+    const term = makeTerm("PayPal", ["呸泡"]);
     const router = createRouter(
       buildAsrRoutes(transcribe, {
-        listTerms: () => [makeTerm("PayPal", ["呸泡"])],
+        listTerms: () => [term],
       })
     );
 
     const response = await router(post({ audioBase64: "aGk=" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ text: "我用PayPal付款" });
+    // A rewrite is now reported alongside the text it changed (D-1) — the
+    // silent version of this response is what
+    // `test/asr/replacements.test.ts` exists to end. The no-rewrite shape is
+    // unchanged and still pinned strictly by the tests above and below.
+    expect(await response.json()).toEqual({
+      text: "我用PayPal付款",
+      replacements: [{ from: "呸泡", to: "PayPal", termId: term.id }],
+    });
   });
 
   test("omits initialPrompt entirely when the dictionary is empty", async () => {

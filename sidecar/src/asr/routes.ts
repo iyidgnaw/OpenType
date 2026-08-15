@@ -1,4 +1,9 @@
-import { applyAliasCorrections, buildInitialPrompt } from "./dictionaryBias";
+import {
+  applyAliasCorrections,
+  buildInitialPrompt,
+  termIdForReplacement,
+} from "./dictionaryBias";
+import type { AliasReplacement } from "./dictionaryBias";
 import type { EntityTerm, RecordEpisodicEventInput } from "../memory/MemoryStore";
 import type { Route } from "../router";
 
@@ -111,6 +116,45 @@ function recordDictation(
   }
 }
 
+/**
+ * One rewrite, as the client reads it (D-1).
+ *
+ * Named `from`/`to` rather than `alias`/`canonicalTerm` because this is the
+ * user's view of what happened — 「呸泡 → PayPal」 — not the dictionary's view of
+ * its own columns, and the row is rendered before anyone has to know what an
+ * alias is. `termId` is what makes it undoable.
+ */
+interface ReplacementRow {
+  from: string;
+  to: string;
+  termId: number;
+}
+
+/**
+ * Turns the scan's replacements into the wire's rows, in text order, dropping
+ * any whose term cannot be named.
+ *
+ * A row without a `termId` would render as an undo control that has nothing to
+ * delete, which is worse than not offering the row: the user clicks, the alias
+ * survives, and the next transcription rewrites their words again.
+ */
+function describeReplacements(
+  replacements: AliasReplacement[],
+  terms: EntityTerm[]
+): ReplacementRow[] {
+  const rows: ReplacementRow[] = [];
+  for (const replacement of replacements) {
+    const termId = termIdForReplacement(replacement, terms);
+    if (termId === null) continue;
+    rows.push({
+      from: replacement.alias,
+      to: replacement.canonicalTerm,
+      termId,
+    });
+  }
+  return rows;
+}
+
 async function handleTranscribe(
   req: Request,
   transcribe: TranscribeFn,
@@ -144,9 +188,21 @@ async function handleTranscribe(
     const text = await transcribe(audio, options);
     // The deterministic half of the dictionary feedback: it also covers remote
     // whisper providers, which never see `initialPrompt`.
-    const corrected = applyAliasCorrections(text, terms).text;
-    recordDictation(deps, text, corrected);
-    return Response.json({ text: corrected });
+    const corrected = applyAliasCorrections(text, terms);
+    recordDictation(deps, text, corrected.text);
+    // D-1: what the dictionary rewrote, reported rather than discarded. Until
+    // this, the one guaranteed half of the learning loop left no trace the user
+    // could see — they said 「呸泡」, 「PayPal」 came out, and nothing on screen
+    // said which of the two had happened.
+    const replacements = describeReplacements(corrected.replacements, terms);
+    // The key is omitted, never sent as `[]`. Every response written before
+    // D-1 looked exactly like the line below, `routes.test.ts` pins it with a
+    // strict `toEqual({ text })`, and an empty list downstream would let the UI
+    // announce 「自动修正 0 处」 on the hottest path in the product.
+    if (replacements.length === 0) {
+      return Response.json({ text: corrected.text });
+    }
+    return Response.json({ text: corrected.text, replacements });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ error: message }, { status: 502 });

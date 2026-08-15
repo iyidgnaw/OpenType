@@ -114,6 +114,190 @@ describe("MemoryStore.allTerms / search", () => {
   });
 });
 
+describe("MemoryStore.updateEntityTerm", () => {
+  const ONE_HOUR_AGO = Date.now() - 60 * 60 * 1000;
+
+  function seedTerm(
+    store: MemoryStore,
+    overrides: Partial<{
+      canonicalTerm: string;
+      aliases: string[];
+      category: string;
+      confidence: number;
+      origin: string;
+      sourceEventIds: string;
+      createdAt: number;
+      updatedAt: number;
+    }> = {}
+  ): number {
+    const values = {
+      canonicalTerm: "PayPal",
+      aliases: ["贝宝"],
+      category: "org",
+      confidence: 0.8,
+      origin: "system",
+      sourceEventIds: "[1]",
+      createdAt: ONE_HOUR_AGO,
+      updatedAt: ONE_HOUR_AGO,
+      ...overrides,
+    };
+    const result = store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        values.canonicalTerm,
+        JSON.stringify(values.aliases),
+        values.category,
+        values.confidence,
+        values.origin,
+        values.sourceEventIds,
+        values.createdAt,
+        values.updatedAt,
+        null,
+      ]
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  test("updates canonicalTerm, aliases and confidence together and bumps updatedAt", () => {
+    const store = makeStore();
+    const id = seedTerm(store);
+
+    const updated = store.updateEntityTerm(id, {
+      canonicalTerm: "PayPal Inc",
+      aliases: ["贝宝", "拍拍宝"],
+      confidence: 0.95,
+    });
+
+    expect(updated).not.toBeNull();
+    expect(updated?.canonicalTerm).toBe("PayPal Inc");
+    expect(updated?.aliases).toEqual(["贝宝", "拍拍宝"]);
+    expect(updated?.confidence).toBe(0.95);
+    expect(updated?.updatedAt as number).toBeGreaterThan(ONE_HOUR_AGO);
+    // createdAt is never rewritten by an edit.
+    expect(updated?.createdAt).toBe(ONE_HOUR_AGO);
+
+    const persisted = store.allTerms().find((t) => t.id === id);
+    expect(persisted).toEqual(updated as NonNullable<typeof updated>);
+  });
+
+  test("a partial patch leaves unspecified fields untouched", () => {
+    const store = makeStore();
+    const id = seedTerm(store, { canonicalTerm: "天润", aliases: ["tianrun"], confidence: 0.7 });
+
+    const updated = store.updateEntityTerm(id, { confidence: 0.42 });
+
+    expect(updated?.confidence).toBe(0.42);
+    expect(updated?.canonicalTerm).toBe("天润");
+    expect(updated?.aliases).toEqual(["tianrun"]);
+    // Fields the patch shape does not cover at all stay exactly as seeded.
+    expect(updated?.category).toBe("org");
+    expect(updated?.origin).toBe("system");
+    expect(updated?.sourceEventIds).toEqual([1]);
+  });
+
+  test("returns null and changes nothing for an unknown id", () => {
+    const store = makeStore();
+    const id = seedTerm(store);
+    const before = store.allTerms();
+
+    const updated = store.updateEntityTerm(id + 999, { canonicalTerm: "Nope" });
+
+    expect(updated).toBeNull();
+    expect(store.allTerms()).toEqual(before);
+  });
+
+  test("round-trips CJK aliases through the JSON column", () => {
+    const store = makeStore();
+    const id = seedTerm(store);
+
+    store.updateEntityTerm(id, { aliases: ["贝宝", "拍拍宝", "PayPal 支付"] });
+
+    const persisted = store.allTerms().find((t) => t.id === id);
+    expect(persisted?.aliases).toEqual(["贝宝", "拍拍宝", "PayPal 支付"]);
+  });
+
+  test("round-trips an empty alias array (clearing every alias)", () => {
+    const store = makeStore();
+    const id = seedTerm(store, { aliases: ["贝宝", "拍拍宝"] });
+
+    const updated = store.updateEntityTerm(id, { aliases: [] });
+
+    expect(updated?.aliases).toEqual([]);
+    expect(store.allTerms().find((t) => t.id === id)?.aliases).toEqual([]);
+  });
+
+  test("rejects a confidence above 1 rather than clamping it", () => {
+    const store = makeStore();
+    const id = seedTerm(store, { confidence: 0.8 });
+
+    // RangeError specifically, not a bare Error: a `TypeError` (e.g. the
+    // method not existing yet) must not satisfy this assertion.
+    expect(() => store.updateEntityTerm(id, { confidence: 1.5 })).toThrow(RangeError);
+    // Rejected, not clamped to 1.0: the row is untouched.
+    expect(store.allTerms().find((t) => t.id === id)?.confidence).toBe(0.8);
+  });
+
+  test("rejects a negative confidence rather than clamping it", () => {
+    const store = makeStore();
+    const id = seedTerm(store, { confidence: 0.8 });
+
+    expect(() => store.updateEntityTerm(id, { confidence: -0.5 })).toThrow(RangeError);
+    expect(store.allTerms().find((t) => t.id === id)?.confidence).toBe(0.8);
+  });
+
+  test("accepts the 0 and 1 boundaries", () => {
+    const store = makeStore();
+    const id = seedTerm(store);
+
+    expect(store.updateEntityTerm(id, { confidence: 0 })?.confidence).toBe(0);
+    expect(store.updateEntityTerm(id, { confidence: 1 })?.confidence).toBe(1);
+  });
+});
+
+describe("MemoryStore.deleteEntityTerm", () => {
+  function seedTerm(store: MemoryStore, canonicalTerm: string): number {
+    const now = Date.now();
+    const result = store.db.run(
+      `INSERT INTO entity_terms
+        (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt, supersedes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [canonicalTerm, "[]", "term", 0.9, "owner", "[]", now, now, null]
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  test("deletes the row and returns true", () => {
+    const store = makeStore();
+    const id = seedTerm(store, "PayPal");
+
+    expect(store.deleteEntityTerm(id)).toBe(true);
+    expect(store.allTerms()).toHaveLength(0);
+  });
+
+  test("returns false for an unknown id", () => {
+    const store = makeStore();
+    const id = seedTerm(store, "PayPal");
+
+    expect(store.deleteEntityTerm(id + 999)).toBe(false);
+    expect(store.allTerms()).toHaveLength(1);
+  });
+
+  test("deleting one term leaves the others intact", () => {
+    const store = makeStore();
+    const keepA = seedTerm(store, "天润");
+    const remove = seedTerm(store, "PayPal");
+    const keepB = seedTerm(store, "Anthropic");
+
+    expect(store.deleteEntityTerm(remove)).toBe(true);
+
+    const remaining = store.allTerms();
+    expect(remaining.map((t) => t.id).sort()).toEqual([keepA, keepB].sort());
+    expect(remaining.map((t) => t.canonicalTerm).sort()).toEqual(["Anthropic", "天润"].sort());
+  });
+});
+
 describe("MemoryStore consolidation trigger helpers", () => {
   test("unconsolidatedEventCount counts only events with a null consolidatedAt", () => {
     const store = makeStore();
@@ -208,6 +392,91 @@ describe("MemoryStore.recordOwnerFact / allOwnerFacts", () => {
       createdAt: expect.any(Number),
       origin: expect.any(String),
     });
+  });
+});
+
+describe("MemoryStore.confirmOwnerFact", () => {
+  test("promotes an untrusted fact to owner and returns the updated row", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("团队周会固定在周一上午十点。", "untrusted");
+
+    const fact = store.confirmOwnerFact(id);
+
+    expect(fact).not.toBeNull();
+    expect(fact?.id).toBe(id);
+    expect(fact?.origin).toBe("owner");
+    expect(store.allOwnerFacts()[0]?.origin).toBe("owner");
+  });
+
+  test("returns null for an unknown id", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("A real fact.", "untrusted");
+
+    expect(store.confirmOwnerFact(id + 999)).toBeNull();
+    // The real row is untouched by the miss.
+    expect(store.allOwnerFacts()[0]?.origin).toBe("untrusted");
+  });
+
+  test("is a no-op on a fact that is already owner, not an error", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("The owner prefers formal English.", "owner");
+    const before = store.allOwnerFacts()[0];
+
+    const fact = store.confirmOwnerFact(id);
+
+    expect(fact).not.toBeNull();
+    expect(fact?.origin).toBe("owner");
+    expect(fact?.content).toBe(before?.content);
+    expect(fact?.createdAt).toBe(before?.createdAt);
+  });
+
+  test("promotes agent- and system-origin facts too", () => {
+    // The sidebar's "needs attention" dot lights for every origin that is not
+    // "owner", so every one of them has to be clearable from the panel --
+    // otherwise the dot is permanent and stops meaning anything.
+    const store = makeStore();
+    const agentId = store.recordOwnerFact("Written by the agent.", "agent");
+    const systemId = store.recordOwnerFact("Auto-consolidated.", "system");
+
+    expect(store.confirmOwnerFact(agentId)?.origin).toBe("owner");
+    expect(store.confirmOwnerFact(systemId)?.origin).toBe("owner");
+  });
+
+  test("is one-way: confirming again keeps it owner, never demotes", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("团队周会固定在周一上午十点。", "untrusted");
+
+    store.confirmOwnerFact(id);
+    store.confirmOwnerFact(id);
+    store.confirmOwnerFact(id);
+
+    expect(store.allOwnerFacts()[0]?.origin).toBe("owner");
+  });
+
+  test("leaves content and createdAt exactly as they were", () => {
+    const store = makeStore();
+    const id = store.recordOwnerFact("主力机是 M3 Max 的 MacBook Pro。", "untrusted");
+    const before = store.allOwnerFacts()[0];
+
+    store.confirmOwnerFact(id);
+
+    const after = store.allOwnerFacts()[0];
+    expect(after?.content).toBe("主力机是 M3 Max 的 MacBook Pro。");
+    expect(after?.createdAt).toBe(before?.createdAt);
+  });
+
+  test("confirming one fact leaves every other fact's origin alone", () => {
+    const store = makeStore();
+    const confirmed = store.recordOwnerFact("Confirm me.", "untrusted");
+    store.recordOwnerFact("Leave me untrusted.", "untrusted");
+    store.recordOwnerFact("Leave me agent.", "agent");
+
+    store.confirmOwnerFact(confirmed);
+
+    const byContent = new Map(store.allOwnerFacts().map((f) => [f.content, f.origin]));
+    expect(byContent.get("Confirm me.")).toBe("owner");
+    expect(byContent.get("Leave me untrusted.")).toBe("untrusted");
+    expect(byContent.get("Leave me agent.")).toBe("agent");
   });
 });
 

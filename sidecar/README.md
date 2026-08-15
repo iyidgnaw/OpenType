@@ -29,7 +29,14 @@ its SQLite DB at `sidecar/.data/opentype.sqlite3`. Useful env vars (see
 - `OPENTYPE_SIDECAR_SOCKET` — override the Unix socket path.
 - `OPENTYPE_SIDECAR_DB_PATH` — override the SQLite DB path.
 - `OPENTYPE_MCP_SERVERS` — JSON config for Agent-mode MCP tool servers (see
-  `src/agent/mcpClient.ts`); omit to run Agent mode with no tools connected.
+  `src/agent/mcpClient.ts`); omit to run Agent mode with no MCP servers
+  connected (the built-in tools are always available regardless). Since
+  P2-13 this is only the **zero-config dev fallback**: the saved config in
+  `mcp-servers.json` (written through `/config/mcp`, see `src/agent/
+  mcpConfigStore.ts`) wins whenever the user has ever saved anything, and
+  wins entirely — env servers are never merged in, so removing your last
+  saved server means "no MCP servers" rather than silently reinstating
+  these. An env var alone never reports as configured.
 - `OPENTYPE_WHISPER_PYTHON_BIN` / `OPENTYPE_WHISPER_SCRIPT_PATH` — override
   the MLX-Whisper python interpreter/script path; only needed for the
   packaged app (dev mode uses the relative `whisper-env/`/`whisper/`
@@ -70,29 +77,76 @@ you're debugging packaging specifically.
   two **always-available** built-in tools (`remember_fact`,
   `consolidate_memory_now`); `toolSets.ts` merges them with any connected MCP
   tools, so Agent mode can always call at least those two even with no MCP
-  server configured.
+  server configured. `mcpConfigStore.ts` persists the user's MCP servers
+  (`mcp-servers.json`, next to the SQLite DB, `0600`, same atomic-write /
+  self-healing conventions as `provider/configStore.ts` — and the same
+  documented plaintext tradeoff, since a server's `env`/`headers` routinely
+  carry real tokens) and owns the saved-beats-env precedence
+  (`resolveMcpServers`); `mcpConfigRoutes.ts` is the HTTP surface over it:
+  `GET /config/mcp` (list, `{configured, source, servers}` — secrets only
+  ever as `envMasked`/`headersMasked`), `POST /config/mcp` (create),
+  `PUT /config/mcp/:name` (replace, not patch), `DELETE /config/mcp/:name`,
+  and `POST /config/mcp/test` (connect a candidate, report the tools it
+  exposes, save nothing). On a write, a submitted secret equal to the mask of
+  the stored value for that same server+key means "unchanged" — resolution is
+  scoped to the addressed server and to that one key, never a search across
+  the config, which would make the mask a read primitive for other servers'
+  credentials. Connections are established at boot, so a saved change applies
+  from the next sidecar start.
 - `src/asr/` — `/asr/transcribe`; proxies to the persistent local
   MLX-Whisper python process (`whisper/serve.py`) over its own Unix socket.
+  `dictionaryBias.ts` feeds the entity dictionary back into recognition from
+  this one place: `buildInitialPrompt` biases the local decoder toward known
+  canonical spellings via `initial_prompt` (sent as a percent-encoded query
+  parameter, since headers must be latin-1 safe and the terms are routinely
+  CJK), and `applyAliasCorrections` rewrites known alias → canonical in the
+  transcript afterwards — the latter on both the local and remote backends,
+  since a remote provider never sees our prompt.
 - `src/memory/` — the entity-dictionary + owner-facts `MemoryStore`
   (SQLite-backed), consolidation (`consolidator.ts`), and the memory HTTP
   routes: read-only `GET /memory/terms` / `GET /memory/consolidation-runs`,
   the write endpoint `POST /memory/consolidate-now` (runs consolidation
   immediately, same code path as the `consolidate_memory_now` agent tool),
   and owner-facts management `GET /memory/owner-facts` /
-  `DELETE /memory/owner-facts/:id`. Note: `shouldConsolidate` (the ≥12h
-  auto-consolidation gate) has **no caller** — consolidation is
-  manual-only (this route + the agent tool). Also
+  `PATCH /memory/owner-facts/:id` / `DELETE /memory/owner-facts/:id`. The
+  `PATCH` is "the user read this and vouches for it": it promotes the fact's
+  `origin` to `owner` and takes no arguments beyond the id, so it can only ever
+  move provenance one way — a body naming any other origin is a 400, not a
+  demotion. Without it, the panel's only answer to a flagged-but-correct fact
+  was to delete it, and a provenance flag the user can never clear is noise
+  they learn to ignore. `startupConsolidation.ts` is the
+  `shouldConsolidate` gate's automatic caller (P1-7): `main()` arms one check
+  5 minutes after the server starts serving, and if the gate opens (≥12h since
+  the last run, ≥5 unconsolidated events) it runs one pass. One check per
+  launch, never two at once, and any failure is logged and swallowed. The
+  route + agent tool above still force a pass regardless of the gate. Its raw
+  material is the `episodic_events` table, which `/agent/run`,
+  `/asr/transcribe` and `/oneshot/ask` all append to (best-effort — a memory
+  write must never fail the request that produced it) — **but `transcribe`
+  rows are recorded only, never consolidated**: "plain dictation never reaches
+  an LLM" is a product promise and consolidation is a real model call, so the
+  exclusion (`CONSOLIDATION_EXCLUDED_MODES`) is enforced in
+  `MemoryStore.consolidationCandidates()`, the single selection query, rather
+  than in the prompt builder. The gate counts `consolidationCandidateCount()`
+  (eligible rows only) so excluded material can't hold it permanently open.
+  Also
   `conversations.ts`/`conversationRoutes.ts` — a separate `conversations`/
   `conversation_messages` table pair (same SQLite file, different concern:
   turn-by-turn chat history, not a fact/term store) backing the macOS Q&A/
   Agent tabs' multi-turn continuation via `GET /conversations?kind=ask|agent`
   and `GET /conversations/:id`, and an optional `conversationId` accepted by
   `/oneshot/ask` and `/agent/run` to continue a specific thread.
-- `src/transcribe/` — `POST /transcribe/correct`, a pure/dependency-light
-  endpoint (no `MemoryStore`) backing macOS's Review transcribe-mode: takes
-  the full current text, a UTF-16 offset selection range, and a spoken
-  correction instruction, returns only the replacement for that span (the
-  caller splices it back in by offset).
+- `src/transcribe/` — `POST /transcribe/correct`, backing macOS's Review
+  transcribe-mode: takes the full current text, a UTF-16 offset selection
+  range, and a spoken correction instruction, returns the replacement for
+  that span (the caller splices it back in by offset). Takes an **optional**
+  `MemoryStore` — without it this is the same pure correction logic it has
+  always been; with it (as `server.ts` wires it), a correction that looks
+  like a term fix rather than a prose rewrite is also learned into
+  `entity_terms` as `alias → canonicalTerm` and echoed back as `learned`, so
+  the next transcription gets that term right. `learnCorrection.ts` is the
+  pure gate deciding which corrections qualify; learning is best-effort and
+  can never fail the correction itself.
 - `src/provider/` — the LLM provider abstraction: `deepseek.ts` (the
   original, still-used env-based zero-config default client),
   `openaiCompatible.ts`/`anthropic.ts` (the two provider types a user can

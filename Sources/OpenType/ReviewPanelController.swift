@@ -16,6 +16,30 @@ private final class ReviewPanelPresentation: ObservableObject {
     @Published var correctionHint: String?
 }
 
+/// Where the Review panel sits inside a chosen screen's usable area: centred.
+///
+/// Deliberately *not* `VoiceSurfacePanelLayout`, which anchors the HUD 54pt up
+/// from the bottom edge so it can morph in place. The two panels are laid out
+/// differently on purpose — the HUD is a peripheral status surface, Review is a
+/// modal editing surface you are meant to look straight at — and one shared
+/// layout that just forwarded to the other would quietly slide the Review panel
+/// down to the bottom of the screen.
+///
+/// A pure namespace enum for the same reason `VoiceSurfacePanelLayout` is one:
+/// with the arithmetic inline in `ReviewPanelController.position(_:)` there was
+/// no assertion any test could make about it, so 「Review 面板同理」 (P2-10)
+/// rested entirely on someone remembering.
+enum ReviewPanelLayout {
+    static func frame(for size: CGSize, visibleFrame: CGRect) -> CGRect {
+        CGRect(
+            x: visibleFrame.midX - size.width / 2,
+            y: visibleFrame.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+}
+
 /// A floating panel for Review mode (`TranscribeVariant.review`): stashes a
 /// transcription for the user to read, edit, or voice-correct before
 /// committing it into the originally-focused field. Follows the same
@@ -193,6 +217,11 @@ final class ReviewPanelController {
             backing: .buffered,
             defer: false
         )
+        // A panel is its own window and does not inherit `NSApp.appearance`,
+        // so without this it kept the system's dark palette while the rest of
+        // the app was pinned light — the same split that made the menu bar
+        // popover draw white text on a white sheet.
+        panel.appearance = NSAppearance(named: .aqua)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.level = .floating
@@ -208,12 +237,16 @@ final class ReviewPanelController {
         return panel
     }
 
+    /// Centres the panel on whichever display the pointer is on, falling back to
+    /// `NSScreen.main` (P2-10 — 「Review 面板同理」, see `ScreenPlacement`).
+    /// Voice-correcting a transcript while working on an external display must
+    /// not throw the editable panel onto the built-in screen.
     private func position(_ panel: NSPanel) {
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        guard let frame = screen?.visibleFrame else { return }
-        let x = frame.midX - panelSize.width / 2
-        let y = frame.midY - panelSize.height / 2
-        panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: panelSize), display: false)
+        guard let frame = ScreenPlacement.currentVisibleFrame() else { return }
+        panel.setFrame(
+            ReviewPanelLayout.frame(for: panelSize, visibleFrame: frame),
+            display: false
+        )
     }
 
     private func installClickOutsideMonitor() {
@@ -261,29 +294,52 @@ private struct ReviewPanelView: View {
             .frame(minHeight: 140, maxHeight: .infinity)
             .padding(8)
             .background(
-                Color(nsColor: .textBackgroundColor).opacity(0.5),
-                in: RoundedRectangle(cornerRadius: 10)
+                DS.Colour.card.opacity(0.5),
+                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(.primary.opacity(0.08))
+                RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                    .strokeBorder(DS.Colour.border, lineWidth: 0.75)
             )
 
             footerHint
 
             HStack(spacing: 10) {
                 Button(action: onCancel) {
-                    Label(cancelTitle, systemImage: "xmark")
+                    Text(cancelTitle)
+                        .font(DS.Text.caption())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background(
+                            DS.Colour.card,
+                            in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                        )
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
 
                 Spacer(minLength: 0)
 
                 Button(action: onCommit) {
-                    Label(commitTitle, systemImage: "checkmark")
+                    Text(commitTitle)
+                        .font(DS.Text.caption())
+                        .fontWeight(.medium)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .frame(height: 26)
+                        .background(
+                            DS.Colour.accent,
+                            in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                        )
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
@@ -291,13 +347,13 @@ private struct ReviewPanelView: View {
         .frame(width: 460)
         .background(
             .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            in: RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(.white.opacity(0.18), lineWidth: 0.6)
+            RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous)
+                .strokeBorder(.white.opacity(0.45), lineWidth: 0.75)
         )
-        .tint(AppAccent.primary)
+        .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
         .onExitCommand(perform: onCancel)
     }
@@ -306,15 +362,15 @@ private struct ReviewPanelView: View {
         HStack(spacing: 8) {
             Image(systemName: "text.badge.checkmark")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(DS.Colour.accent)
             Text(OpenTypeL10n.text("复核", english: "Review"))
-                .font(.system(size: 13, weight: .semibold))
+                .font(DS.Text.body(.semibold))
             if presentation.isCorrecting {
                 Spacer(minLength: 8)
                 ProgressView()
                     .controlSize(.small)
                 Text(OpenTypeL10n.text("正在修改…", english: "Correcting…"))
-                    .font(.system(size: 11))
+                    .font(DS.Text.caption())
                     .foregroundStyle(.secondary)
             } else {
                 Spacer(minLength: 8)
@@ -324,8 +380,12 @@ private struct ReviewPanelView: View {
 
     private var footerHint: some View {
         Text(presentation.correctionHint ?? defaultHint)
-            .font(.system(size: 10))
-            .foregroundStyle(presentation.correctionHint == nil ? Color.secondary : Color.orange)
+            .font(DS.Text.caption())
+            .foregroundStyle(
+                presentation.correctionHint == nil
+                    ? Color.secondary
+                    : DS.Colour.warningText
+            )
             .lineLimit(2)
             .fixedSize(horizontal: false, vertical: true)
     }

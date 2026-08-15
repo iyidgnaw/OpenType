@@ -19,6 +19,7 @@ import {
   type AskUserBroker,
 } from "./askUser";
 import { mergeToolSets } from "./toolSets";
+import { createPromptingApprovalPolicy, withApproval } from "./approval";
 import {
   AgentCancelledError,
   createCancellationRegistry,
@@ -53,6 +54,14 @@ async function readJsonBody<T>(req: Request): Promise<T> {
  * pending question at all (spec §13.4).
  */
 const ASK_USER_TIMEOUT_MS = 120_000;
+
+/**
+ * How long a destructive-command approval card waits (P1-6). Same number and
+ * same reasoning as the question timeout above -- a card the user never saw
+ * (they started speaking again, they walked away) must expire rather than hold
+ * the run open forever, and expiring reads as `unavailable`, never as consent.
+ */
+const APPROVAL_TIMEOUT_MS = 120_000;
 
 /**
  * Renders prior conversation turns as a short "previous task / previous
@@ -151,9 +160,24 @@ async function handleAgentRun(
         // ask_user is built per run because it must address THIS run's
         // surface; merged in here rather than living in the shared set for
         // that reason (T5).
-        tools: mergeToolSets(
-          tools,
-          createAskUserTool(askUser, { runId, timeoutMs: ASK_USER_TIMEOUT_MS })
+        //
+        // P1-6 wraps that same per-run set in the prompting approval policy,
+        // and it has to happen here rather than where `server.ts` assembles
+        // the tool set: asking needs this run's id, this run's cancellation
+        // signal, and the broker, none of which exist at construction time.
+        // MCP tools stay inside the wrapper, as they have been since the
+        // seam landed -- `tools` is the whole merged set.
+        tools: withApproval(
+          mergeToolSets(
+            tools,
+            createAskUserTool(askUser, { runId, timeoutMs: ASK_USER_TIMEOUT_MS })
+          ),
+          createPromptingApprovalPolicy({
+            broker: askUser,
+            runId,
+            timeoutMs: APPROVAL_TIMEOUT_MS,
+            signal,
+          })
         ),
         // One producer, two consumers (T7): the durable log keeps the full
         // record, the display registry keeps its bounded view of it. The log

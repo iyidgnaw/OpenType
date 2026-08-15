@@ -944,7 +944,9 @@ final class VoiceSurfaceTests: XCTestCase {
     // MARK: - C. Per-state size mapping
 
     func testListeningAndProcessingUseTheExistingPillSize() {
-        let pill = CGSize(width: 388, height: 96)
+        // 420, not the old 388: the 2026-08 redesign collapsed six panel
+        // widths to two, because the panel jumped sideways on every morph.
+        let pill = CGSize(width: 420, height: 132)
 
         XCTAssertEqual(VoiceSurfacePanelLayout.size(for: .listening), pill)
         XCTAssertEqual(VoiceSurfacePanelLayout.size(for: .processing), pill)
@@ -958,7 +960,7 @@ final class VoiceSurfaceTests: XCTestCase {
         // panel now holds one size from the first word until it morphs into
         // the card, which is the single transition worth animating.
         // `VoiceSurfacePillSizeTests` states the invariant directly.
-        let pill = CGSize(width: 388, height: 96)
+        let pill = CGSize(width: 420, height: 132)
 
         XCTAssertEqual(
             VoiceSurfacePanelLayout.size(
@@ -988,7 +990,9 @@ final class VoiceSurfaceTests: XCTestCase {
             body: "结果",
             steps: []
         )
-        let cardSize = CGSize(width: 620, height: 480)
+        // The card is the one state allowed a second width, and it is now the
+        // only other one: 640×520.
+        let cardSize = CGSize(width: 640, height: 520)
 
         XCTAssertEqual(VoiceSurfacePanelLayout.size(for: .result(card)), cardSize)
         XCTAssertEqual(VoiceSurfacePanelLayout.size(for: .failed(card)), cardSize)

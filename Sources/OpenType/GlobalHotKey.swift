@@ -14,6 +14,38 @@ enum HotKeyKeyAction: Equatable {
     case ignore
 }
 
+/// Everything one Tab keystroke does while the mode-switch chord is armed,
+/// factored out of `handleModeSwitchTabKeyDown` so the "cancels nothing"
+/// contract is pinned by a test rather than by reading the method.
+///
+/// `cancelsPendingLongPress` and `marksChordUsed` are both `false`, and that is
+/// the fix: `cancelPendingLongPresses()` drops the pending token and
+/// `modifierChordWasUsed = true` trips the `!self.modifierChordWasUsed` guard
+/// inside the scheduled long-press closure, so either one alone aborts the
+/// hold-to-talk the user is still holding for. Because `modifierChordWasUsed`
+/// also did double duty as "don't let the eventual key-up fire the toggle",
+/// dropping it needs the replacement `suppressesModifierReleaseGesture`, which
+/// suppresses the release gesture *without* touching the long press.
+struct ModeSwitchTabEffects: Equatable {
+    let cyclesMode: Bool
+    let swallowsKeystroke: Bool
+    let cancelsPendingLongPress: Bool
+    let marksChordUsed: Bool
+    let resetsModifierTapSequence: Bool
+    let suppressesModifierReleaseGesture: Bool
+}
+
+/// What releasing the recording modifier means, given what happened during the
+/// hold.
+enum ModifierReleaseGesture: Equatable {
+    /// A long press armed and started a recording; this release finishes it.
+    case finishHeldRecording
+    /// An untouched hold: the double-tap/toggle machinery gets to see it.
+    case tap
+    /// The hold was spent on a chord; it must not register as a tap.
+    case consumed
+}
+
 final class GlobalHotKey {
     var onPressed: (() -> Void)?
     var onReleased: (() -> Void)?
@@ -41,9 +73,11 @@ final class GlobalHotKey {
     private var pendingLongPressTokens: [Int64: UUID] = [:]
     private var lastModifierTapKeyCode: Int64?
     private var isMomentaryActivation = false
-    private var heldModeSwitchKeyCodes: Set<Int64> = []
-    private var modeSwitchDidFire = false
-    private var modeSwitchChordActive = false
+    /// Set by a Tab cycle, cleared when the last recording modifier comes up.
+    /// The `modifierChordWasUsed` replacement described on
+    /// `ModeSwitchTabEffects`: it suppresses the release gesture without
+    /// aborting the pending long press.
+    private var modeSwitchDidCycle = false
     private var activeChordKeyCode: Int64?
     private var activeChordFlags: CGEventFlags = []
     private var doubleTapDetector = DoubleTapDetector(threshold: 0.45)
@@ -208,8 +242,14 @@ final class GlobalHotKey {
         }
 
         if type == .keyDown {
+            // Ahead of the stop-on-any-key branch on purpose: while the
+            // recording modifier is down, Tab means "switch mode", never
+            // "commit this recording".
             if keyCode == Int64(kVK_Tab),
-               heldModeSwitchKeyCodes.contains(Int64(kVK_Option)) {
+               Self.shouldCycleModeOnTab(
+                   heldModifierKeyCodes: heldModifierKeyCodes,
+                   preset: activePreset
+               ) {
                 return handleModeSwitchTabKeyDown(event)
             }
             if isActiveChordEvent(keyCode: keyCode, flags: event.flags) {
@@ -248,8 +288,6 @@ final class GlobalHotKey {
             return Unmanaged.passUnretained(event)
         }
 
-        handleModeSwitchFlagsChanged(keyCode)
-
         guard watchedModifierKeyCodes.contains(keyCode) else {
             return Unmanaged.passUnretained(event)
         }
@@ -278,7 +316,11 @@ final class GlobalHotKey {
 
     private func handleModifierPressed(_ keyCode: Int64) {
         if heldModifierKeyCodes.isEmpty {
-            modifierChordWasUsed = modeSwitchChordActive
+            // Nothing was held, so no chord can be in progress: a fresh press
+            // starts from a clean slate. (The Tab chord is the only one left,
+            // and it requires a held recording modifier by construction.)
+            modifierChordWasUsed = false
+            modeSwitchDidCycle = false
         } else {
             modifierChordWasUsed = true
             resetModifierTapSequence()
@@ -311,12 +353,18 @@ final class GlobalHotKey {
         heldModifierKeyCodes.remove(keyCode)
         pendingLongPressTokens[keyCode] = nil
 
-        if optionHybridEnabled, optionLongPressKeyCode == keyCode {
+        switch Self.releaseGesture(
+            longPressDidArm: optionHybridEnabled
+                && optionLongPressKeyCode == keyCode,
+            modeSwitchDidCycle: modeSwitchDidCycle,
+            chordWasUsed: modifierChordWasUsed
+        ) {
+        case .finishHeldRecording:
             optionLongPressKeyCode = nil
             DispatchQueue.main.async { [weak self] in
                 self?.onReleased?()
             }
-        } else if !modifierChordWasUsed {
+        case .tap:
             let now = Date.timeIntervalSinceReferenceDate
             let shouldToggle: Bool
             if optionHybridEnabled || modifierNeedsDoubleTap {
@@ -334,10 +382,13 @@ final class GlobalHotKey {
                     self?.onToggle?()
                 }
             }
+        case .consumed:
+            break
         }
 
         if heldModifierKeyCodes.isEmpty {
             modifierChordWasUsed = false
+            modeSwitchDidCycle = false
         }
     }
 
@@ -362,62 +413,100 @@ final class GlobalHotKey {
         pendingLongPressTokens = [:]
     }
 
-    /// Tab, alongside the existing Shift chord (`handleModeSwitchFlagsChanged`
-    /// below), while the recording modifier (left Option) is held: cycles the
-    /// mode. Unlike Shift, Tab is a regular key, not a modifier, so it comes
-    /// through as `.keyDown` (with OS auto-repeat if held) rather than a
-    /// single `.flagsChanged` — this always swallows the event (never lets
-    /// Tab reach the focused app while Option is down, since a stray
-    /// tab-navigation in the background app while the user means to switch
-    /// modes would be a worse outcome than a consumed keystroke) but only
-    /// fires `onCycleMode` once per physical press, skipping repeats.
+    /// Tab while the user's *configured* recording modifier is held: cycles the
+    /// mode. Tab is a regular key, not a modifier, so it comes through as
+    /// `.keyDown` (with OS auto-repeat if held) — this always swallows the
+    /// event (never lets Tab reach the focused app while the hotkey is down,
+    /// since a stray tab-navigation in the background app while the user means
+    /// to switch modes would be a worse outcome than a consumed keystroke) but
+    /// only fires `onCycleMode` once per physical press, skipping repeats.
+    ///
+    /// It cancels nothing, so hold length — not reaction time — decides what
+    /// the gesture does: release before the long-press threshold and the mode
+    /// simply switched, keep holding and the recording proceeds and is
+    /// processed as the *new* mode. See `ModeSwitchTabEffects`.
     private func handleModeSwitchTabKeyDown(
         _ event: CGEvent
     ) -> Unmanaged<CGEvent>? {
-        modifierChordWasUsed = true
-        cancelPendingLongPresses()
-        resetModifierTapSequence()
-        suppressedKeyCodes.insert(Int64(kVK_Tab))
+        let effects = Self.modeSwitchTabEffects(
+            isAutorepeat: event.getIntegerValueField(
+                .keyboardEventAutorepeat
+            ) != 0
+        )
 
-        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-        if !isRepeat {
+        if effects.swallowsKeystroke {
+            suppressedKeyCodes.insert(Int64(kVK_Tab))
+        }
+        if effects.cancelsPendingLongPress {
+            cancelPendingLongPresses()
+        }
+        if effects.marksChordUsed {
+            modifierChordWasUsed = true
+        }
+        if effects.resetsModifierTapSequence {
+            resetModifierTapSequence()
+        }
+        if effects.suppressesModifierReleaseGesture {
+            modeSwitchDidCycle = true
+        }
+        if effects.cyclesMode {
             DispatchQueue.main.async { [weak self] in
                 self?.onCycleMode?()
             }
         }
-        return nil
+        return effects.swallowsKeystroke ? nil : Unmanaged.passUnretained(event)
     }
 
-    private func handleModeSwitchFlagsChanged(_ keyCode: Int64) {
-        guard Self.modeSwitchKeyCodes.contains(keyCode) else { return }
+    /// Whether a Tab keystroke should cycle the mode: only while one of the
+    /// keys the *active preset* records with is held. Gating on left Option
+    /// regardless of preset (the old behavior) left the gesture dead for every
+    /// `fn` and double-tap user, since left Option is not their recording key.
+    ///
+    /// The Space-chord presets register a Carbon hot key rather than the
+    /// modifier-only event tap, so no Tab handling exists for them at all —
+    /// `usesModifierOnlyEventTap` is what says so.
+    static func shouldCycleModeOnTab(
+        heldModifierKeyCodes: Set<Int64>,
+        preset: HotKeyPreset?
+    ) -> Bool {
+        guard let preset, preset.usesModifierOnlyEventTap else { return false }
+        return !heldModifierKeyCodes.isDisjoint(with: modifierKeyCodes(for: preset))
+    }
 
-        if heldModeSwitchKeyCodes.contains(keyCode) {
-            heldModeSwitchKeyCodes.remove(keyCode)
-        } else {
-            heldModeSwitchKeyCodes.insert(keyCode)
-        }
+    /// See `ModeSwitchTabEffects` for why "cancels nothing" is the fix.
+    /// Autorepeat changes only whether the mode cycles: one physical press,
+    /// one cycle — but a held Tab must not leak into the focused app either.
+    static func modeSwitchTabEffects(isAutorepeat: Bool) -> ModeSwitchTabEffects {
+        ModeSwitchTabEffects(
+            cyclesMode: !isAutorepeat,
+            swallowsKeystroke: true,
+            cancelsPendingLongPress: false,
+            marksChordUsed: false,
+            // The `DoubleTapDetector`'s stored tap still has to go: unlike the
+            // pending long press it cannot be aborted by clearing it (the
+            // scheduled closure never consults it), and leaving it means a
+            // tap-then-chord-then-tap sequence inside the 450ms window fires a
+            // double tap and starts a recording the user never asked for.
+            resetsModifierTapSequence: true,
+            suppressesModifierReleaseGesture: true
+        )
+    }
 
-        let leftOptionDown = heldModeSwitchKeyCodes.contains(Int64(kVK_Option))
-        let shiftDown = heldModeSwitchKeyCodes.contains(Int64(kVK_Shift))
-            || heldModeSwitchKeyCodes.contains(Int64(kVK_RightShift))
-        let chordDown = leftOptionDown && shiftDown
-
-        if chordDown {
-            modeSwitchChordActive = true
-            modifierChordWasUsed = true
-            cancelPendingLongPresses()
-            resetModifierTapSequence()
-            guard !modeSwitchDidFire else { return }
-            modeSwitchDidFire = true
-            DispatchQueue.main.async { [weak self] in
-                self?.onCycleMode?()
-            }
-        } else {
-            modeSwitchDidFire = false
-            if heldModeSwitchKeyCodes.isEmpty {
-                modeSwitchChordActive = false
-            }
-        }
+    /// What the recording modifier coming back up means. An armed long press
+    /// always wins — a recording that started must be finished by its own
+    /// release, whatever else happened during the hold. Otherwise a hold spent
+    /// on a chord is consumed rather than registered as a tap: letting it
+    /// through would arm the double-tap detector (or, on a double-tap preset,
+    /// immediately start a hands-free recording) off a gesture the user made to
+    /// switch modes.
+    static func releaseGesture(
+        longPressDidArm: Bool,
+        modeSwitchDidCycle: Bool,
+        chordWasUsed: Bool
+    ) -> ModifierReleaseGesture {
+        if longPressDidArm { return .finishHeldRecording }
+        if modeSwitchDidCycle || chordWasUsed { return .consumed }
+        return .tap
     }
 
     private func isActiveChordEvent(
@@ -526,9 +615,7 @@ final class GlobalHotKey {
         pendingLongPressTokens = [:]
         lastModifierTapKeyCode = nil
         isMomentaryActivation = false
-        heldModeSwitchKeyCodes = []
-        modeSwitchDidFire = false
-        modeSwitchChordActive = false
+        modeSwitchDidCycle = false
         modifierChordWasUsed = false
         activeChordKeyCode = nil
         activeChordFlags = []
@@ -565,13 +652,9 @@ final class GlobalHotKey {
 
     private static let optionLongPressThreshold: TimeInterval = 0.30
 
-    private static let modeSwitchKeyCodes: Set<Int64> = [
-        Int64(kVK_Option),
-        Int64(kVK_Shift),
-        Int64(kVK_RightShift)
-    ]
-
-    private static func modifierKeyCodes(for preset: HotKeyPreset) -> Set<Int64> {
+    /// The keys a preset records with — the same set the modifier-only event
+    /// tap watches and the mode-switch chord is gated on.
+    static func modifierKeyCodes(for preset: HotKeyPreset) -> Set<Int64> {
         switch preset {
         case .leftOption:
             return [Int64(kVK_Option)]

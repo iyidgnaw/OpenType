@@ -42,6 +42,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastDeliveryNotice: String?
     @Published private(set) var memoryTerms: [EntityTermSummary] = []
     @Published private(set) var memoryConsolidationRuns: [ConsolidationRunSummary] = []
+    /// Free-text owner facts (`GET /memory/owner-facts`, every origin), shown
+    /// alongside the entity dictionary in the Settings "Memory" panel so a
+    /// planted (non-owner) fact is findable and deletable (P1-12).
+    @Published private(set) var memoryOwnerFacts: [OwnerFactSummary] = []
+    /// Last failure from a dictionary-panel edit (add/edit/delete), shown
+    /// in-place in that panel and cleared by the next successful edit. Editing
+    /// is a deliberate user action, so a failed one must say so rather than
+    /// look like nothing happened.
+    @Published private(set) var memoryEditError: String?
     /// Set when an append to the immutable audit trail throws. The audit log is
     /// the app's local "source of truth"; a failed write must not be silent, so
     /// this surfaces a small warning in the Home / menubar status area. It stays
@@ -67,7 +76,7 @@ final class AppModel: ObservableObject {
     /// "N running" affordance is used) so the app window's Task List panel
     /// can scroll to and briefly highlight that specific run.
     @Published var focusedAgentRunID: UUID?
-    @Published var selectedTab: AppTab = .home
+    @Published var selectedTab: AppTab = .sessions
     /// Past Ask/Agent conversations (`GET /conversations?kind=...`), backing
     /// the Q&A and Agent tabs (`Views.swift`) -- refreshed on tab appear and
     /// after each dispatch completes. The sidecar-persisted list, not
@@ -75,6 +84,56 @@ final class AppModel: ObservableObject {
     /// past runs; it survives relaunch, the in-memory list does not.
     @Published private(set) var askConversations: [ConversationSummary] = []
     @Published private(set) var agentConversations: [ConversationSummary] = []
+
+    /// The two fetches as the redesigned 会话 screen shows them: one list,
+    /// most-recently-updated first. Derived rather than stored so it cannot
+    /// fall out of step with the two it comes from.
+    var sessionConversations: [ConversationSummary] {
+        SessionList.merged(ask: askConversations, agent: agentConversations)
+    }
+
+    /// Whether any remembered fact is still waiting to be vouched for.
+    ///
+    /// Drives the sidebar's warning dot on 记忆. `untrusted` facts are the ones
+    /// `remember_fact` wrote from inside an agent run, where the content could
+    /// have come from a web page — P1-12 recorded the provenance precisely so a
+    /// user could review it, and a badge is what makes reviewing it something
+    /// that happens rather than something available.
+    var hasUnconfirmedMemory: Bool {
+        memoryOwnerFacts.contains { $0.origin != "owner" }
+    }
+
+    /// Which chip the 会话 list is filtered by. Rendering only — it never
+    /// touches the fetched lists, so switching chips costs no refetch and can
+    /// never lose a row.
+    @Published var sessionFilter: SessionFilter = .all
+
+    /// The conversation whose thread is open in the main window, with the kind
+    /// that decides where its next turn goes. Stored together deliberately —
+    /// see `VoiceFollowUp.continuation` for why an id alone lets the thread and
+    /// the endpoint disagree.
+    @Published var focusedConversation: FocusedConversation?
+
+    /// Which second-level Settings page is pushed, if any.
+    @Published var settingsRoute: SettingsRoute?
+
+    /// Whether the right-hand column has something in it — a thread open, a
+    /// settings sub-page pushed. Drives the narrow layout's push.
+    var hasOpenDetail: Bool {
+        switch selectedTab {
+        case .sessions:
+            return focusedConversation != nil
+        case .settings:
+            return settingsRoute != nil
+        case .dictation, .memory:
+            return false
+        }
+    }
+
+    /// The hotkey gesture, for the sidebar's mode card.
+    var shortcutHintText: String {
+        configuration.hotKeyPreset.modeSwitchHint ?? shortcutStatus
+    }
     /// The currently-open thread in the Q&A/Agent tab, if any -- fetched by
     /// `openAskConversation(_:)`/`openAgentConversation(_:)`.
     @Published private(set) var askConversationDetail: ConversationDetail?
@@ -169,6 +228,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// This week's figures for the statistics panel (P2-12).
+    ///
+    /// Derived, never accumulated: `refreshUsageStats()` recomputes it from the
+    /// audit trail on demand, so there is no counter to drift out of step with
+    /// the log and nothing extra to persist. Starts empty, which is also what a
+    /// user with no deliveries this week correctly sees.
+    @Published private(set) var usageSummary: UsageStats.Summary = .empty
+
+    /// Recomputes `usageSummary` from `audit-events.v1.jsonl`.
+    ///
+    /// The read and the decode happen off the main actor: the trail is
+    /// append-only and never trimmed, so for a heavy user it is the one file in
+    /// this app large enough that parsing it on the main thread would be felt
+    /// as a hitch when the tab opens. Only the `URL` and the finished `Summary`
+    /// cross the boundary, both value types.
+    func refreshUsageStats() {
+        let url = auditStore.fileURL
+        let now = Date()
+        Task.detached(priority: .utility) {
+            let summary = UsageStats.summarizeLog(at: url, now: now)
+            await MainActor.run { [weak self] in
+                self?.usageSummary = summary
+            }
+        }
+    }
+
     private let sidecarClient = SidecarClient()
     private let audioRecorder = AudioRecorder()
     private let liveSpeechTranscriber = LiveSpeechTranscriber()
@@ -203,6 +288,16 @@ final class AppModel: ObservableObject {
     /// panel dismissal.
     private var agentProgressPollTask: Task<Void, Never>?
     private var accessibilityPollTimer: Timer?
+    /// The half-second tick that drives the pill's elapsed-time readout and the
+    /// two/five-minute limits (P2-10, `RecordingLimits`). Runs for exactly as
+    /// long as one recording does — see `startRecordingClock()`.
+    private var recordingClockTimer: Timer?
+    /// When the recording currently being timed started. `nil` when none is.
+    private var recordingStartedAt: Date?
+    /// The one bit of history `RecordingLimits.action(...)` needs to make the
+    /// warning fire once. Owned by the session and cleared when one starts, so
+    /// a long recording gets one warning rather than one every half-second.
+    private var didWarnAboutRecordingLength = false
     private var activeMode: InputMode?
     private var didStart = false
     /// One-shot guard for the first-run provider-setup wizard auto-open —
@@ -226,6 +321,20 @@ final class AppModel: ObservableObject {
     /// SwiftUI) since this is `AppModel`-internal bookkeeping the panel
     /// itself has no need to see.
     private var reviewSession: ReviewSession?
+    /// The open post-delivery correction window (P0-3), or `nil` when the
+    /// hotkey has its ordinary meaning. Holds the pure
+    /// `CorrectionWindow.State` plus the audit anchors a correction round
+    /// needs — see `CorrectionWindowSession`. Only ever written through
+    /// `armCorrectionWindow`/`updateCorrectionWindow`/`reArmCorrectionWindow`,
+    /// which keep `overlay.correctionWindowArmed` in step with it: a window
+    /// the user cannot see is, per the spec, no window at all.
+    private var correctionWindowSession: CorrectionWindowSession?
+    /// Non-nil for the duration of one in-place correction round: what
+    /// `processCorrection(audioURL:)` needs to route the audio to the Direct
+    /// path rather than the Review panel's. Set at hotkey-press time so the
+    /// selection being corrected is the one that was live *then*, not whatever
+    /// the user happens to have selected when the recording ends.
+    private var inPlaceCorrection: InPlaceCorrectionSession?
     /// Detached, un-awaited units of work for in-flight `/agent/run` calls,
     /// keyed by `AgentRunRecord.id`. Deliberately not awaited by
     /// `process(audioURL:)` — see `dispatchAgentRun(...)` — so a slow Agent
@@ -236,6 +345,15 @@ final class AppModel: ObservableObject {
     /// side is still listening for the HTTP response.
     private var runningAgentTasks: [UUID: Task<Void, Never>] = [:]
     private let agentNotificationDelegate = AgentNotificationDelegate()
+
+    /// The pre-dispatch confirmation currently on screen (P1-6), or `nil` when
+    /// no task is waiting to go out. Its presence is also what gives Esc its
+    /// temporary second meaning — see `cancelActiveVoiceSession()`.
+    private var pendingDispatch: DispatchConfirmation.Pending?
+    /// When Esc landed during that window. Kept as a timestamp rather than a
+    /// bool so the seam can judge it against the window's own bounds instead of
+    /// trusting whoever set it.
+    private var pendingDispatchEscapePressedAt: Date?
 
     /// Consecutive unexpected-sidecar-termination count driving the bounded
     /// auto-restart backoff (`SidecarSupervisor.restartDecision`). Reset to 0 on
@@ -265,6 +383,30 @@ final class AppModel: ObservableObject {
     }
 
     /// Human-readable, localized rendering of `sidecarStatus` for the UI.
+    /// The sidebar mode card's second line: which recogniser is in force and
+    /// whether it is up.
+    ///
+    /// 「Sidecar 已就绪」 named an implementation detail — a user has no reason
+    /// to know the app spawns a child process, and 「Sidecar」 is not a word
+    /// the product uses anywhere else. The design asks 「本机识别 · 就绪」:
+    /// where recognition runs, which is a thing they chose, and whether it is
+    /// working.
+    var localRecognitionStatusText: String {
+        let engine = whisperConfigSummary?.mode == .remote
+            ? OpenTypeL10n.text("远程识别", english: "Remote recognition")
+            : OpenTypeL10n.text("本机识别", english: "On-device recognition")
+        let state: String
+        switch sidecarStatus {
+        case .starting:
+            state = OpenTypeL10n.text("启动中", english: "starting")
+        case .ready:
+            state = OpenTypeL10n.text("就绪", english: "ready")
+        case .degraded, .failed:
+            state = OpenTypeL10n.text("不可用", english: "unavailable")
+        }
+        return "\(engine) · \(state)"
+    }
+
     var sidecarStatusText: String {
         switch sidecarStatus {
         case .starting:
@@ -358,6 +500,13 @@ final class AppModel: ObservableObject {
             guard let state = self?.agentPanelState,
                   let runID = UUID(uuidString: state.runId) else { return }
             self?.cancelAgentRun(runID)
+        }
+        // P1-6: Esc while the pre-dispatch confirmation is up. Recorded rather
+        // than acted on — `DispatchConfirmation.decision` judges the timestamp
+        // against the window, so a keypress that arrives a hair late reads as
+        // "too late" instead of stopping a task that already went out.
+        self.overlay.onCancelPendingDispatch = { [weak self] in
+            self?.recordPendingDispatchEscape()
         }
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
@@ -517,6 +666,12 @@ final class AppModel: ObservableObject {
         hotKey.onCancelRequested = { [weak self] in
             self?.cancelActiveVoiceSession()
         }
+        // The listening pill offers 「Tab 切换…」 only where Tab actually
+        // cycles: the Space-chord presets have no modifier-only event tap, so
+        // there is nothing to hold while pressing it, and promising the gesture
+        // to those users would be the same mistake the old hardcoded hint made
+        // in the other direction.
+        overlay.modeSwitchHintAvailable = configuration.hotKeyPreset.modeSwitchHint != nil
         hotKey.onCycleMode = { [weak self] in
             self?.cycleMode()
         }
@@ -555,6 +710,32 @@ final class AppModel: ObservableObject {
 
         let context = contextBridge.capture()
         let mode = configuration.selectedMode
+
+        // P0-3: inside the post-delivery correction window, with something
+        // selected in the app that delivery landed in, the hotkey means "fix
+        // this selection" instead of "start a new dictation". Everything that
+        // decides which is which lives in `CorrectionWindow.intent` —
+        // including the deliberate rule that an empty selection does *not*
+        // steal the hotkey from someone who just wants to keep talking.
+        if let session = correctionWindowSession,
+           let selectedText = context.selectedText,
+           CorrectionWindow.intent(
+               lastDeliveryAt: session.window.deliveredAt,
+               now: Date(),
+               selectedText: selectedText,
+               capturedBundleId: session.window.capturedBundleId,
+               frontmostBundleId: context.bundleIdentifier,
+               mode: mode,
+               variant: configuration.transcribeVariant
+           ) == .correctSelection {
+            beginInPlaceCorrectionRecording(
+                selectedText: selectedText,
+                context: context,
+                session: session
+            )
+            return
+        }
+
         if mode.requiresSelection, !contextBridge.accessibilityGranted {
             fail(OpenTypeError.accessibilityRequired)
             return
@@ -596,6 +777,11 @@ final class AppModel: ObservableObject {
         mode: InputMode,
         practice: Bool
     ) {
+        // The single choke point for "a NEW dictation began" — which is what
+        // closes a correction window (P0-3). Deliberately not in
+        // `beginCorrectionRecording`, whose round has to survive long enough
+        // to re-arm the window it belongs to.
+        updateCorrectionWindow(on: .recordingStarted)
         isStartingRecording = true
         capturedContext = context
         activeMode = mode
@@ -650,9 +836,34 @@ final class AppModel: ObservableObject {
                 self.microphonePermission = self.audioRecorder.permissionStatus
                 self.isStartingRecording = false
                 self.isCorrectionRecording = false
+                self.inPlaceCorrection = nil
                 self.fail(error)
             }
         }
+    }
+
+    /// The Direct-mode counterpart (P0-3): the same correction recording, but
+    /// targeting a selection in the *target app* rather than in the Review
+    /// panel. Recording is identical either way — only the bookkeeping set up
+    /// here differs, which is what `processCorrection(audioURL:)` branches on.
+    ///
+    /// The selection is captured now, at press time: it is what the user was
+    /// pointing at when they decided to correct, and it is what gets sent as
+    /// `fullText`. It is *also* re-read at write time — not to retarget the
+    /// paste, but to refuse it if the selection has moved out from under the
+    /// round trip (see `processInPlaceCorrection`).
+    private func beginInPlaceCorrectionRecording(
+        selectedText: String,
+        context: CapturedContext,
+        session: CorrectionWindowSession
+    ) {
+        inPlaceCorrection = InPlaceCorrectionSession(
+            requestId: session.requestId,
+            selectedText: selectedText,
+            context: context,
+            supersedesEventId: session.supersedesEventId
+        )
+        beginCorrectionRecording()
     }
 
     func hotKeyReleased() {
@@ -679,6 +890,7 @@ final class AppModel: ObservableObject {
         isStartingRecording = false
         isPracticeSession = false
         isCorrectionRecording = false
+        inPlaceCorrection = nil
         activeMode = nil
         shortcutBehavior = hotKey.behavior
         hotKey.setRecordingActive(false)
@@ -701,12 +913,35 @@ final class AppModel: ObservableObject {
     /// recording ends) guarantees `audioRecorder.cancel()` here can never
     /// delete a file that transcription is still reading.
     func cancelActiveVoiceSession() {
+        // While a task is waiting to go out (P1-6) Esc means exactly one thing:
+        // don't send that. The recording is already over and the transcript is
+        // already in hand, so there is nothing to tear down — recording the
+        // keypress and letting the window resolve on its own terms is both
+        // narrower and the only reading that produces the 「未下发」 the user
+        // is asking for rather than a generic 「已取消」.
+        if pendingDispatch != nil {
+            recordPendingDispatchEscape()
+            return
+        }
+
         let wasActive = state == .listening
             || isStartingRecording
             || isCorrectionRecording
             || isBusy
-        guard wasActive else { return }
+        guard wasActive else {
+            // Nothing is in flight, but Esc still means "done with this" for
+            // an open correction window (P0-3): close it and take the hint
+            // toast down. Silently, with no 「已取消」 — after a *successful*
+            // delivery that message would read as if the text had been
+            // un-delivered, which it has not.
+            if correctionWindowSession != nil {
+                updateCorrectionWindow(on: .cancelled)
+                setState(.idle)
+            }
+            return
+        }
 
+        updateCorrectionWindow(on: .cancelled)
         cancel()
 
         let message = OpenTypeL10n.text("已取消", english: "Cancelled")
@@ -737,9 +972,39 @@ final class AppModel: ObservableObject {
         overlay.show(state: .modeChanged, mode: mode)
     }
 
+    /// The mode-switch chord's landing point (hold the recording modifier, tap
+    /// Tab). `.listening` used to be refused here, which made the gesture dead:
+    /// holding the recording modifier is *what starts a recording*, so past the
+    /// 300ms long-press threshold every cycle was rejected. Now it is the
+    /// gesture's main case, and it **retargets the recording being captured**
+    /// rather than only the next-recording default — see `ModeCyclePolicy`.
     func cycleMode() {
-        guard state != .listening, !isBusy, !isStartingRecording else { return }
-        selectMode(configuration.selectedMode.next)
+        guard ModeCyclePolicy.allows(
+            state: state,
+            isBusy: isBusy,
+            isStartingRecording: isStartingRecording
+        ) else { return }
+
+        let outcome = ModeCyclePolicy.cycle(
+            selectedMode: configuration.selectedMode,
+            activeMode: activeMode,
+            state: state
+        )
+
+        guard state == .listening else {
+            selectMode(outcome.selectedMode)
+            return
+        }
+
+        // Deliberately not `selectMode(_:)`: its `.modeChanged` toast preempts
+        // the panel for 1.2s, which here would cover the live pill of the
+        // recording the user is still speaking into. Retargeting `activeMode`
+        // moves `voiceSurfaceMode`, so re-deriving the surface makes the pill
+        // itself show the new mode — the confirmation the toast would give,
+        // without taking the pill away to give it.
+        activeMode = outcome.activeMode
+        configuration.selectedMode = outcome.selectedMode
+        presentVoiceSurface()
     }
 
     func requestAccessibility() {
@@ -813,11 +1078,15 @@ final class AppModel: ObservableObject {
         let installed = hotKey.reinstall(preference: preset)
         if installed {
             configuration.hotKeyPreset = preset
+            // The pill's Tab hint follows the preset, or it would keep
+            // promising a gesture the user just switched away from.
+            overlay.modeSwitchHintAvailable = preset.modeSwitchHint != nil
             updateShortcutPresentation(preference: preset, installed: true)
             return
         }
 
         let restored = hotKey.reinstall(preference: previous)
+        overlay.modeSwitchHintAvailable = previous.modeSwitchHint != nil
         updateShortcutPresentation(preference: previous, installed: restored)
         shortcutStatus = OpenTypeL10n.text(
             "\(preset.title) 已被系统或其他应用占用，已恢复 \(previous.title)",
@@ -902,7 +1171,7 @@ final class AppModel: ObservableObject {
            let conversationId = record.conversationId {
             openAgentConversation(conversationId)
         }
-        selectedTab = .agent
+        selectedTab = .sessions
         openMainWindow()
     }
 
@@ -1110,11 +1379,13 @@ final class AppModel: ObservableObject {
             if let state = agentPanelState, let runID = UUID(uuidString: state.runId) {
                 focusAgentRun(runID)
             } else {
-                selectedTab = .agent
+                selectedTab = .sessions
                 openMainWindow()
             }
         case .ask, .transcribe:
-            selectedTab = .qa
+            // One list now, so both kinds land in the same place. The row's
+            // type dot is what tells them apart, not which tab you are on.
+            selectedTab = .sessions
             openMainWindow()
         }
         hideVoiceSurface()
@@ -1166,6 +1437,14 @@ final class AppModel: ObservableObject {
             isCorrectionRecording = false
         }
 
+        // Two correction paths share this recording, and which one this is was
+        // decided back at hotkey-press time (`hotKeyPressed`): the Review
+        // panel's, or Direct mode's in-place one (P0-3).
+        if let session = inPlaceCorrection {
+            await processInPlaceCorrection(audioURL: audioURL, session: session)
+            return
+        }
+
         guard let session = reviewSession else {
             setState(.idle)
             return
@@ -1190,25 +1469,12 @@ final class AppModel: ObservableObject {
             reviewPanel.beginCorrecting()
             let fullText = reviewPanel.currentText()
 
-            struct CorrectRequestBody: Encodable {
-                let fullText: String
-                let selectionStart: Int
-                let selectionEnd: Int
-                let instruction: String
-            }
-            struct CorrectResponseBody: Decodable { let replacement: String }
-
-            let response: CorrectResponseBody
+            let response: CorrectionResponseBody
             do {
-                response = try await sidecarClient.request(
-                    method: "POST",
-                    path: "/transcribe/correct",
-                    body: CorrectRequestBody(
-                        fullText: fullText,
-                        selectionStart: selection.range.location,
-                        selectionEnd: selection.range.location + selection.range.length,
-                        instruction: instruction
-                    )
+                response = try await requestCorrection(
+                    fullText: fullText,
+                    range: selection.range,
+                    instruction: instruction
                 )
             } catch {
                 reviewPanel.endCorrecting()
@@ -1253,6 +1519,263 @@ final class AppModel: ObservableObject {
             reviewPanel.showHint(ErrorMessagePresenter.message(for: error))
             setState(.idle)
         }
+    }
+
+    private struct CorrectionRequestBody: Encodable {
+        let fullText: String
+        let selectionStart: Int
+        let selectionEnd: Int
+        let instruction: String
+    }
+
+    private struct CorrectionResponseBody: Decodable {
+        let replacement: String
+        /// What this correction also taught the entity dictionary, when it
+        /// qualified (P0-2 — the sidecar omits the key entirely rather than
+        /// sending null). Decoded so the response is read as the shape it
+        /// actually has; the 「已记住」 affordance that will surface it is a
+        /// separate piece of work, so nothing reads this yet.
+        let learned: LearnedTerm?
+
+        struct LearnedTerm: Decodable {
+            let canonicalTerm: String
+            let alias: String
+        }
+    }
+
+    /// The one `POST /transcribe/correct` call, shared by both correction
+    /// paths — the Review panel's and Direct mode's in-place one. `range` is
+    /// UTF-16 code units, which is what the sidecar's JS string slicing means
+    /// by the same integers (see `TextSpanCorrection`).
+    private func requestCorrection(
+        fullText: String,
+        range: NSRange,
+        instruction: String
+    ) async throws -> CorrectionResponseBody {
+        try await sidecarClient.request(
+            method: "POST",
+            path: "/transcribe/correct",
+            body: CorrectionRequestBody(
+                fullText: fullText,
+                selectionStart: range.location,
+                selectionEnd: range.location + range.length,
+                instruction: instruction
+            )
+        )
+    }
+
+    /// One in-place correction round (P0-3): ASR only (never `VoiceModeRouter`
+    /// — the spoken text is always an instruction, never a mode-switch
+    /// command, exactly as in the Review path), then `/transcribe/correct`
+    /// with the selection as the *whole* document, then Cmd+V over the still-
+    /// live selection.
+    ///
+    /// The span is `0..<selectedText.utf16.count` because there is no
+    /// surrounding document: the user pointed at the text to fix, so that text
+    /// is both the context and the target. The replacement then lands via the
+    /// ordinary `ContextBridge.insert` — Cmd+V natively replaces a selection —
+    /// and is copied to the clipboard like every other result, so the always-
+    /// copy invariant holds here too.
+    private func processInPlaceCorrection(
+        audioURL: URL,
+        session: InPlaceCorrectionSession
+    ) async {
+        defer { inPlaceCorrection = nil }
+
+        do {
+            setState(.transcribing)
+            let instruction = try await transcribeLocally(audioURL: audioURL)
+            try Task.checkCancellation()
+
+            setState(.transforming)
+            let selected = session.selectedText
+            let response: CorrectionResponseBody
+            do {
+                response = try await requestCorrection(
+                    fullText: selected,
+                    range: NSRange(
+                        location: 0,
+                        length: (selected as NSString).length
+                    ),
+                    instruction: instruction
+                )
+            } catch {
+                throw OpenTypeError.service(
+                    "修改请求失败：\(error.localizedDescription)"
+                )
+            }
+            try Task.checkCancellation()
+
+            let replacement = response.replacement
+            var completionState: ProcessingState = .success
+
+            // The selection was read at hotkey-press time, but this write
+            // happens an ASR + `/transcribe/correct` round trip later — a
+            // second or more — and `insert` is Cmd+V, which replaces whatever
+            // is selected *now*. So the target is re-read here and the paste
+            // is refused unless it is still the same selection in the same
+            // app. The delivery path guards its own write at write time for
+            // the same reason (`OutputDeliveryPolicy.shouldInsert` against a
+            // freshly read frontmost app); this path needs the stricter of the
+            // two checks, because a replacement derived from one span pasted
+            // over a *different* span destroys text the user never pointed at,
+            // which is worse than landing dictated text in the wrong window.
+            // Downgrading costs nothing: the replacement is copied either way.
+            lastDeliveryNotice = nil
+            let target = contextBridge.capture()
+            let stillTheSameSelection = OutputDeliveryPolicy.shouldInsert(
+                capturedBundleId: session.context.bundleIdentifier,
+                frontmostBundleId: target.bundleIdentifier
+            ) && target.selectedText == session.selectedText
+
+            if stillTheSameSelection {
+                setState(.inserting)
+                do {
+                    try await contextBridge.insert(replacement)
+                } catch {
+                    completionState = .copied
+                }
+            } else {
+                completionState = .copied
+                lastDeliveryNotice = OpenTypeL10n.text(
+                    "选区已改变，纠正结果已复制到剪贴板",
+                    english: "The selection changed, so the correction was copied to the clipboard instead of pasted."
+                )
+            }
+            contextBridge.copyToClipboard(replacement)
+
+            lastResult = replacement
+            lastTranscript = instruction
+            lastApplication = session.context.applicationName
+            lastResultWasPractice = false
+
+            let eventId = UUID()
+            recordAuditEvent(
+                ImmutableAuditEvent(
+                    id: eventId,
+                    requestId: session.requestId,
+                    status: .corrected,
+                    mode: .transcribe,
+                    rawTranscript: instruction,
+                    effectiveInput: replacement,
+                    selectedContext: selected,
+                    result: replacement,
+                    provider: sidecarTextProvider,
+                    model: sidecarTextModel,
+                    error: nil,
+                    supersedesEventId: session.supersedesEventId
+                )
+            )
+
+            // Re-arm rather than end: fixing two words in a row is common, and
+            // the second fix should not cost a re-dictation.
+            reArmCorrectionWindow(after: eventId)
+
+            playFeedbackSound(.done)
+            setState(completionState)
+            scheduleIdle(after: completionState, delay: correctionWindowIdleDelay)
+        } catch is CancellationError {
+            // Whatever cancelled this round has already closed the window
+            // itself — Esc through `cancelActiveVoiceSession`, a superseding
+            // dictation through `beginRecording` — so there is nothing left
+            // here to close.
+            setState(.idle)
+        } catch {
+            // The window keeps running on its original clock (see
+            // `CorrectionWindow.Event.correctionFailed`) — the failure toast
+            // covers the hint while it is up, and whatever seconds are left
+            // are still the user's to retry in.
+            updateCorrectionWindow(on: .correctionFailed)
+            fail(error)
+        }
+    }
+
+    // MARK: - Post-delivery correction window (P0-3)
+
+    /// How long the delivery toast stays up, and therefore how long `state`
+    /// must keep saying so: while a window is open the toast *is* the
+    /// affordance, so letting `state` fall back to idle after the usual second
+    /// would let the next surface push tear the hint down early.
+    private var correctionWindowIdleDelay: TimeInterval {
+        correctionWindowSession == nil ? 1 : CorrectionWindow.windowSeconds
+    }
+
+    /// Opens (or replaces) the window after a delivery. The event carries the
+    /// mode and variant so `CorrectionWindow.reduce` — not this call site —
+    /// decides whether a window exists at all; an ask/agent or Review delivery
+    /// closes any window a previous Direct delivery had opened.
+    private func armCorrectionWindow(
+        mode: InputMode,
+        variant: TranscribeVariant,
+        context: CapturedContext,
+        requestId: UUID,
+        completedEventId: UUID,
+        at now: Date = Date()
+    ) {
+        let window = CorrectionWindow.reduce(
+            correctionWindowSession?.window,
+            on: .delivered(
+                at: now,
+                capturedBundleId: context.bundleIdentifier,
+                mode: mode,
+                variant: variant
+            )
+        )
+        correctionWindowSession = window.map {
+            CorrectionWindowSession(
+                window: $0,
+                requestId: requestId,
+                supersedesEventId: completedEventId
+            )
+        }
+        syncCorrectionWindowAffordance()
+    }
+
+    /// Restarts the clock after a correction landed, chaining the next
+    /// round's `supersedesEventId` to the `.corrected` event just written.
+    private func reArmCorrectionWindow(after eventId: UUID, at now: Date = Date()) {
+        guard let session = correctionWindowSession,
+              let window = CorrectionWindow.reduce(
+                session.window,
+                on: .correctionSucceeded(at: now)
+              )
+        else {
+            correctionWindowSession = nil
+            syncCorrectionWindowAffordance()
+            return
+        }
+        correctionWindowSession = CorrectionWindowSession(
+            window: window,
+            requestId: session.requestId,
+            supersedesEventId: eventId
+        )
+        syncCorrectionWindowAffordance()
+    }
+
+    /// Every other window transition (`.recordingStarted`, `.cancelled`,
+    /// `.correctionFailed`), routed through the same reducer so this side
+    /// holds no opinion of its own about which ones close it.
+    private func updateCorrectionWindow(on event: CorrectionWindow.Event) {
+        guard let session = correctionWindowSession else { return }
+        if let window = CorrectionWindow.reduce(session.window, on: event) {
+            correctionWindowSession?.window = window
+        } else {
+            correctionWindowSession = nil
+        }
+        syncCorrectionWindowAffordance()
+    }
+
+    /// Keeps the HUD's knowledge of the window in step with the window. Per
+    /// the spec, a window the user cannot see does not exist as a feature, so
+    /// these two must never disagree.
+    private func syncCorrectionWindowAffordance() {
+        overlay.correctionWindowArmed = correctionWindowSession != nil
+        // 「已写入 Notes」 rather than 「已复制」: where the text landed is the
+        // one part of the outcome the user cannot see for themselves, and the
+        // old copy described the mechanism instead. Falls back to the generic
+        // wording when the app is unknown rather than naming the wrong one.
+        overlay.deliveryTargetApp = correctionWindowSession != nil ? lastApplication : nil
+        overlay.deliveredText = correctionWindowSession != nil ? lastResult : nil
     }
 
     /// Commits the current Review-panel text (Enter button / Cmd+Return) —
@@ -1373,11 +1896,124 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Recording clock and duration limits (P2-10)
+
+    /// Starts timing the recording that just began: the pill's `m:ss` readout,
+    /// the two-minute warning, and the five-minute auto-stop
+    /// (`RecordingClock`/`RecordingLimits`).
+    ///
+    /// Half-second ticks: fast enough that neither threshold can be stepped
+    /// over, slow enough to cost nothing. The readout is pushed immediately so
+    /// the pill reads `0:00` from the first frame rather than appearing a
+    /// second later and jogging the layout sideways.
+    private func startRecordingClock() {
+        stopRecordingClock()
+        recordingStartedAt = Date()
+        didWarnAboutRecordingLength = false
+        overlay.updateRecordingElapsed(RecordingClock.elapsedText(seconds: 0))
+        recordingClockTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.5,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tickRecordingClock()
+            }
+        }
+    }
+
+    private func stopRecordingClock() {
+        guard recordingClockTimer != nil || recordingStartedAt != nil else { return }
+        recordingClockTimer?.invalidate()
+        recordingClockTimer = nil
+        recordingStartedAt = nil
+        didWarnAboutRecordingLength = false
+        overlay.clearRecordingElapsed()
+    }
+
+    /// One tick: ask `RecordingLimits` what this instant means, act on it, and
+    /// otherwise just move the readout along.
+    ///
+    /// `isHotKeyHeld` is passed through and makes no difference by design — a
+    /// stuck or repeating modifier is indistinguishable from a held key here,
+    /// and is exactly the case the cap exists for. See `RecordingLimits.action`.
+    private func tickRecordingClock() {
+        guard state == .listening, let startedAt = recordingStartedAt else {
+            stopRecordingClock()
+            return
+        }
+
+        let elapsed = Date().timeIntervalSince(startedAt)
+        let action = RecordingLimits.action(
+            elapsed: elapsed,
+            alreadyWarned: didWarnAboutRecordingLength,
+            hotKeyHeld: isHotKeyHeld
+        )
+
+        if action == .warn {
+            didWarnAboutRecordingLength = true
+            overlay.showRecordingWarning(RecordingLimits.warningText)
+        }
+
+        guard let termination = RecordingLimits.termination(for: action) else {
+            overlay.updateRecordingElapsed(
+                RecordingClock.elapsedText(seconds: elapsed)
+            )
+            return
+        }
+
+        switch termination {
+        case .finishAndDeliver:
+            finishRecordingAtDurationLimit()
+        case .discard:
+            // Unreachable: `RecordingLimits.termination(for:)` only ever
+            // returns `.finishAndDeliver`, and `RecordingLimitsTests` sweeps
+            // the whole input space to keep it that way. Handled the same way
+            // on purpose — this call site is deliberately not capable of
+            // throwing away a recording, because the file the user has spent
+            // five minutes filling is the one thing the safety net must not
+            // destroy. Making the auto-stop able to discard means changing this
+            // branch, in the open, rather than inheriting it by accident.
+            finishRecordingAtDurationLimit()
+        }
+    }
+
+    /// The five-minute cap firing.
+    ///
+    /// Goes through `hotKeyReleased()` — the *exact* path letting go of the
+    /// hotkey takes — and pointedly not through `cancel()` /
+    /// `cancelActiveVoiceSession()`, which call `audioRecorder.cancel()` and
+    /// delete the audio file. 「5 分钟自动停止并正常交付（不是丢弃）」: losing
+    /// five minutes of someone's dictation to the safety net meant to protect
+    /// them is the worst outcome this feature can produce, so the recording is
+    /// stopped, transcribed and delivered exactly as if the user had released
+    /// the key themselves.
+    ///
+    /// The clock is stopped first: `hotKeyReleased()` can decline to finish
+    /// (its `guard state == .listening`), and a tick that stopped nothing would
+    /// come round again half a second later and try to stop a recording that is
+    /// already being transcribed.
+    ///
+    /// Clearing `isHotKeyHeld` is what `hotKeyReleased()` does anyway; the
+    /// physical modifier may well still be down, and the real release that
+    /// follows lands on the same `guard` and does nothing.
+    private func finishRecordingAtDurationLimit() {
+        stopRecordingClock()
+        hotKeyReleased()
+    }
+
     private func finishRecording() {
         hotKey.setRecordingActive(false)
         liveSpeechTranscriber.stop()
         do {
             let audioURL = try audioRecorder.stop()
+            // The instant the recording stopped, which is the instant the user
+            // started waiting. Stamped here rather than derived later because
+            // nothing downstream can reconstruct it: the `.recognized` event is
+            // written *after* ASR returns, so a timestamp taken there has
+            // already lost the recording and the decode. `recordingStartedAt`
+            // is the other end of the same recording, not this one, and the
+            // clock that owns it has already been stopped by `setState`.
+            let recordingEndedAt = Date()
             playFeedbackSound(.release)
             if isCorrectionRecording {
                 processingTask = Task { [weak self] in
@@ -1385,11 +2021,15 @@ final class AppModel: ObservableObject {
                 }
             } else {
                 processingTask = Task { [weak self] in
-                    await self?.process(audioURL: audioURL)
+                    await self?.process(
+                        audioURL: audioURL,
+                        recordingEndedAt: recordingEndedAt
+                    )
                 }
             }
         } catch {
             isCorrectionRecording = false
+            inPlaceCorrection = nil
             fail(error)
         }
     }
@@ -1490,11 +2130,14 @@ final class AppModel: ObservableObject {
 
     private struct MemoryTermsResponseBody: Decodable { let terms: [EntityTermSummary] }
     private struct MemoryConsolidationRunsResponseBody: Decodable { let runs: [ConsolidationRunSummary] }
+    private struct MemoryOwnerFactsResponseBody: Decodable { let ownerFacts: [OwnerFactSummary] }
 
-    /// Refreshes the read-only Settings "Memory" panel (design doc §4.1: the
-    /// human-review surface over the sidecar's entity dictionary and
-    /// consolidation run log) by hitting `GET /memory/terms` and
-    /// `GET /memory/consolidation-runs`. This backs a convenience display,
+    /// Reloads the Settings "Memory" panel (design doc §4.1: the human-review
+    /// surface over the sidecar's entity dictionary, owner facts and
+    /// consolidation run log) from `GET /memory/terms`,
+    /// `/memory/consolidation-runs` and `/memory/owner-facts`. Read half only —
+    /// the panel's edits go through the mutation methods below, which reconcile
+    /// their own row rather than refetching. This backs a convenience display,
     /// not the critical recording/transcription path, so a sidecar hiccup
     /// (not started yet, transient failure) just yields an empty list plus a
     /// logged message rather than throwing.
@@ -1521,6 +2164,18 @@ final class AppModel: ObservableObject {
         } catch {
             memoryConsolidationRuns = AppModel.mergedRefresh(previous: previousRuns, incoming: nil)
             print("OpenType: failed to refresh memory consolidation runs from sidecar: \(error.localizedDescription)")
+        }
+
+        let previousFacts = memoryOwnerFacts
+        do {
+            let response: MemoryOwnerFactsResponseBody = try await sidecarClient.request(
+                method: "GET",
+                path: "/memory/owner-facts"
+            )
+            memoryOwnerFacts = AppModel.mergedRefresh(previous: previousFacts, incoming: response.ownerFacts)
+        } catch {
+            memoryOwnerFacts = AppModel.mergedRefresh(previous: previousFacts, incoming: nil)
+            print("OpenType: failed to refresh memory owner facts from sidecar: \(error.localizedDescription)")
         }
     }
 
@@ -1560,6 +2215,359 @@ final class AppModel: ObservableObject {
                 self.consolidateNowStatus = .failed(error.localizedDescription)
             }
         }
+    }
+
+    // MARK: - Memory dictionary management (P0-4)
+    //
+    // The write half of the Settings "Memory" panel: the entity dictionary
+    // stopped being a read-only list and became an editable table, so a user
+    // can fix a term the machine mis-learned (or delete one the agent planted
+    // from untrusted context, P1-12) instead of only watching it be wrong.
+    // Thin wrappers around `POST/PUT/DELETE /memory/terms` and
+    // `DELETE /memory/owner-facts/:id`, in the same shape as the provider
+    // section below: call the sidecar, then reconcile local state.
+
+    private struct MemoryTermMutationResponseBody: Decodable { let term: EntityTermSummary }
+
+    /// Creates a term from what the user typed into the dictionary panel.
+    /// Deliberately sends no confidence/origin — the sidecar pins an
+    /// owner-typed term at confidence 1.0 / origin "owner".
+    ///
+    /// The sidecar merges by canonical-or-alias match, so the response may be
+    /// an *existing* row rather than a new one; the reconcile below is keyed on
+    /// its id precisely for that case, since blindly appending would render a
+    /// merged term twice.
+    @discardableResult
+    func createMemoryTerm(canonicalTerm: String, aliases: [String]) async -> Bool {
+        do {
+            let response: MemoryTermMutationResponseBody = try await sidecarClient.request(
+                method: "POST",
+                path: "/memory/terms",
+                body: MemoryTermCreateRequest(canonicalTerm: canonicalTerm, aliases: aliases)
+            )
+            applyMemoryTerm(response.term)
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("create", error)
+            return false
+        }
+    }
+
+    /// Applies an inline edit to one term. Every argument is a patch field:
+    /// `nil` means "leave it alone", which `MemoryTermUpdateRequest` encodes by
+    /// omitting the key rather than sending null.
+    @discardableResult
+    func updateMemoryTerm(
+        id: Int,
+        canonicalTerm: String? = nil,
+        aliases: [String]? = nil,
+        confidence: Double? = nil
+    ) async -> Bool {
+        do {
+            let response: MemoryTermMutationResponseBody = try await sidecarClient.request(
+                method: "PUT",
+                path: "/memory/terms/\(id)",
+                body: MemoryTermUpdateRequest(
+                    canonicalTerm: canonicalTerm,
+                    aliases: aliases,
+                    confidence: confidence
+                )
+            )
+            applyMemoryTerm(response.term)
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("update", error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteMemoryTerm(id: Int) async -> Bool {
+        do {
+            let _: MemoryDeletionResponseBody = try await sidecarClient.request(
+                method: "DELETE",
+                path: "/memory/terms/\(id)"
+            )
+            memoryTerms.removeAll { $0.id == id }
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("delete", error)
+            return false
+        }
+    }
+
+    /// Deletes one free-text owner fact. The endpoint has existed since the
+    /// memory-poisoning close (P1-12) with no UI in front of it; the dictionary
+    /// panel is where a user actually goes looking for a planted fact, so the
+    /// delete lives there.
+    @discardableResult
+    func deleteMemoryOwnerFact(id: Int) async -> Bool {
+        do {
+            let _: MemoryDeletionResponseBody = try await sidecarClient.request(
+                method: "DELETE",
+                path: "/memory/owner-facts/\(id)"
+            )
+            memoryOwnerFacts.removeAll { $0.id == id }
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("owner-fact delete", error)
+            return false
+        }
+    }
+
+    /// Promotes a remembered fact from `untrusted` to `owner` — the user
+    /// vouching for something an agent wrote.
+    ///
+    /// The counterpart to the one-way promotion `upsertEntityTerm` already
+    /// applies to dictionary terms, and it exists for the same reason.
+    /// Provenance was recorded (P1-12) so a user could find and review what an
+    /// agent planted, possibly from a web page. A label that cannot be cleared
+    /// after review is not a signal, it is decoration — and a user who learns
+    /// the label never goes away learns to stop reading it, which costs exactly
+    /// what recording it bought.
+    ///
+    /// One-way by construction: the sidecar has no path from `owner` back to
+    /// `untrusted`, so nothing here can downgrade a fact the user already
+    /// confirmed.
+    @discardableResult
+    func confirmMemoryOwnerFact(id: Int) async -> Bool {
+        do {
+            // The body states the target origin even though the route only has
+            // one: a caller naming an intent the endpoint will not honour gets
+            // a 400 rather than a different outcome, so the wire says what this
+            // call means instead of relying on the path to imply it.
+            let response: MemoryOwnerFactMutationResponseBody = try await sidecarClient.request(
+                method: "PATCH",
+                path: "/memory/owner-facts/\(id)",
+                body: MemoryOwnerFactPatchBody(origin: "owner")
+            )
+            // Splicing the row rather than refetching also updates the
+            // sidebar's "needs attention" dot, which is computed off this same
+            // list (`hasUnconfirmedMemory`).
+            if let index = memoryOwnerFacts.firstIndex(where: { $0.id == id }) {
+                memoryOwnerFacts[index] = response.ownerFact
+            }
+            memoryEditError = nil
+            return true
+        } catch {
+            recordMemoryEditFailure("owner-fact confirm", error)
+            return false
+        }
+    }
+
+    private struct MemoryOwnerFactPatchBody: Encodable { let origin: String }
+
+    private struct MemoryOwnerFactMutationResponseBody: Decodable { let ownerFact: OwnerFactSummary }
+
+    private struct MemoryDeletionResponseBody: Decodable { let deleted: Bool }
+
+    /// Records a failed dictionary edit: a readable line for the panel (via the
+    /// same `ErrorMessagePresenter` every other user-facing failure goes
+    /// through — a raw `SidecarClientError` description is English developer
+    /// text with the response body inlined), and the untranslated detail on the
+    /// console, which is the only place it is still diagnosable.
+    private func recordMemoryEditFailure(_ operation: String, _ error: Error) {
+        memoryEditError = ErrorMessagePresenter.message(for: error)
+        print("OpenType: memory dictionary \(operation) failed: \(error.localizedDescription)")
+    }
+
+    /// Folds a mutation's resulting term into `memoryTerms` by id — replacing
+    /// the row if it is already on screen (an edit, or a create that merged
+    /// into an existing term), appending it otherwise.
+    private func applyMemoryTerm(_ term: EntityTermSummary) {
+        if let index = memoryTerms.firstIndex(where: { $0.id == term.id }) {
+            memoryTerms[index] = term
+        } else {
+            memoryTerms.append(term)
+        }
+    }
+
+    // MARK: - MCP server configuration (P2-13)
+    //
+    // Thin wrappers around the sidecar's `/config/mcp*` endpoints
+    // (`sidecar/src/agent/mcpConfigRoutes.ts`), in the same shape as the
+    // provider section below: call the sidecar, then reconcile local state.
+    // Until this panel existed, `OPENTYPE_MCP_SERVERS` was the only way to
+    // attach MCP tools to Agent mode -- and a packaged `.app` user has no way
+    // to set an env var, so the capability was unreachable outside a dev
+    // checkout.
+    //
+    // Everything MCP-related on this type lives inside this block, state
+    // included, so it stays one clearly delimited section.
+
+    /// Last `GET /config/mcp`. `nil` means "not fetched yet" (the panel shows a
+    /// loading-ish empty state) as distinct from "fetched, no servers".
+    @Published private(set) var mcpConfig: McpConfigSummary?
+    /// Last failure from an MCP panel edit (add/edit/delete/test), shown
+    /// in-place and cleared by the next successful one -- same contract as
+    /// `memoryEditError`.
+    @Published private(set) var mcpEditError: String?
+
+    /// Hands a failure over to whichever surface is better placed to show it.
+    /// `McpServerEditor` calls this after a failed save: it renders the message
+    /// beside its own Save button (the provider panels' idiom), and the
+    /// panel-level banner would otherwise repeat the same sentence at the far
+    /// end of the section.
+    func clearMcpEditError() {
+        mcpEditError = nil
+    }
+
+    private struct McpServerMutationResponseBody: Decodable { let server: McpServerSummary }
+    private struct McpDeletionResponseBody: Decodable { let deleted: Bool }
+    /// The `{ error }` envelope every `/config/mcp*` route answers a 400/404
+    /// with. Worth decoding rather than falling back to a generic message: the
+    /// sidecar's validation errors here ("An MCP server named ... already
+    /// exists", "name must contain only letters, digits ...") name exactly the
+    /// field the user has to fix.
+    private struct McpErrorEnvelope: Decodable { let error: String }
+
+    /// Refreshes the Settings "MCP 服务器" panel. Like the memory panel, this
+    /// backs a convenience display rather than the recording path, so a
+    /// sidecar hiccup leaves the last-known list on screen and logs, instead of
+    /// throwing or blanking the panel.
+    func refreshMcpServers() async {
+        do {
+            mcpConfig = try await sidecarClient.request(method: "GET", path: "/config/mcp")
+        } catch {
+            print("OpenType: failed to fetch MCP servers from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// `POST /config/mcp`. The response carries the stored (masked) server, so
+    /// the row is folded in immediately; the follow-up refresh is what picks up
+    /// `configured`/`source` flipping from the env fallback to the user's own
+    /// saved list on the very first save.
+    @discardableResult
+    func createMcpServer(_ request: McpServerRequest) async -> Bool {
+        do {
+            let response: McpServerMutationResponseBody = try await sidecarClient.request(
+                method: "POST",
+                path: "/config/mcp",
+                body: request
+            )
+            applyMcpServer(response.server, replacing: nil)
+            mcpEditError = nil
+            await refreshMcpServers()
+            return true
+        } catch {
+            recordMcpEditFailure("create", error)
+            return false
+        }
+    }
+
+    /// `PUT /config/mcp/:name` -- a **replace**, not a patch: whatever the
+    /// request omits is gone afterwards. `name` is the server's current name
+    /// (the one the URL addresses); `request.name` may differ, which is how a
+    /// rename is expressed, so the local fold is keyed on the old name.
+    @discardableResult
+    func updateMcpServer(name: String, _ request: McpServerRequest) async -> Bool {
+        do {
+            let response: McpServerMutationResponseBody = try await sidecarClient.request(
+                method: "PUT",
+                path: "/config/mcp/\(Self.mcpPathComponent(name))",
+                body: request
+            )
+            applyMcpServer(response.server, replacing: name)
+            mcpEditError = nil
+            await refreshMcpServers()
+            return true
+        } catch {
+            recordMcpEditFailure("update", error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteMcpServer(name: String) async -> Bool {
+        do {
+            let _: McpDeletionResponseBody = try await sidecarClient.request(
+                method: "DELETE",
+                path: "/config/mcp/\(Self.mcpPathComponent(name))"
+            )
+            mcpEditError = nil
+            await refreshMcpServers()
+            return true
+        } catch {
+            recordMcpEditFailure("delete", error)
+            return false
+        }
+    }
+
+    /// `POST /config/mcp/test` -- connects to the candidate and reports which
+    /// tools it would hand the agent. Never throws: a probe failure comes back
+    /// as `.success == false` with the server's own error, and a transport
+    /// failure is folded into the same shape, so the panel has one code path
+    /// (same contract as `testLLMConnection`).
+    ///
+    /// Sending an unchanged secret as its mask is fine here for the same reason
+    /// it is fine on a write: the sidecar resolves a submitted value against
+    /// the *saved server of the same name* before probing, so testing an
+    /// already-saved server exercises its real credentials rather than failing
+    /// with an auth error about the mask.
+    func testMcpServer(_ request: McpServerRequest) async -> McpTestResultSummary {
+        do {
+            return try await sidecarClient.request(
+                method: "POST",
+                path: "/config/mcp/test",
+                body: request
+            )
+        } catch {
+            return McpTestResultSummary(
+                success: false,
+                error: Self.mcpFailureMessage(error),
+                tools: nil
+            )
+        }
+    }
+
+    /// Folds a mutation's resulting server into `mcpConfig.servers`, replacing
+    /// the row previously called `replacing` (so a rename updates in place
+    /// rather than duplicating) and appending when there was none.
+    private func applyMcpServer(_ server: McpServerSummary, replacing previousName: String?) {
+        guard let current = mcpConfig else { return }
+        var servers = current.servers
+        if let index = servers.firstIndex(where: { $0.name == (previousName ?? server.name) }) {
+            servers[index] = server
+        } else {
+            servers.append(server)
+        }
+        mcpConfig = McpConfigSummary(
+            configured: current.configured,
+            source: current.source,
+            servers: servers
+        )
+    }
+
+    private func recordMcpEditFailure(_ operation: String, _ error: Error) {
+        mcpEditError = Self.mcpFailureMessage(error)
+        print("OpenType: MCP server \(operation) failed: \(error.localizedDescription)")
+    }
+
+    /// The user-facing message for a failed `/config/mcp*` call. A 400/404
+    /// answers `{ error }`, which doesn't decode as the expected response and
+    /// so arrives as a decoding failure carrying the raw body -- that body's
+    /// `error` is the actionable sentence, and `ErrorMessagePresenter`'s
+    /// generic "本地服务响应异常" would throw it away.
+    nonisolated static func mcpFailureMessage(_ error: Error) -> String {
+        if case SidecarClientError.responseDecodingFailed(_, _, let body) = error,
+           let data = body.data(using: .utf8),
+           let envelope = try? JSONDecoder().decode(McpErrorEnvelope.self, from: data) {
+            return envelope.error
+        }
+        return ErrorMessagePresenter.message(for: error)
+    }
+
+    /// Percent-encodes a server name for the `:name` path segment. Saved names
+    /// are constrained to `[A-Za-z0-9_-]` sidecar-side, but a name typed into
+    /// the panel reaches this before that validation does.
+    nonisolated private static func mcpPathComponent(_ name: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return name.addingPercentEncoding(withAllowedCharacters: allowed) ?? name
     }
 
     // MARK: - Provider configuration (Whisper / LLM)
@@ -1756,7 +2764,11 @@ final class AppModel: ObservableObject {
         return text
     }
 
-    private func process(audioURL: URL) async {
+    /// - Parameter recordingEndedAt: When the recording this audio came from
+    ///   stopped (`finishRecording()`). Recorded on the `.recognized` event so
+    ///   the statistics panel can measure the span the user actually waits
+    ///   through — see `UsageStats` and `ImmutableAuditEvent.recordingEndedAt`.
+    private func process(audioURL: URL, recordingEndedAt: Date? = nil) async {
         let startingMode = activeMode ?? configuration.selectedMode
         let practice = isPracticeSession
         let auditRequestID = UUID()
@@ -1775,7 +2787,8 @@ final class AppModel: ObservableObject {
             result: String? = nil,
             error: String? = nil,
             provider: String? = nil,
-            model: String? = nil
+            model: String? = nil,
+            recordingEndedAt: Date? = nil
         ) -> UUID {
             let eventId = UUID()
             recordAuditEvent(
@@ -1790,7 +2803,8 @@ final class AppModel: ObservableObject {
                     result: result,
                     provider: provider,
                     model: model,
-                    error: error
+                    error: error,
+                    recordingEndedAt: recordingEndedAt
                 )
             )
             return eventId
@@ -1817,9 +2831,12 @@ final class AppModel: ObservableObject {
             activeMode = mode
             auditMode = mode
             auditEffectiveInput = transcript
+            // The only event that carries it: it describes the recording, and
+            // the recording happens once per session.
             let recognizedEventId = appendAudit(
                 status: .recognized,
-                provider: sidecarASRProvider
+                provider: sidecarASRProvider,
+                recordingEndedAt: recordingEndedAt
             )
 
             if mode.requiresSelection,
@@ -1842,7 +2859,28 @@ final class AppModel: ObservableObject {
             let result: String?
             switch mode {
             case .transcribe:
-                if configuration.transcribeVariant == .review {
+                // The whole variant axis decides here and nowhere else
+                // (`TranscribeVariant.deliverableText(for:)`): Direct hands
+                // the transcript back untouched, Tidy hands back
+                // `TidyTranscript`'s deterministic cleanup, and Review hands
+                // back nothing because it stages instead of delivering. No
+                // sidecar/LLM call and no voice surface in any of the three —
+                // whatever comes back *is* the result.
+                if let deliverable = configuration.transcribeVariant
+                    .deliverableText(for: transcript) {
+                    // Note what is deliberately *not* happening here:
+                    // `auditEffectiveInput` keeps the transcript as spoken.
+                    // Under Tidy the delivered text differs from it, and both
+                    // halves have to stay readable — `rawTranscript` is what
+                    // ASR heard, `effectiveInput` what the user said once
+                    // mode-routing was applied, and the `.completed` event's
+                    // `result` below is what was actually pasted. Overwriting
+                    // `effectiveInput` with the tidied form would make the
+                    // audit chain claim the user spoke the cleaned-up
+                    // sentence, and would contradict the `.recognized` event
+                    // already written above under the same `requestId`.
+                    result = deliverable
+                } else {
                     // Stash the transcript in the Review panel instead of
                     // delivering it — nothing is inserted/copied yet. The
                     // rest of this session (corrections, commit/cancel) is
@@ -1857,10 +2895,6 @@ final class AppModel: ObservableObject {
                         recognizedEventId: recognizedEventId
                     )
                     result = nil
-                } else {
-                    // Pure ASR passthrough: no sidecar/LLM call at all, and
-                    // no voice surface — the transcript itself is the result.
-                    result = transcript
                 }
             case .ask:
                 // Non-blocking dispatch, mirroring `.agent`/`dispatchAgentRun`
@@ -1910,8 +2944,29 @@ final class AppModel: ObservableObject {
                 // `UNUserNotification` plus the Agent tab, and dismissing
                 // the surface never cancels the run.
                 effectiveTextModel = sidecarTextModel
+                // P1-6: show what was heard for ~1.5s first. Not a modal —
+                // doing nothing dispatches; only Esc inside the window stops
+                // it. This is the one mode with real hands, so a mishear here
+                // is not a bad answer, it is an executed one.
+                let confirmed = await confirmDispatch(transcript: transcript, mode: mode)
+                try Task.checkCancellation()
+                guard let confirmedTask = confirmed else {
+                    appendAudit(
+                        status: .cancelled,
+                        error: OpenTypeL10n.text(
+                            "下发前已撤销",
+                            english: "Cancelled before dispatch"
+                        )
+                    )
+                    let cancelledState = ProcessingState.cancelled(
+                        OpenTypeL10n.text("未下发", english: "Not dispatched")
+                    )
+                    setState(cancelledState)
+                    scheduleIdle(after: cancelledState)
+                    return
+                }
                 dispatchAgentRun(
-                    transcript: transcript,
+                    transcript: confirmedTask,
                     context: capturedContext,
                     practice: practice,
                     requestID: auditRequestID,
@@ -2035,19 +3090,34 @@ final class AppModel: ObservableObject {
                 contextBridge.copyToClipboard(result)
             }
 
-            appendAudit(
+            let completedEventId = appendAudit(
                 status: .completed,
                 result: result,
-                // `.transcribe` is a pure ASR passthrough with no sidecar
-                // text-generation call (see the `switch mode` above), so it
-                // has no text provider/model of its own to record here.
+                // `.transcribe` reaches no text provider in any of its three
+                // variants (see the `switch mode` above) — Tidy's rewriting is
+                // local, deterministic rules — so there is no text
+                // provider/model of its own to record here. `nil` states that
+                // no model was involved, which for Tidy is the product
+                // promise, not merely a missing field.
                 provider: mode == .transcribe ? nil : sidecarTextProvider,
                 model: effectiveTextModel
             )
 
+            // P0-3: the text is delivered and the user is looking at it — for
+            // the next few seconds the hotkey offers to fix it in place.
+            // Armed *before* the state push below, because that push is what
+            // turns the success toast into the window's visible affordance.
+            armCorrectionWindow(
+                mode: mode,
+                variant: configuration.transcribeVariant,
+                context: capturedContext,
+                requestId: auditRequestID,
+                completedEventId: completedEventId
+            )
+
             playFeedbackSound(.done)
             setState(completionState)
-            scheduleIdle(after: completionState)
+            scheduleIdle(after: completionState, delay: correctionWindowIdleDelay)
         } catch is CancellationError {
             appendAudit(
                 status: .cancelled,
@@ -2085,6 +3155,52 @@ final class AppModel: ObservableObject {
     /// (P1-11). The `/oneshot/ask` call is tracked in `askTask` (never awaited
     /// by `process(audioURL:)`), so a slow answer can't hold the recording
     /// pipeline busy and dismissing the surface can abort it cleanly.
+    /// Sends a typed turn into an existing conversation.
+    ///
+    /// The redesign's thread has a text field, which the app never had before —
+    /// every dispatch until now began with a recording, so the two dispatchers
+    /// take a transcript and are private. Typing is the same act with a
+    /// different input device, so this reuses them rather than growing a
+    /// parallel path: the conversation's own kind picks the endpoint, exactly
+    /// as it does for a spoken continuation.
+    ///
+    /// The captured context is a placeholder rather than a real
+    /// `contextBridge.capture()`: a typed turn originates in OpenType's own
+    /// window, so there is no other app's selection to read and nothing that
+    /// should be treated as one.
+    func submitTypedTurn(_ text: String, in conversation: FocusedConversation) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isBusy else { return }
+
+        let context = CapturedContext(
+            selectedText: nil,
+            applicationName: "OpenType",
+            bundleIdentifier: "ai.rain.opentype"
+        )
+        let requestID = UUID()
+        lastTranscript = trimmed
+
+        switch conversation.kind {
+        case .ask:
+            dispatchAskRun(
+                transcript: trimmed,
+                context: context,
+                practice: false,
+                requestID: requestID,
+                conversationId: conversation.id,
+                model: sidecarTextModel
+            )
+        case .agent:
+            dispatchAgentRun(
+                transcript: trimmed,
+                context: context,
+                practice: false,
+                requestID: requestID,
+                conversationId: conversation.id
+            )
+        }
+    }
+
     private func dispatchAskRun(
         transcript: String,
         context: CapturedContext,
@@ -2265,6 +3381,77 @@ final class AppModel: ObservableObject {
                 )
             )
         }
+    }
+
+    /// Holds a task on screen for `DispatchConfirmation.windowSeconds` before
+    /// it goes out (P1-6), and returns the text to dispatch — or `nil` if the
+    /// user took it back with Esc.
+    ///
+    /// The whole window costs 1.5 seconds of latency, once, on the one mode
+    /// that can change the user's disk. Modes with no window (`arm` returns
+    /// `nil`) get their transcript back untouched and pay nothing.
+    ///
+    /// The wait is a poll rather than a single sleep so Esc ends it early: at
+    /// this frequency, a user who spots the mishear immediately should not have
+    /// to watch the rest of the bar drain before anything happens.
+    private func confirmDispatch(transcript: String, mode: InputMode) async -> String? {
+        guard let pending = DispatchConfirmation.arm(
+            transcript: transcript,
+            mode: mode,
+            at: Date()
+        ) else { return transcript }
+
+        pendingDispatch = pending
+        pendingDispatchEscapePressedAt = nil
+        overlay.showPendingDispatch(
+            transcript: pending.transcript,
+            seconds: DispatchConfirmation.windowSeconds
+        )
+        defer {
+            // Take down *this* window, not whatever is on screen. A superseded
+            // recording cancels this task and starts its own confirmation, and
+            // a defer that cleared unconditionally would hide the newer card
+            // and leave its Esc unheard (`recordPendingDispatchEscape` needs
+            // `pendingDispatch` to be non-nil).
+            if pendingDispatch == pending {
+                pendingDispatch = nil
+                overlay.hidePendingDispatch()
+            }
+        }
+
+        while !Task.isCancelled,
+              pendingDispatchEscapePressedAt == nil,
+              !pending.isExpired(at: Date()) {
+            // `try?`, because a cancelled sleep throws — and the loop condition
+            // above is what actually ends this, not the throw.
+            try? await Task.sleep(nanoseconds: 30_000_000)
+        }
+
+        switch DispatchConfirmation.decision(
+            for: pending,
+            escapePressedAt: pendingDispatchEscapePressedAt
+        ) {
+        case .dispatch(let text):
+            return text
+        case .cancelled:
+            return nil
+        }
+    }
+
+    /// Esc arrived while a task was waiting to go out (P1-6). Records *when*
+    /// and lets `confirmDispatch`'s next tick ask the seam whether that was in
+    /// time; a keypress after the window closed leaves the dispatched run alone
+    /// (stopping one that already started is `/agent/cancel`'s job).
+    private func recordPendingDispatchEscape() {
+        // First press wins. Two things reach here — the overlay's own key
+        // monitors and `cancelActiveVoiceSession()` — so a single Esc can
+        // arrive twice, and a second timestamp is never new information. It
+        // could, however, be *worse* information: a repeat press landing after
+        // the deadline but before the loop's next 30ms tick would overwrite an
+        // in-time cancellation with an out-of-window one, turning "cancelled"
+        // into "dispatched" for a user who pressed Esc twice.
+        guard pendingDispatch != nil, pendingDispatchEscapePressedAt == nil else { return }
+        pendingDispatchEscapePressedAt = Date()
     }
 
     /// Kicks off an Agent-mode task as an independent, detached unit of work
@@ -2594,21 +3781,43 @@ final class AppModel: ObservableObject {
         UNUserNotificationCenter.current().add(request)
     }
 
-    private func scheduleIdle(after completionState: ProcessingState) {
+    /// Lets a settled state fall back to `.idle` once its toast has had its
+    /// time. `delay` is only ever non-default for the correction window
+    /// (P0-3), whose toast outlives the usual second — see
+    /// `correctionWindowIdleDelay`.
+    private func scheduleIdle(
+        after completionState: ProcessingState,
+        delay: TimeInterval = 1
+    ) {
         Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            try? await Task.sleep(
+                nanoseconds: UInt64(max(0, delay) * 1_000_000_000)
+            )
             guard let self, self.state == completionState else { return }
             self.state = .idle
         }
     }
 
     private func setState(_ newState: ProcessingState) {
+        let wasListening = state == .listening
         state = newState
         hotKey.setRecordingActive(newState == .listening)
         // One entry point: the reducer decides whether this is a voice-surface
         // moment (ask/agent) or a legacy HUD/toast moment (transcribe, and
         // ask/agent with no live run).
         presentVoiceSurface()
+        // P2-10: the recording clock lives exactly as long as a recording does.
+        // Hung off the one state transition every recording path goes through
+        // rather than off each `beginRecording`/`finishRecording` pair, so no
+        // exit — hotkey release, Esc, a failed start, an auto-stop — can leave
+        // a timer running behind it. Started *after* `presentVoiceSurface()`,
+        // since the pill only accepts an elapsed readout once it knows it is
+        // listening.
+        if newState == .listening {
+            if !wasListening { startRecordingClock() }
+        } else {
+            stopRecordingClock()
+        }
     }
 
     private func fail(_ error: Error) {
@@ -2621,6 +3830,9 @@ final class AppModel: ObservableObject {
         shortcutBehavior = hotKey.behavior
         hotKey.setRecordingActive(false)
         liveSpeechTranscriber.stop()
+        // Assigns `state` directly rather than going through `setState`, so the
+        // recording clock has to be stopped by hand here (P2-10).
+        stopRecordingClock()
         state = .failure(message)
         // Same reducer-first routing as `setState`, but with the mode this
         // recording actually ran as (`activeMode` has just been cleared) and
@@ -2677,32 +3889,86 @@ private struct ReviewSession {
     var lastEventId: UUID
 }
 
+/// An open correction window (P0-3) plus the audit bookkeeping a correction
+/// round appends against. The window itself is pure policy
+/// (`CorrectionWindow.State`); these two fields are what make the `.corrected`
+/// event a *link in the delivery's chain* rather than an orphan — the same
+/// `requestId` grouping and `supersedesEventId` chaining a Review session uses
+/// (§8 of `docs/superpowers/specs/2026-08-09-current-system-state.md`).
+private struct CorrectionWindowSession {
+    var window: CorrectionWindow.State
+    let requestId: UUID
+    /// The event this window's text came from: the delivery's `.completed`
+    /// event, or the previous correction's `.corrected` event once one has
+    /// landed.
+    var supersedesEventId: UUID
+}
+
+/// One in-place correction round — see `AppModel.inPlaceCorrection`.
+private struct InPlaceCorrectionSession {
+    let requestId: UUID
+    /// The whole of what the user selected in the target app. It is both the
+    /// `fullText` sent to `/transcribe/correct` and the span being corrected
+    /// (0..<its UTF-16 length): there is no surrounding document to send,
+    /// because the correction is scoped to exactly what the user pointed at.
+    let selectedText: String
+    let context: CapturedContext
+    let supersedesEventId: UUID
+}
+
+/// The sidebar's four destinations (2026-08 redesign).
+///
+/// Down from five bottom tabs, and the reduction is the point rather than a
+/// side effect. `home` is gone entirely — it existed to pick a mode and show
+/// the last result, and the redesign moves mode selection back to the menu-bar
+/// popover and the sidebar's own mode card, where it does not cost a
+/// first-class destination. `qa` and `agent` merge into `sessions`: they were
+/// never two kinds of place, only two kinds of row in one list, and keeping
+/// them apart meant a user who asked a question and then gave a task had to
+/// remember which tab it landed in.
+///
+/// Note what this merge is **not**: the two *modes* stay separate. A session's
+/// `kind` still decides whether its next turn goes to `/oneshot/ask` or
+/// `/agent/run`. This is one list of conversations, not one kind of
+/// conversation.
 enum AppTab: String, CaseIterable, Identifiable {
-    case home
-    case history
-    case qa
-    case agent
+    case sessions
+    case dictation
+    case memory
     case settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .home: return OpenTypeL10n.text("输入", english: "Input")
-        case .history: return OpenTypeL10n.text("历史", english: "History")
-        case .qa: return OpenTypeL10n.text("问答", english: "Q&A")
-        case .agent: return OpenTypeL10n.text("Agent", english: "Agent")
+        case .sessions: return OpenTypeL10n.text("会话", english: "Sessions")
+        case .dictation: return OpenTypeL10n.text("听写", english: "Dictation")
+        case .memory: return OpenTypeL10n.text("记忆", english: "Memory")
         case .settings: return OpenTypeL10n.text("设置", english: "Settings")
         }
     }
 
     var symbol: String {
         switch self {
-        case .home: return "waveform"
-        case .history: return "clock.arrow.circlepath"
-        case .qa: return "questionmark.bubble.fill"
-        case .agent: return "wand.and.stars"
+        case .sessions: return "bubble.left.and.bubble.right.fill"
+        case .dictation: return "clock.arrow.circlepath"
+        case .memory: return "brain"
         case .settings: return "slider.horizontal.3"
+        }
+    }
+
+    /// Whether this destination is one page that wants the whole content area,
+    /// rather than a list beside a detail view.
+    ///
+    /// Not derivable from "is something focused": 会话 with no thread open also
+    /// has nothing in the detail column, but its list must stay 334pt with a
+    /// placeholder beside it, because a thread is about to appear there. These
+    /// two never have a second column at all, so handing them the list slot
+    /// pins them to 334pt and their own two-column layouts never fit.
+    var isFullWidthPage: Bool {
+        switch self {
+        case .dictation, .memory: return true
+        case .sessions, .settings: return false
         }
     }
 }

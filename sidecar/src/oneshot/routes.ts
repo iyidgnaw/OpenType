@@ -123,8 +123,46 @@ async function handleAsk(
   const result = loopResult.result.trim();
 
   conversations.appendMessage(conversationId, "assistant", result);
+  recordAnsweredQuestion(store, question, result);
 
   return Response.json({ result, conversationId });
+}
+
+/**
+ * P1-7: Q&A feeds consolidation too, alongside `/agent/run` and (since the same
+ * batch) `/asr/transcribe`. A question is where a project, person or term the
+ * owner cares about tends to get named for the first time.
+ *
+ * Raw and corrected are the same string here because this route never sees a
+ * pre-correction form — by the time Swift posts, the text is already
+ * transcribed — which is exactly what `/agent/run` does with its `task`.
+ * `origin: "agent"` also matches it: since the ask-web batch the `result` half
+ * is machine-produced text that may quote fetched pages, and recording that as
+ * the owner's own words is the provenance confusion `EventOrigin` exists to
+ * prevent.
+ *
+ * Recorded only after the answer exists, and swallowed on failure: the answer
+ * is the product, the episodic row is bookkeeping.
+ */
+function recordAnsweredQuestion(store: MemoryStore, question: string, result: string): void {
+  try {
+    store.recordEpisodicEvent({
+      mode: "ask",
+      rawTranscript: question,
+      correctedTranscript: question,
+      effectiveInput: question,
+      // Ask deliberately needs no selection, and the body carries none.
+      selectedContext: null,
+      result,
+      // Placeholder, same reason as `/agent/run`'s "OpenType Agent": nothing on
+      // the wire tells the sidecar the frontmost app.
+      applicationName: "OpenType Ask",
+      origin: "agent",
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`ask: could not record episodic event, continuing: ${message}`);
+  }
 }
 
 /**

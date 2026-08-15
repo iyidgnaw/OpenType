@@ -65,11 +65,18 @@ function nextRanAt(): number {
 /**
  * Trigger check from spec §4.4: at least 12 hours since the last run (or no
  * run has ever happened) AND at least 5 unconsolidated events exist.
+ *
+ * "Unconsolidated" here means *eligible* and unconsolidated, which is why this
+ * counts `consolidationCandidateCount()` and not `unconsolidatedEventCount()`:
+ * the modes consolidation may never read (`CONSOLIDATION_EXCLUDED_MODES`) are
+ * also never marked consolidated, so counting them would hold this gate open
+ * permanently and make every launch spend a real LLM call on a set that turns
+ * out to be empty once the filter is applied.
  */
 export function shouldConsolidate(store: MemoryStore): boolean {
   const hours = store.hoursSinceLastConsolidation();
   const enoughTimePassed = hours === null || hours >= MIN_HOURS_BETWEEN_RUNS;
-  return enoughTimePassed && store.unconsolidatedEventCount() >= MIN_UNCONSOLIDATED_EVENTS;
+  return enoughTimePassed && store.consolidationCandidateCount() >= MIN_UNCONSOLIDATED_EVENTS;
 }
 
 /**
@@ -217,6 +224,23 @@ function unionCaseInsensitive(a: string[], b: string[]): string[] {
   return Array.from(seen.values());
 }
 
+/**
+ * `origin` is promoted one way only: an incoming `"owner"` write raises the
+ * merged row to `"owner"`, anything else leaves the existing provenance
+ * exactly as it was, and an existing `"owner"` is never downgraded.
+ *
+ * Two write paths mean "the user personally vouched for this term" — typing it
+ * into the dictionary panel (P0-4) and voice-correcting into it (P0-2). Merging
+ * either into a row `remember_fact` wrote as `"untrusted"` would leave that row
+ * flagged untrusted right after the owner endorsed it. A provenance flag exists
+ * to prompt review; one that stays lit after review is noise, and users learn
+ * to ignore noise. The rule lives here because this is the single shared merge
+ * path, not a special case of any one caller.
+ */
+function promoteOrigin(existing: EventOrigin, incoming: EventOrigin): EventOrigin {
+  return incoming === "owner" ? "owner" : existing;
+}
+
 export interface UpsertEntityTermInput {
   canonicalTerm: string;
   aliases: string[];
@@ -257,16 +281,25 @@ export function upsertEntityTerm(
     const mergedSourceEventIds = Array.from(
       new Set([...match.sourceEventIds, ...input.sourceEventIds])
     );
+    const mergedOrigin = promoteOrigin(match.origin, input.origin ?? "owner");
 
     store.db.run(
-      "UPDATE entity_terms SET aliases = ?, confidence = ?, sourceEventIds = ?, updatedAt = ? WHERE id = ?",
-      [JSON.stringify(mergedAliases), mergedConfidence, JSON.stringify(mergedSourceEventIds), now, match.id]
+      "UPDATE entity_terms SET aliases = ?, confidence = ?, origin = ?, sourceEventIds = ?, updatedAt = ? WHERE id = ?",
+      [
+        JSON.stringify(mergedAliases),
+        mergedConfidence,
+        mergedOrigin,
+        JSON.stringify(mergedSourceEventIds),
+        now,
+        match.id,
+      ]
     );
 
     const term: EntityTerm = {
       ...match,
       aliases: mergedAliases,
       confidence: mergedConfidence,
+      origin: mergedOrigin,
       sourceEventIds: mergedSourceEventIds,
       updatedAt: now,
     };
@@ -360,11 +393,14 @@ async function runConsolidationInner(
   store: MemoryStore,
   callLLM: CallLLM
 ): Promise<ConsolidationResult> {
-  const events = store.db
-    .query(
-      "SELECT * FROM episodic_events WHERE consolidatedAt IS NULL ORDER BY createdAt DESC LIMIT ?"
-    )
-    .all(MAX_EVENTS_PER_RUN) as EpisodicEventRow[];
+  // Deliberately NOT a query written here. `consolidationCandidates` is the one
+  // definition of what a pass may read, and it excludes the modes listed in
+  // `CONSOLIDATION_EXCLUDED_MODES` (currently `transcribe`) as well as
+  // already-consolidated rows. Filtering at the selection rather than in
+  // `buildConsolidationPrompt` is the point: excluded text never enters this
+  // function at all, so no later change to the prompt builder, the gate, or the
+  // write phase can put it back in front of a model.
+  const events = store.consolidationCandidates(MAX_EVENTS_PER_RUN) as EpisodicEventRow[];
 
   const existingTermsBefore = store.allTerms();
   const prompt = buildConsolidationPrompt(events, existingTermsBefore);

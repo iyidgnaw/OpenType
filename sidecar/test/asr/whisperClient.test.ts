@@ -3,6 +3,7 @@ import {
   WhisperClient,
   WhisperClientError,
   augmentPathForFfmpeg,
+  defaultWhisperClientFactories,
   type SpawnedProcess,
   type WhisperClientFactories,
 } from "../../src/asr/whisperClient";
@@ -165,5 +166,104 @@ describe("WhisperClient.transcribe", () => {
     const client = new WhisperClient({ socketPath: "/tmp/whisper-test.sock" }, factories);
 
     await expect(client.transcribe(new Uint8Array([1]))).rejects.toThrow("boom");
+  });
+
+  test("passes the initial prompt through to postAudio", async () => {
+    let capturedPrompt: string | undefined;
+    let promptArgSeen = false;
+    const factories = makeFactories({
+      postAudio: async (_socketPath, _audio, initialPrompt) => {
+        capturedPrompt = initialPrompt;
+        promptArgSeen = true;
+        return { text: "hello world" };
+      },
+    });
+    const client = new WhisperClient({ socketPath: "/tmp/whisper-test.sock" }, factories);
+
+    const text = await client.transcribe(
+      new Uint8Array([1, 2, 3]),
+      "可能出现的专有名词：PayPal。"
+    );
+
+    expect(text).toBe("hello world");
+    expect(promptArgSeen).toBe(true);
+    expect(capturedPrompt).toBe("可能出现的专有名词：PayPal。");
+  });
+
+  test("passes no prompt through when transcribe is called without one", async () => {
+    let capturedPrompt: string | undefined = "sentinel";
+    const factories = makeFactories({
+      postAudio: async (_socketPath, _audio, initialPrompt) => {
+        capturedPrompt = initialPrompt;
+        return { text: "hello world" };
+      },
+    });
+    const client = new WhisperClient({ socketPath: "/tmp/whisper-test.sock" }, factories);
+
+    await client.transcribe(new Uint8Array([1, 2, 3]));
+
+    expect(capturedPrompt).toBeUndefined();
+  });
+});
+
+/**
+ * The python side (`sidecar/whisper/serve.py`) reads `initial_prompt` as a
+ * URL-encoded **query parameter** rather than a header, because a header must
+ * be latin-1 safe and the dictionary is full of CJK terms. There is no python
+ * test harness in this repo, so the contract is pinned from this side: these
+ * tests fix the exact URL the real factory builds. The python handler itself
+ * is only covered by the packaged-app verification step.
+ */
+describe("defaultWhisperClientFactories().postAudio request URL", () => {
+  async function captureRequestUrl(initialPrompt?: string): Promise<string> {
+    const originalFetch = globalThis.fetch;
+    let capturedUrl = "";
+    globalThis.fetch = (async (input: unknown) => {
+      capturedUrl =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : (input as Request).url;
+      return Response.json({ text: "ok" });
+    }) as unknown as typeof fetch;
+    try {
+      const { postAudio } = defaultWhisperClientFactories();
+      await postAudio("/tmp/whisper-test.sock", new Uint8Array([1, 2, 3]), initialPrompt);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return capturedUrl;
+  }
+
+  test("sends no query string at all when there is no initial prompt", async () => {
+    const url = new URL(await captureRequestUrl());
+
+    expect(url.pathname).toBe("/transcribe");
+    // No query string at all, not `?initial_prompt=`: an empty prompt must
+    // reach mlx_whisper as the default (None), not as the empty string.
+    expect(url.search).toBe("");
+  });
+
+  test("percent-encodes a CJK initial prompt into the initial_prompt query parameter", async () => {
+    const prompt = "可能出现的专有名词：PayPal、呸泡。";
+
+    const rawUrl = await captureRequestUrl(prompt);
+
+    // Raw non-ASCII bytes in a request target are not valid HTTP -- python's
+    // urlparse/parse_qs would not recover the term list from them.
+    expect(rawUrl).not.toMatch(/[^\x00-\x7F]/);
+    const url = new URL(rawUrl);
+    expect(url.pathname).toBe("/transcribe");
+    expect(url.searchParams.get("initial_prompt")).toBe(prompt);
+  });
+
+  test("escapes characters that would otherwise break the query string", async () => {
+    const prompt = "A & B = C? #tag 你好";
+
+    const url = new URL(await captureRequestUrl(prompt));
+
+    expect([...url.searchParams.keys()]).toEqual(["initial_prompt"]);
+    expect(url.searchParams.get("initial_prompt")).toBe(prompt);
   });
 });

@@ -36,7 +36,25 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     private var lastStatusItemClick: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Pinned light, in dark mode too. The 2026-08 design is a light system
+        // — a paper canvas with white cards and one accent — and the palette
+        // carries meaning that inverting destroys: an orange warning tint at 5%
+        // over white is a hint, the same tint over near-black is invisible, and
+        // "success is neutral, colour means something wants you" only reads on
+        // a light ground.
+        //
+        // Pinning rather than dropping the adaptive colours is deliberate. Half
+        // the app would otherwise stay adaptive through `.textBackgroundColor`,
+        // `.ultraThinMaterial` and every `Color.primary` opacity, so a dark-mode
+        // user got light cards on a dark canvas with black-on-black hairlines —
+        // which is what this replaced. One appearance for every window and
+        // panel is the only version that is coherent.
+        //
+        // A real dark palette is a design deliverable, not a colour flip; when
+        // one exists, this line is what it replaces.
+        NSApp.appearance = NSAppearance(named: .aqua)
         NSApp.setActivationPolicy(.accessory)
+        restoreMainWindowIfItWasOpen()
         configurePopover()
         configureStatusItem()
         observeStatusPresentation()
@@ -153,14 +171,35 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
     /// switcher (`MenuBarPopoverView`), not the full-featured `RootView` it
     /// used to host. Settings/History/Memory/Agent history all moved to
     /// `mainWindowController`'s real window instead, opened from this view's
-    /// gear button. Widened/heightened from the original 264x246 (see
-    /// `MenuBarPopoverView`'s own sizing note) so the now vertically-stacked
-    /// mode cards have room and don't wrap their subtitle text.
+    /// gear button. 300pt wide per the redesign handoff (§05) — the mode cards
+    /// that needed 320 are one row of three cells now, and the space went to
+    /// the 进行中 / 最近 sections instead.
+    /// Reopens the main window if it was open when the app last quit.
+    ///
+    /// Standard macOS behaviour, and the app did not have it: because the app
+    /// is `.accessory`, quitting with the window open and relaunching left the
+    /// user with only a menu-bar icon and no sign of where their window went.
+    /// Restoring it is also what makes an update-and-relaunch cycle
+    /// non-disruptive — the window comes back where it was rather than
+    /// requiring a trip through the popover.
+    private func restoreMainWindowIfItWasOpen() {
+        guard UserDefaults.standard.bool(forKey: Self.mainWindowOpenKey) else { return }
+        showMainWindow()
+    }
+
+    static let mainWindowOpenKey = "mainWindowWasOpen"
+
     private func configurePopover() {
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 320, height: 384)
+        popover.contentSize = NSSize(width: 300, height: 384)
         popover.delegate = self
+        // `NSApp.appearance` does not reach a popover's own window, so in dark
+        // mode the popover drew a light chrome around content whose `.primary`
+        // still resolved to white — white text on a white sheet, everything
+        // unreadable except the one label sitting on the accent fill. Set here
+        // as well, so the two halves agree.
+        popover.appearance = NSAppearance(named: .aqua)
         popover.contentViewController = NSHostingController(
             rootView: MenuBarPopoverView(model: model) { [weak self] in
                 self?.showMainWindow()
@@ -180,6 +219,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         } else {
             controller = MainWindowController(model: model)
             controller.onWindowWillClose = {
+                UserDefaults.standard.set(false, forKey: Self.mainWindowOpenKey)
                 // Deferred: the window is still on screen during
                 // `windowWillClose`, and flipping the policy mid-close can
                 // leave a stale Dock icon behind.
@@ -191,6 +231,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         }
 
         NSApp.setActivationPolicy(.regular)
+        UserDefaults.standard.set(true, forKey: Self.mainWindowOpenKey)
         controller.show()
     }
 
@@ -262,13 +303,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     init(model: AppModel) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "OpenType"
-        window.minSize = NSSize(width: 420, height: 480)
+        // The sidebar runs up under the traffic lights and supplies its own
+        // 52pt header strip, so a titlebar of its own would be a second one.
+        // The name is in the sidebar's brand row; repeating it in chrome above
+        // that row says it twice and costs the height of a list row.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: 460, height: 480)
         window.isReleasedWhenClosed = false
         window.center()
         window.contentViewController = NSHostingController(

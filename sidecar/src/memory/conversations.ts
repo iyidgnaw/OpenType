@@ -9,6 +9,15 @@ export interface Conversation {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /**
+   * The most recent message in the thread, whoever wrote it.
+   *
+   * The list row's second line. Without it the list shows only what the user
+   * asked and never what came back, so every row reads as an unanswered
+   * question — which is exactly wrong for a list whose whole job is telling
+   * you which threads got somewhere.
+   */
+  preview?: string;
 }
 
 export interface ConversationMessage {
@@ -29,6 +38,8 @@ interface ConversationRow {
   title: string;
   createdAt: number;
   updatedAt: number;
+  /** Only selected by `listConversations`; absent elsewhere. */
+  preview?: string;
 }
 
 interface ConversationMessageRow {
@@ -99,12 +110,27 @@ export class ConversationStore {
   listConversations(kind: ConversationKind): Conversation[] {
     const rows = this.db
       .query(
-        `SELECT id, kind, title, createdAt, updatedAt FROM conversations
-         WHERE kind = ?
-         ORDER BY updatedAt DESC, id DESC`
+        // The newest message per conversation, by a correlated subquery rather
+        // than a join + GROUP BY: the list is short, this reads as what it
+        // means, and it keeps the ORDER BY on the outer rows where it belongs.
+        `SELECT c.id, c.kind, c.title, c.createdAt, c.updatedAt,
+                (SELECT m.content FROM conversation_messages m
+                  WHERE m.conversationId = c.id
+                  ORDER BY m.createdAt DESC, m.id DESC LIMIT 1) AS preview
+           FROM conversations c
+          WHERE c.kind = ?
+          ORDER BY c.updatedAt DESC, c.id DESC`
       )
       .all(kind) as ConversationRow[];
-    return rows;
+    return rows.map((row) => ({
+      ...row,
+      // Collapsed and clipped here rather than in the view: a preview is one
+      // line by definition, and a markdown answer's newlines would otherwise
+      // arrive as a row three times its height.
+      preview: row.preview
+        ? row.preview.replace(/\s+/gu, " ").trim().slice(0, 140)
+        : undefined,
+    }));
   }
 
   /** Fetches one conversation with its full, chronologically-ordered message

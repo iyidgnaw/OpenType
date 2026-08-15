@@ -39,12 +39,22 @@ function toolNamesIn(set: ToolSet): Set<string> {
  * whichever set actually owns that tool name.
  */
 export function mergeToolSets(...sets: ToolSet[]): ToolSet {
-  const openAiTools = sets.flatMap((set) => set.openAiTools);
-  const setsByToolName = new Map<string, ToolSet>();
-  for (const set of sets) {
-    for (const name of toolNamesIn(set)) {
-      setsByToolName.set(name, set);
-    }
+  /**
+   * Read through to the sets on every access rather than snapshotting them
+   * here. MCP tools arrive *after* this merge runs: `startMcpConnections`
+   * returns a set immediately and fills it in as servers finish connecting, so
+   * a merge that flattened once at assembly time would hand the model a list
+   * that could only ever be empty of MCP tools -- the set would look present
+   * and be permanently useless, which is worse than the boot hang it replaced
+   * because nothing would appear broken.
+   */
+  function currentTools(): unknown[] {
+    return sets.flatMap((set) => set.openAiTools);
+  }
+
+  /** Resolved per call for the same reason: ownership is not known up front. */
+  function owner(name: string): ToolSet | undefined {
+    return sets.find((set) => toolNamesIn(set).has(name));
   }
 
   async function callTool(
@@ -52,14 +62,19 @@ export function mergeToolSets(...sets: ToolSet[]): ToolSet {
     args: unknown,
     signal?: AbortSignal
   ): Promise<{ content: string }> {
-    const owningSet = setsByToolName.get(name);
+    const owningSet = owner(name);
     if (!owningSet) {
       throw new Error(`Unknown tool: ${name}`);
     }
     return owningSet.callTool(name, args, signal);
   }
 
-  return { openAiTools, callTool };
+  return {
+    get openAiTools() {
+      return currentTools();
+    },
+    callTool,
+  };
 }
 
 /**

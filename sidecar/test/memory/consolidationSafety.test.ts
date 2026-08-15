@@ -31,12 +31,18 @@ function candidatesResponse(candidates: unknown[]): string {
   return JSON.stringify({ candidates });
 }
 
+/**
+ * Seeds `count` events consolidation may actually read. `"agent"`, not
+ * `"transcribe"`: transcribe events are excluded from every pass as a privacy
+ * contract (`CONSOLIDATION_EXCLUDED_MODES`), so seeding them here would make
+ * these atomicity tests silently exercise an empty event set.
+ */
 function seedEvents(store: MemoryStore, count: number): number[] {
   const ids: number[] = [];
   for (let i = 0; i < count; i++) {
     ids.push(
       store.recordEpisodicEvent({
-        mode: "transcribe",
+        mode: "agent",
         rawTranscript: `raw ${i}`,
         correctedTranscript: `corrected ${i}`,
         effectiveInput: null,

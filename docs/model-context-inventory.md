@@ -11,7 +11,8 @@
 > 这不是可选的收尾工作——正是因为过去没有这条规则，
 > 才出现了 §4 里记录的那批"文档声称存在但代码里没有"的注入点。
 
-核对于 `50a7d0c`（2026-08-14），含 dsh 借鉴计划 T1–T9 全部改动。
+核对于 `50a7d0c`（2026-08-14），含 dsh 借鉴计划 T1–T9 全部改动；
+2026-08-14 产品批次 P1-7（记忆层清理 + episodic 补全 + 自动整理）已并入 §1.2 与 §4。
 
 ---
 
@@ -25,7 +26,43 @@ sidecar 里一共只有三处向模型发请求。
 | `POST /agent/run` | `AGENT_SYSTEM_PROMPT` | 摘要成一段文本（`formatPriorTurns`） | 全量合并集 | 10 |
 | `POST /transcribe/correct` | `CORRECTION_SYSTEM_PROMPT` | 无 | 无 | 1（单次调用） |
 
-`transcribe` 模式的直接转写路径**完全不调模型**（纯 MLX-Whisper 透传），不在本清单内。
+`transcribe` 模式的直接转写路径**完全不调模型**，不在本清单内。注意它自 2026-08-14 的 P0-1 起
+不再是「纯透传」：`/asr/transcribe` 会读实体词典，给本地 Whisper 传一段 `initial_prompt`
+偏置解码，并对转写结果做确定性的 alias → canonical 替换（`src/asr/dictionaryBias.ts`）。
+同一天的 P1-7 又让它**写**记忆库：每次成功且非空的转写追加一条 `mode: "transcribe"` 的
+episodic 事件（`/oneshot/ask` 同样追加一条 `mode: "ask"`）。这条路径因此既消费也供给记忆库，
+但仍然一次模型请求都不发——本清单统计的是后者。
+
+### 1.2 第四条路径：记忆整理（唯一不由用户请求触发的模型调用）
+
+`runConsolidation`（`src/memory/consolidator.ts`）也发模型请求，走
+`buildConsolidationPrompt` 组装的**单个 JSON 文档**（不走 §1.1 的消息装配、没有系统提示、
+没有工具）：一段 instruction + 现有实体词典的 `{id, canonicalTerm, aliases}` + 最多 200 条
+未整理事件的 `{id, mode, rawTranscript, correctedTranscript}` 四个字段。
+
+**`mode: "transcribe"` 的事件不在其中，这是本清单里最重要的一条排除。** 「纯听写不经过任何
+LLM」是写在 README、`USER_GUIDE.md` §14 和 `CLAUDE.md` 模式表里的产品承诺，而这里的**记忆整理**
+是一次真实的模型调用——**延迟发送也是发送**，「只在整理时才发」不构成豁免。
+
+（别和听写的 `轻整理` 档搞混：那一档只有本机固定规则，没有任何模型调用，见
+`2026-08-09-current-system-state.md` §8。本节的「整理」自始至终指的是上面这条记忆整理路径。）排除点在
+`MemoryStore.consolidationCandidates()`（唯一的选取查询，由
+`CONSOLIDATION_EXCLUDED_MODES` 定义），**不是**在 `buildConsolidationPrompt` 里过滤：被排除的
+文本根本不会进入 `runConsolidation` 的作用域，因此之后无论谁改提示词组装、门控还是写入阶段，
+都无法把它重新放到模型面前。听写事件仍然照常落库（本地留存，供 P2-12 统计面板使用，也为将来
+可能的显式 opt-in 保留原料），只是永远不会被读去发给模型。
+
+它过去只由 `POST /memory/consolidate-now` 和 `consolidate_memory_now` 工具触发，也就是**总有
+一个人在按按钮**，所以此前被算在清单之外。P1-7 之后不再是这样：
+`src/memory/startupConsolidation.ts` 在 sidecar 开始服务 5 分钟后查一次
+`shouldConsolidate`（≥12h + ≥5 条**可整理**事件，`consolidationCandidateCount()` 已按上面的
+规则排除听写），满足就自己跑一次。**这是目前唯一一处没有任何用户动作、模型也会看到内容的
+地方**，因此必须在本清单里点名——不过在排除听写之后，它送出去的只有 `问答`/`Agent` 的记录，
+而这两类文本本来就是用户主动交给同一个模型的，所以自动触发没有扩大任何数据的去向。
+
+值得注意的是事件里的 `applicationName` **不在**这四个字段里——占位符
+（`"OpenType Transcribe"`/`"OpenType Ask"`/`"OpenType Agent"`）永远到不了模型，
+这正是 P1-7 决定不为它改协议的理由。
 
 ### 1.1 消息数组的实际装配
 
@@ -99,7 +136,7 @@ agent 就回一个路径了事。用户开口就是因为想让东西出现在�
 ### 2.3 `CORRECTION_SYSTEM_PROMPT`（`src/transcribe/prompts.ts:14`）
 
 **模型看到什么**：923 字符的固定文本，指导它替换一段选中文本。
-user 消息由 `buildUserContent`（`src/transcribe/routes.ts:38`）拼成五个块、`\n\n` 分隔：
+user 消息由 `buildUserContent`（`src/transcribe/routes.ts:110`）拼成五个块、`\n\n` 分隔：
 
 ```
 Full text:
@@ -159,6 +196,11 @@ What you know about the user: The owner's name is Diyi; The owner prefers concis
 经 agent/context 流程记录的事实（origin `untrusted`/`agent`/`system`）**永不注入**——
 它们可能源自不可信上下文，逐字注入每一次 prompt 正是要封堵的投毒路径。
 它们仍可在 `GET /memory/owner-facts` 管理面上看到并删除。
+用户读过并认可之后，也可以通过 `PATCH /memory/owner-facts/:id`（记忆页的「确认」）
+把 origin 提升成 `owner`，此后这条事实才开始参与注入——**提升是单向的**，
+这个接口没有降级路径，所以 agent 无法借它把自己写的东西标成用户亲口说的。
+留这条出口是因为：标记的意义在于让人复核，而复核之后清不掉的标记就只是噪音，
+用户很快会学会无视它——那正好抵消了当初记录来源的全部收益。
 
 **Token 成本**：**无条件注入全部** owner 事实（不做相关性匹配——单用户场景下事实数量少，
 v1 判断不值得为自由文本建相关性系统）。成本随事实条数线性增长且**没有上限**。
@@ -275,6 +317,21 @@ Use opentype__read_file or opentype__grep on <path> to read the rest.
 目录 0700、文件 0600 且以 `wx` 独占创建（防符号链接重定向）。
 工具名与 runId 都经消毒后才进路径。
 
+**被拒绝的调用也走同一条回灌路径**（P1-6）。自 `/agent/run` 接上
+`createPromptingApprovalPolicy` 起，`withApproval` 那条一直存在但从未被触发的拒绝文案
+真的会到达模型，形式是一条普通的 `role: "tool"` 结果，而不是异常：
+
+```
+Tool call to opentype__bash was denied by the approval policy: the user denied it.
+```
+
+四种结局各有自己的后半句（`the user denied it` / `the request was withdrawn` /
+`no approval channel was available`），这个区分是有用途的——「联系不上你」和「你说了不」
+对模型意味着不同的下一步。**必须是工具结果而不是抛错**：拒绝是为了让用户在这一刻掌舵，
+把它变成崩溃恰好取消了掌舵本身。
+
+**Token 成本**：约 20 token，且只在被拒绝时出现；安全调用不产生任何额外上下文。
+
 ---
 
 ### 3.7 重复调用劝告（`src/agent/repeatGuard.ts`，仅 agent）
@@ -332,24 +389,24 @@ Which file did you mean?
 
 | 机制 | 真实状态 |
 |---|---|
-| `AgentMemoryStore.entriesForPrompt()` | 仅 `Tests/OpenTypeTests/OpenTypeTests.swift:493` 调用，**无生产调用方** |
-| `AgentMemoryStore.memoriesForPrompt()` | 仅测试（`:446`）调用 |
-| `AgentMemoryStore.profileContextForPrompt()` | 仅测试（`:373`）调用 |
-| `LocalMemoryRetriever.retrieve()` | 只被 `AgentMemoryStore.swift:243` 调用，而那条链的唯一入口是上面三个仅测试可达的方法 ⇒ **整条语义检索链在生产路径上不可达** |
+| `AgentMemoryStore.entriesForPrompt()` | ~~仅测试调用~~ **已删除**（P1-7） |
+| `AgentMemoryStore.memoriesForPrompt()` | ~~仅测试调用~~ **已删除**（P1-7） |
+| `AgentMemoryStore.profileContextForPrompt()` | ~~仅测试调用~~ **已删除**（P1-7） |
+| `LocalMemoryRetriever.retrieve()` | ~~整条语义检索链在生产路径上不可达~~ **整个文件已删除**（P1-7），连同只有它读的 `memory_embeddings` 表和每条事件的 NLEmbedding 向量 |
 | "约 12 条近期任务注入 Agent 上下文" | **不存在**。`/agent/run` 的请求体只有 `task + context + conversationId + runId`；Swift 侧从不发送近期任务 |
 | "About Me" 用户档案 | Settings 编辑 UI 已移除 ⇒ 既不可填也不注入；`updateOwnerProfile`/`ownerProfile` 仅为旧数据清洗保留 |
 
-**结论**：Swift 侧的整个记忆读取层（`AgentMemoryStore` 的 prompt 相关方法 +
-`LocalMemoryRetriever` 的向量检索）在生产路径上是**死代码**。
-真正注入模型的记忆只有 sidecar 侧的两条线——§3.1 的实体词条和 §3.2 的 owner 事实。
-
-这不是本次改动要修的问题（"删掉"还是"接上"是一个独立决策），但必须**记录在案**。
+**结论**：Swift 侧的整个记忆读取层曾经是生产路径上的死代码；2026-08-14 的 P1-7 **把它删了**，
+而不是接上——"删掉"还是"接上"这个独立决策选了前者，理由是真正注入模型的记忆只有 sidecar 侧的
+两条线（§3.1 的实体词条、§3.2 的 owner 事实），留着第二套只会让下一个读代码的人再判断一次。
+`AgentMemoryStore` 本身保留：任务历史、已学到的偏好、旧数据清洗、历史重置都还在用，
+只是没有一条通向 prompt 的路。
 
 补充两点核对结果：
 
-- `CLAUDE.md` 对这件事的描述是**准确的**——它已经自我更正过，明说这层"在读取侧基本是惰性的"、
+- `CLAUDE.md` 对这件事的描述当时是**准确的**——它已经自我更正过，明说这层"在读取侧基本是惰性的"、
   "~12 条近期任务注入 Agent 上下文"这个说法"在接线的代码里不存在"。本节是对它的**独立验证**，
-  不是对它的更正。
+  不是对它的更正。P1-7 之后它改成了"读取侧已删除"，与上表一致。
 - 一处**小漂移**：`CLAUDE.md` 说 `/agent/run` 请求体是 `task + selectedText + conversationId`，
   实际是 `task + context + conversationId + runId`（`runId` 是进度面板那批改动加的，
   字段名是 `context` 不是 `selectedText`）。

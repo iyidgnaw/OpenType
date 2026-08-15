@@ -1,12 +1,84 @@
 import type { Route } from "../router";
 import type { OneShotChatFn } from "../oneshot/client";
+import { upsertEntityTerm } from "../memory/consolidator";
+import type { MemoryStore } from "../memory/MemoryStore";
 import { CORRECTION_SYSTEM_PROMPT } from "./prompts";
+import { shouldLearnCorrection } from "./learnCorrection";
 
 interface CorrectRequestBody {
   fullText?: string;
   selectionStart?: number;
   selectionEnd?: number;
   instruction?: string;
+}
+
+export interface TranscribeRoutesDeps {
+  /**
+   * When present, gate-passing corrections are learned into the entity
+   * dictionary (P0-2). Optional: without it the endpoint behaves exactly as
+   * it did before learning existed.
+   */
+  store?: MemoryStore;
+}
+
+/** What a correction taught the dictionary, echoed back for UI ("已记住"). */
+interface LearnedTerm {
+  canonicalTerm: string;
+  alias: string;
+}
+
+/**
+ * Confidence for a correction the owner made by hand. Deliberately below the
+ * 1.0 that an explicit "记住 X" (`remember_fact`) writes -- fixing one word in
+ * one transcript is weaker evidence than asking for it to be remembered --
+ * and above what the dreaming pass typically infers on its own.
+ */
+const CORRECTION_CONFIDENCE = 0.8;
+
+/**
+ * Writes `alias -> canonicalTerm` into `entity_terms`, reusing
+ * `upsertEntityTerm` -- the same merge-by-canonical-or-alias path
+ * `remember_fact` and the dreaming pass use, so a correction folds into an
+ * existing term instead of starting a rival row.
+ *
+ * Best-effort by contract: the correction itself already succeeded by the
+ * time this runs, so a broken/unwritable memory DB must degrade to "learned
+ * nothing", never to a failed request. Returns `null` when nothing was
+ * learned, for any reason.
+ */
+function learnCorrection(
+  store: MemoryStore,
+  selectedText: string,
+  replacement: string
+): LearnedTerm | null {
+  if (!shouldLearnCorrection(selectedText, replacement)) {
+    return null;
+  }
+
+  const alias = selectedText.trim();
+  try {
+    const { term } = upsertEntityTerm(store, store.allTerms(), {
+      canonicalTerm: replacement.trim(),
+      aliases: [alias],
+      category: "term",
+      confidence: CORRECTION_CONFIDENCE,
+      sourceEventIds: [],
+      // The owner corrected this by hand in their own text, so it is
+      // owner-confirmed (P1-12) -- unlike `remember_fact`, which runs inside
+      // the agent loop where content can originate from untrusted context.
+      origin: "owner",
+    });
+    // Report the row that now exists rather than the raw replacement: when
+    // the replacement matched an existing term only by alias, the dictionary
+    // says `alias -> that term's canonical`, and that is what was learned.
+    return { canonicalTerm: term.canonicalTerm, alias };
+  } catch (err) {
+    console.error(
+      "[transcribe/correct] failed to learn the correction into the entity dictionary; returning the correction anyway.",
+      err
+    );
+    return null;
+  }
 }
 
 /**
@@ -62,7 +134,8 @@ function buildUserContent(
 
 async function handleCorrect(
   req: Request,
-  chat: OneShotChatFn
+  chat: OneShotChatFn,
+  deps: TranscribeRoutesDeps
 ): Promise<Response> {
   const body = (await req.json()) as CorrectRequestBody;
   const fullText = body.fullText ?? "";
@@ -95,7 +168,18 @@ async function handleCorrect(
   ]);
 
   const replacement = (result.content ?? "").trim();
-  return Response.json({ replacement });
+
+  const learned = deps.store
+    ? learnCorrection(
+        deps.store,
+        fullText.slice(selectionStart, selectionEnd),
+        replacement
+      )
+    : null;
+
+  // `learned` is omitted entirely rather than sent as null, so a caller can
+  // test for the key's presence.
+  return Response.json(learned ? { replacement, learned } : { replacement });
 }
 
 /**
@@ -104,16 +188,27 @@ async function handleCorrect(
  * (matching JS string indexing exactly, which in turn matches
  * `NSString`/`NSRange` on the Swift side -- see `ReviewPanelController.swift`)
  * and a spoken correction instruction, and returns just the replacement text
- * for that span. Deliberately takes a bare `chat` function rather than a
- * `MemoryStore`/concrete client, same DI shape as `buildOneShotRoutes`, so
- * this stays pure, dependency-light, unit-testable logic.
+ * for that span.
+ *
+ * `chat` is a bare function rather than a concrete client, same DI shape as
+ * `buildOneShotRoutes`. `deps.store` is *optional*: with it, a correction
+ * that looks like a term fix is also learned into the entity dictionary
+ * (P0-2, `learnCorrection.ts` decides which ones qualify) so the next
+ * transcription gets that term right; without it the endpoint is the same
+ * pure, dependency-light correction logic it has always been, which is also
+ * how most of its own tests exercise it. Learning is strictly best-effort --
+ * it happens after the correction has already succeeded and can only add a
+ * `learned` field to the response, never fail the request.
  */
-export function buildTranscribeRoutes(chat: OneShotChatFn): Route[] {
+export function buildTranscribeRoutes(
+  chat: OneShotChatFn,
+  deps: TranscribeRoutesDeps = {}
+): Route[] {
   return [
     {
       method: "POST",
       path: "/transcribe/correct",
-      handler: (req) => handleCorrect(req, chat),
+      handler: (req) => handleCorrect(req, chat, deps),
     },
   ];
 }

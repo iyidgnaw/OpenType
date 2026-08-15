@@ -56,68 +56,65 @@ struct RootView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HeaderView(model: model, configuration: model.configuration)
-
-            Group {
-                if model.needsProviderOnboarding {
-                    // First-run setup wizard (spec: "if the user hasn't
-                    // configured Whisper or LLM yet, opening the app should
-                    // enter a setup wizard") -- takes over the whole tab
-                    // content area, in place of the normal Home tab, until
-                    // both are configured. See `OnboardingWizardView`'s doc
-                    // comment (`ProviderSetupViews.swift`) for why no
-                    // explicit tab switch is needed once that happens.
-                    OnboardingWizardView(model: model)
-                } else {
-                    switch model.selectedTab {
-                    case .home:
-                        HomeView(model: model, configuration: model.configuration)
-                    case .history:
-                        HistoryView(model: model, history: model.history)
-                    case .qa:
-                        QAConversationsView(model: model)
-                    case .agent:
-                        AgentConversationsView(model: model)
-                    case .settings:
-                        SettingsView(
-                            model: model,
-                            configuration: model.configuration,
-                            agentMemory: model.agentMemory
-                        )
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if !model.needsProviderOnboarding {
-                TabBar(model: model)
-            }
-        }
-        .frame(
-            minWidth: 420,
-            idealWidth: 460,
-            maxWidth: .infinity,
-            minHeight: 480,
-            idealHeight: 600,
-            maxHeight: .infinity
-        )
-        .background {
-            ZStack {
-                Color(nsColor: .windowBackgroundColor)
-                LinearGradient(
-                    colors: [
-                        AppAccent.primary.opacity(0.045),
-                        AppAccent.secondary.opacity(0.018),
-                        .clear
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .center
+        Group {
+            if model.needsProviderOnboarding {
+                // The first-run wizard still takes the whole window: there is
+                // nothing to navigate between until a provider exists, and a
+                // sidebar offering four destinations that all say "configure
+                // something first" would be four ways to be told no.
+                OnboardingWizardView(model: model)
+            } else {
+                SidebarShell(
+                    model: model,
+                    showsDetail: model.hasOpenDetail,
+                    list: { destinationList },
+                    detail: { destinationDetail }
                 )
             }
         }
-        .tint(AppAccent.primary)
+        .frame(
+            minWidth: DS.Size.windowMinWidth,
+            idealWidth: 1120,
+            maxWidth: .infinity,
+            minHeight: 480,
+            idealHeight: 720,
+            maxHeight: .infinity
+        )
+        .background(DS.Colour.canvas)
+        .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
+    }
+
+    /// The middle column: whatever the selected destination lists.
+    @ViewBuilder
+    private var destinationList: some View {
+        switch model.selectedTab {
+        case .sessions:
+            SessionsListColumn(model: model)
+        case .dictation:
+            DictationColumn(model: model, history: model.history)
+        case .memory:
+            MemoryColumn(model: model)
+        case .settings:
+            SettingsColumn(model: model)
+        }
+    }
+
+    /// The right column. 记忆 and 听写 are single pages that fill the width
+    /// themselves, so they leave it empty and `hasOpenDetail` keeps the narrow
+    /// layout from pushing an empty panel over them.
+    @ViewBuilder
+    private var destinationDetail: some View {
+        switch model.selectedTab {
+        case .sessions:
+            SessionThreadColumn(model: model) { text, conversation in
+                model.submitTypedTurn(text, in: conversation)
+            }
+        case .settings:
+            SettingsDetailColumn(model: model)
+        case .dictation, .memory:
+            Color.clear
+        }
     }
 }
 
@@ -712,6 +709,10 @@ private struct HistoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            UsageStatsPanel(summary: model.usageSummary)
+                .padding(.horizontal, 16)
+                .padding(.top, 13)
+
             if model.history.entries.isEmpty {
                 VStack(spacing: 10) {
                     ZStack {
@@ -752,6 +753,144 @@ private struct HistoryView: View {
                 .scrollIndicators(.hidden)
             }
         }
+        // Recomputed from the audit trail on open rather than kept live: the
+        // figures are a week's worth, so they never change while the user is
+        // looking at them except by dictating — which is what the newest-entry
+        // watch below catches.
+        .onAppear { model.refreshUsageStats() }
+        // Keyed on the newest entry's identity, not on `entries.count`:
+        // `HistoryStore` caps at 100 and drops the oldest, so past that cap the
+        // count never changes again and a count-watch would silently stop
+        // refreshing for exactly the users who dictate most.
+        .onChange(of: model.history.entries.first?.id) { _ in
+            model.refreshUsageStats()
+        }
+    }
+}
+
+/// The local statistics panel (P2-12): one week of this app's own numbers,
+/// computed by `UsageStats` from the audit trail that was already on disk.
+///
+/// It sits at the top of History rather than on Home or in Settings because it
+/// is the same thing History already is — a look back at deliveries that have
+/// happened — only aggregated. Home is the pre-flight surface (is the shortcut
+/// live, which mode am I in, what did I just say), and putting a week's
+/// retrospective above the mode picker would push the one control the user came
+/// for further down. Settings is for things you change; nothing here is
+/// changeable.
+private struct UsageStatsPanel: View {
+    let summary: UsageStats.Summary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 6) {
+                Text(OpenTypeL10n.text("最近 7 天", english: "Last 7 days"))
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer(minLength: 0)
+                Text(OpenTypeL10n.text(
+                    "\(summary.deliveries) 次交付",
+                    english: "\(summary.deliveries) deliveries"
+                ))
+                .font(.system(size: 10))
+                .foregroundStyle(OpenTypeTheme.subtleText)
+            }
+
+            HStack(alignment: .top, spacing: 0) {
+                UsageStatsFigure(
+                    value: "\(summary.wordsDictated)",
+                    label: OpenTypeL10n.text("说出的字数", english: "Words dictated"),
+                    note: OpenTypeL10n.text(
+                        "中文按字、英文按词",
+                        english: "CJK by character, Latin by word"
+                    )
+                )
+                UsageStatsFigure(
+                    value: Self.latencyText(summary.averageEndToEndLatency),
+                    label: OpenTypeL10n.text("平均等待", english: "Average wait"),
+                    note: OpenTypeL10n.text(
+                        "松开快捷键到出字",
+                        english: "Key release to delivered text"
+                    )
+                )
+                // Named as a rate, and paired with the reason it is on the
+                // panel at all: it is the number that should keep falling as
+                // the entity dictionary learns what this user says (P0-1/P0-2).
+                // A bare ratio would read as a static property of the app.
+                UsageStatsFigure(
+                    value: Self.rateText(summary),
+                    label: OpenTypeL10n.text(
+                        "每 100 字纠错",
+                        english: "Corrections per 100 words"
+                    ),
+                    note: OpenTypeL10n.text(
+                        "词典学得越多应越低",
+                        english: "Should fall as the dictionary learns"
+                    )
+                )
+            }
+
+            Text(OpenTypeL10n.text(
+                "全部由本机审计日志算出，不联网、不上传。中英混说时字数是两种单位的合计，适合和自己过去比，不适合跨语言比较。",
+                english: """
+                    Computed on this Mac from the local audit log — nothing is \
+                    uploaded. For mixed Chinese/English speech the word total \
+                    blends two units, so compare it with your own past numbers \
+                    rather than across languages.
+                    """
+            ))
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .openTypeSurface(cornerRadius: 14)
+    }
+
+    /// "—" for an absent measurement, never "0.0 秒": a week whose sessions all
+    /// predate `ImmutableAuditEvent.recordingEndedAt` has nothing to report,
+    /// and "0.0 秒" would read as "instant".
+    private static func latencyText(_ latency: TimeInterval?) -> String {
+        guard let latency else { return "—" }
+        return OpenTypeL10n.text(
+            String(format: "%.1f 秒", latency),
+            english: String(format: "%.1fs", latency)
+        )
+    }
+
+    /// "—" when the week has no denominator at all. `Summary` reports the rate
+    /// as `0` in that case (nothing was dictated, so nothing was corrected),
+    /// but "0.0" printed under 「每 100 字纠错」 next to 「0 字」 reads as a perfect
+    /// score rather than as an empty week — the one reading the panel must not
+    /// invite.
+    private static func rateText(_ summary: UsageStats.Summary) -> String {
+        guard summary.wordsDictated > 0 else { return "—" }
+        return String(format: "%.1f", summary.correctionsPerHundredWords)
+    }
+}
+
+private struct UsageStatsFigure: View {
+    let value: String
+    let label: String
+    let note: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+            Text(label)
+                .font(.system(size: 10.5))
+                // Three columns share a 420pt-minimum window, so 「Corrections
+                // per 100 words」 has to wrap rather than truncate — a metric
+                // labelled 「Corrections per 100…」 is a metric nobody can read.
+                .fixedSize(horizontal: false, vertical: true)
+            Text(note)
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1390,6 +1529,10 @@ private struct SettingsView: View {
                     LLMProviderSetupContent(model: model)
                 }
 
+                SettingsSection(OpenTypeL10n.text("MCP 服务器", english: "MCP Servers")) {
+                    McpServerPanelView(model: model)
+                }
+
                 SettingsSection("连接与权限") {
                     HStack {
                         Label(
@@ -1612,23 +1755,34 @@ private struct SettingsView: View {
     }
 }
 
-/// Read-only display of the sidecar's memory system: the current entity
-/// dictionary (`GET /memory/terms`) and the consolidation run log
-/// (`GET /memory/consolidation-runs`) — the human-review surface described
-/// in the memory design doc §4.1. Purely a convenience view: it refreshes
-/// itself on appear and never mutates anything.
+/// The sidecar memory system's management surface (memory design doc §4.1,
+/// made editable by P0-4): the entity dictionary (`GET /memory/terms`, plus
+/// `POST`/`PUT`/`DELETE /memory/terms`), the free-text owner facts
+/// (`GET`/`DELETE /memory/owner-facts`), and the consolidation run log
+/// (`GET /memory/consolidation-runs`). Every row shows its `origin`, because
+/// an `untrusted` entry — one the agent wrote from possibly-hostile context
+/// (P1-12) — is exactly what a user comes here to find and delete.
 private struct MemoryPanelView: View {
     @ObservedObject var model: AppModel
+    @State private var newCanonicalTerm = ""
+    @State private var newAliases = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(OpenTypeL10n.text(
-                "本地记忆服务记录的实体词典与最近的整理记录，仅供查看，不可在此编辑。",
-                english: "Entity dictionary and recent consolidation runs recorded by the local memory service. Read-only."
+                "本地记忆服务记录的实体词典、关于你的记忆条目与最近的整理记录。词条可以直接在这里增删改；改动立即生效，会影响后续识别与纠错。",
+                english: "Entity dictionary, remembered facts, and recent consolidation runs from the local memory service. Terms are editable here, and edits take effect immediately for later recognition and correction."
             ))
             .font(.system(size: 9.5))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+
+            if let error = model.memoryEditError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 Label(
@@ -1637,36 +1791,55 @@ private struct MemoryPanelView: View {
                 )
                 .font(.system(size: 10.5, weight: .semibold))
 
+                HStack(spacing: 6) {
+                    TextField(
+                        OpenTypeL10n.text("词条", english: "Term"),
+                        text: $newCanonicalTerm
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10))
+
+                    TextField(
+                        OpenTypeL10n.text("别名，用逗号分隔", english: "Aliases, comma-separated"),
+                        text: $newAliases
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 10))
+
+                    Button(OpenTypeL10n.text("添加", english: "Add")) {
+                        addTerm()
+                    }
+                    .controlSize(.small)
+                    .disabled(newCanonicalTerm.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+
                 if model.memoryTerms.isEmpty {
                     Text(OpenTypeL10n.text("暂无记录", english: "No entries yet"))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(model.memoryTerms) { term in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(alignment: .firstTextBaseline) {
-                                Text(term.canonicalTerm)
-                                    .font(.system(size: 10.5, weight: .medium))
-                                Spacer()
-                                Text(term.category)
-                                    .font(.system(size: 8.8, weight: .medium))
-                                    .foregroundStyle(.tertiary)
-                                Text(String(format: "%.0f%%", term.confidence * 100))
-                                    .font(.system(size: 8.8))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            if !term.aliases.isEmpty {
-                                Text(term.aliases.joined(separator: " · "))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            Color.primary.opacity(0.028),
-                            in: RoundedRectangle(cornerRadius: 8)
-                        )
+                        MemoryTermRow(model: model, term: term)
+                    }
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    OpenTypeL10n.text("关于你的记忆", english: "Remembered Facts"),
+                    systemImage: "person.text.rectangle"
+                )
+                .font(.system(size: 10.5, weight: .semibold))
+
+                if model.memoryOwnerFacts.isEmpty {
+                    Text(OpenTypeL10n.text("暂无记录", english: "No entries yet"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.memoryOwnerFacts) { fact in
+                        MemoryOwnerFactRow(model: model, fact: fact)
                     }
                 }
             }
@@ -1753,12 +1926,1072 @@ private struct MemoryPanelView: View {
         }
     }
 
+    private func addTerm() {
+        let canonical = newCanonicalTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonical.isEmpty else { return }
+        let aliases = MemoryTermRow.parseAliases(newAliases)
+        Task {
+            if await model.createMemoryTerm(canonicalTerm: canonical, aliases: aliases) {
+                newCanonicalTerm = ""
+                newAliases = ""
+            }
+        }
+    }
+
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+/// One entity-dictionary row: a compact read view that flips in place into an
+/// editor (canonical term, aliases, confidence) plus a delete. Edit state is
+/// local to the row and seeded from `term` at the moment editing starts, so a
+/// background refresh of the list can't rewrite half-typed input.
+private struct MemoryTermRow: View {
+    @ObservedObject var model: AppModel
+    let term: EntityTermSummary
+
+    @State private var isEditing = false
+    @State private var draftCanonicalTerm = ""
+    @State private var draftAliases = ""
+    @State private var draftConfidence = 1.0
+    @State private var showingDeleteConfirmation = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if isEditing {
+                editor
+            } else {
+                readOnlyRow
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color.primary.opacity(0.028),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        // Deleting a term is irreversible — `DELETE /memory/terms/:id` drops the
+        // row and this app has no undo for it — so it gets the same confirm
+        // step Settings puts in front of a history reset.
+        .confirmationDialog(
+            OpenTypeL10n.text(
+                "删除词条「\(term.canonicalTerm)」？",
+                english: "Delete the term “\(term.canonicalTerm)”?"
+            ),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                Task { await model.deleteMemoryTerm(id: term.id) }
+            }
+            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(OpenTypeL10n.text(
+                "此操作不可撤销。删除后这个词条不再参与识别偏置与纠错替换。",
+                english: "This cannot be undone. The term will stop biasing recognition and stop being applied as a correction."
+            ))
+        }
+    }
+
+    private var readOnlyRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(term.canonicalTerm)
+                    .font(.system(size: 10.5, weight: .medium))
+                Spacer()
+                Text(term.category)
+                    .font(.system(size: 8.8, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Text(String(format: "%.0f%%", term.confidence * 100))
+                    .font(.system(size: 8.8))
+                    .foregroundStyle(.tertiary)
+                Button {
+                    beginEditing()
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(OpenTypeL10n.text("编辑这个词条", english: "Edit this term"))
+                Button {
+                    showingDeleteConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(OpenTypeL10n.text("删除这个词条", english: "Delete this term"))
+            }
+            if !term.aliases.isEmpty {
+                Text(term.aliases.joined(separator: " · "))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            MemoryOriginBadge(origin: term.origin)
+        }
+    }
+
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            TextField(
+                OpenTypeL10n.text("词条", english: "Term"),
+                text: $draftCanonicalTerm
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10))
+
+            TextField(
+                OpenTypeL10n.text("别名，用逗号分隔", english: "Aliases, comma-separated"),
+                text: $draftAliases
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10))
+
+            HStack(spacing: 6) {
+                Text(OpenTypeL10n.text("置信度", english: "Confidence"))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                // A slider rather than a text field: confidence is 0..1 on the
+                // sidecar side, and anything outside that is a 400 — so the
+                // control simply cannot express an invalid value.
+                Slider(value: $draftConfidence, in: 0...1)
+                Text(String(format: "%.0f%%", draftConfidence * 100))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+
+            HStack(spacing: 6) {
+                Spacer()
+                Button(OpenTypeL10n.text("取消", english: "Cancel")) {
+                    isEditing = false
+                }
+                .controlSize(.small)
+                Button(OpenTypeL10n.text("保存", english: "Save")) {
+                    save()
+                }
+                .controlSize(.small)
+                .keyboardShortcut(.defaultAction)
+                .disabled(draftCanonicalTerm.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+    }
+
+    private func beginEditing() {
+        draftCanonicalTerm = term.canonicalTerm
+        draftAliases = term.aliases.joined(separator: ", ")
+        draftConfidence = term.confidence
+        isEditing = true
+    }
+
+    private func save() {
+        let canonical = draftCanonicalTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonical.isEmpty else { return }
+        let aliases = Self.parseAliases(draftAliases)
+        let confidence = draftConfidence
+        Task {
+            if await model.updateMemoryTerm(
+                id: term.id,
+                canonicalTerm: canonical,
+                aliases: aliases,
+                confidence: confidence
+            ) {
+                isEditing = false
+            }
+        }
+    }
+
+    /// Splits the comma-separated alias field. Accepts the full-width comma
+    /// too — the aliases people type here are frequently Chinese, and a
+    /// Chinese keyboard produces "，" without the user thinking about it.
+    static func parseAliases(_ raw: String) -> [String] {
+        raw
+            .split(whereSeparator: { $0 == "," || $0 == "，" || $0 == "\n" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+/// One free-text owner fact: its content, its provenance badge, and a delete.
+/// Facts have no edit affordance — they are arbitrary prose rather than a
+/// canonical-name-plus-aliases shape, and `owner_facts` has no update endpoint;
+/// the operation a user actually needs here is removing a fact the agent
+/// planted (P1-12), which delete covers.
+private struct MemoryOwnerFactRow: View {
+    @ObservedObject var model: AppModel
+    let fact: OwnerFactSummary
+
+    @State private var showingDeleteConfirmation = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(fact.content)
+                    .font(.system(size: 9.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                MemoryOriginBadge(origin: fact.origin)
+            }
+            Spacer(minLength: 6)
+            Button {
+                showingDeleteConfirmation = true
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(OpenTypeL10n.text("删除这条记忆", english: "Delete this fact"))
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color.primary.opacity(0.028),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        // Same irreversible-delete guard as `MemoryTermRow`.
+        .confirmationDialog(
+            OpenTypeL10n.text("删除这条记忆？", english: "Delete this fact?"),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                Task { await model.deleteMemoryOwnerFact(id: fact.id) }
+            }
+            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(OpenTypeL10n.text(
+                "此操作不可撤销。删除后助理不会再把这条记忆带进上下文。",
+                english: "This cannot be undone. The assistant will stop carrying this fact into its context."
+            ))
+        }
+    }
+}
+
+/// Provenance badge for a memory row. `owner` means the user vouched for it in
+/// person; `untrusted` means it came out of the agent loop, where content can
+/// originate from hostile context (P1-12) — which is why it is drawn in orange
+/// rather than as one more grey label.
+private struct MemoryOriginBadge: View {
+    let origin: String?
+
+    var body: some View {
+        Label(title, systemImage: symbol)
+            .font(.system(size: 8.5, weight: .medium))
+            .foregroundStyle(origin == "untrusted" ? Color.orange : Color.secondary)
+    }
+
+    private var title: String {
+        switch origin {
+        case "owner":
+            return OpenTypeL10n.text("你确认过", english: "Confirmed by you")
+        case "untrusted":
+            return OpenTypeL10n.text("未经确认", english: "Unverified")
+        case "agent":
+            return OpenTypeL10n.text("助理写入", english: "Written by the agent")
+        case "system":
+            return OpenTypeL10n.text("自动整理", english: "Auto-consolidated")
+        default:
+            return OpenTypeL10n.text("来源未知", english: "Unknown source")
+        }
+    }
+
+    private var symbol: String {
+        switch origin {
+        case "owner":
+            return "checkmark.seal"
+        case "untrusted":
+            return "exclamationmark.triangle"
+        case "agent":
+            return "sparkles"
+        case "system":
+            return "gearshape"
+        default:
+            return "questionmark.circle"
+        }
+    }
+}
+
+// MARK: - MCP servers (P2-13)
+
+/// Settings' "MCP 服务器" panel: add, edit, remove and test the MCP servers the
+/// agent gets its extra tools from (`sidecar/src/agent/mcpConfigRoutes.ts`,
+/// via `AppModel`'s "MCP server configuration" section). Until this panel
+/// existed, `OPENTYPE_MCP_SERVERS` was the only way in and a packaged `.app`
+/// user has no way to set an env var.
+///
+/// **Secrets never round-trip through an editable field.** The sidecar answers
+/// with `envMasked`/`headersMasked` only, so a real token never reaches Swift;
+/// an already-saved secret therefore renders as its mask in *static* text with
+/// a "已保存" tag, never inside a `TextField`/`SecureField` a user could be led
+/// to believe holds the real value. Replacing one is an explicit action
+/// (`McpSecretRow`'s "更换"), and it starts from an empty field. See
+/// `McpServerEditor.request()` for the submit side.
+private struct McpServerPanelView: View {
+    @ObservedObject var model: AppModel
+
+    /// Whether the "add a server" form is open. Held here rather than inside
+    /// the editor so closing it discards the whole draft, secrets included,
+    /// instead of leaving typed values parked in a hidden view's state.
+    @State private var isAddingServer = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(OpenTypeL10n.text(
+                "MCP 服务器给 Agent 增加工具。连接是在后台服务启动时建立的，所以这里的改动要重启 OpenType 才生效；保存前先「测试连接」，一个连不上的服务器会拖慢、甚至卡住下次启动。",
+                english: "MCP servers give Agent mode extra tools. Connections are made when the background service starts, so changes here apply after you restart OpenType — and use Test Connection before saving, since a server that can't be reached slows the next startup down, or stalls it."
+            ))
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            // The honest sentence. Anyone adding a server from a half-read
+            // README needs to know what the grant actually is before they paste
+            // a command in, so it sits above the list, not in a tooltip.
+            //
+            // It names the P1-6 confirmation only to say it does not apply
+            // here: `classifyCommandRisk` inspects `opentype__bash` and
+            // `opentype__python` arguments and returns "safe" for every other
+            // tool, MCP included. Mentioning the guard without that limit would
+            // hand these tools a protection they do not have.
+            Label(
+                OpenTypeL10n.text(
+                    "这些工具和内置工具一样，直接在你的电脑上运行，没有沙箱。OpenType 只在自己的 shell／Python 工具跑到少数几条点名的破坏性命令时才会弹窗问你，这条检查不覆盖 MCP 工具——这里加进来的服务器，它的工具做什么都不会再经过你同意。只添加你自己信任的服务器。",
+                    english: "These tools run directly on your Mac with no sandbox, exactly like the built-in ones. OpenType asks before a few named destructive commands in its own shell/Python tools, but that check does not cover MCP tools — whatever a server you add here does, it does without asking you. Only add servers you trust."
+                ),
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .font(.system(size: 9.5))
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let error = model.mcpEditError {
+                Label(error, systemImage: "xmark.circle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let config = model.mcpConfig {
+                if config.source == .env && !config.servers.isEmpty {
+                    Text(OpenTypeL10n.text(
+                        "下面的服务器来自 OPENTYPE_MCP_SERVERS 环境变量（开发用的回退），不是你保存的配置，所以不能在这里改。一旦你在这里保存了任何服务器，就只使用你保存的列表，环境变量里的不再生效。",
+                        english: "The servers below come from the OPENTYPE_MCP_SERVERS environment variable — a dev fallback, not your saved config, so they aren't editable here. Once you save any server here, only your saved list is used and the environment variable stops applying."
+                    ))
+                    .font(.system(size: 8.8))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if config.servers.isEmpty {
+                    Text(OpenTypeL10n.text("还没有配置 MCP 服务器", english: "No MCP servers configured yet"))
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(config.servers) { server in
+                        McpServerRow(
+                            model: model,
+                            server: server,
+                            isEditable: config.source == .saved
+                        )
+                    }
+                }
+            } else {
+                Text(OpenTypeL10n.text("正在读取…", english: "Loading…"))
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+            }
+
+            if isAddingServer {
+                McpServerEditor(
+                    model: model,
+                    existing: nil,
+                    onDone: { isAddingServer = false },
+                    onCancel: { isAddingServer = false }
+                )
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    Color.primary.opacity(0.028),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+            } else {
+                Button(OpenTypeL10n.text("添加服务器", english: "Add a server")) {
+                    isAddingServer = true
+                }
+                .controlSize(.small)
+            }
+        }
+        .task {
+            await model.refreshMcpServers()
+        }
+    }
+}
+
+/// One configured server: a compact read view that flips in place into
+/// `McpServerEditor`, plus a confirmed delete. Env-sourced rows
+/// (`isEditable == false`) show the same information with no actions — they
+/// live in an environment variable, not in the store the routes address, so a
+/// `PUT`/`DELETE` against them would 404.
+private struct McpServerRow: View {
+    @ObservedObject var model: AppModel
+    let server: McpServerSummary
+    let isEditable: Bool
+
+    @State private var isEditing = false
+    @State private var showingDeleteConfirmation = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if isEditing {
+                McpServerEditor(
+                    model: model,
+                    existing: server,
+                    onDone: { isEditing = false },
+                    onCancel: { isEditing = false }
+                )
+            } else {
+                readOnlyRow
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color.primary.opacity(0.028),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .confirmationDialog(
+            OpenTypeL10n.text(
+                "删除 MCP 服务器「\(server.name)」？",
+                english: "Delete the MCP server “\(server.name)”?"
+            ),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                Task { await model.deleteMcpServer(name: server.name) }
+            }
+            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(OpenTypeL10n.text(
+                "Agent 将不再获得这个服务器提供的工具。保存的密钥也会一并删除。",
+                english: "Agent mode will stop getting this server's tools. Its saved secrets are deleted too."
+            ))
+        }
+    }
+
+    private var readOnlyRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(server.name)
+                    .font(.system(size: 10.5, weight: .medium))
+                Text(server.transport.title)
+                    .font(.system(size: 8.8, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                if isEditable {
+                    Button {
+                        isEditing = true
+                    } label: {
+                        Image(systemName: "pencil")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help(OpenTypeL10n.text("编辑这个服务器", english: "Edit this server"))
+
+                    Button {
+                        showingDeleteConfirmation = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help(OpenTypeL10n.text("删除这个服务器", english: "Delete this server"))
+                } else {
+                    Label(
+                        OpenTypeL10n.text("来自环境变量", english: "From environment"),
+                        systemImage: "terminal"
+                    )
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                }
+            }
+
+            Text(endpointDescription)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !secretKeys.isEmpty {
+                Text(OpenTypeL10n.text(
+                    "已保存密钥：\(secretKeys.joined(separator: "、"))",
+                    english: "Saved secrets: \(secretKeys.joined(separator: ", "))"
+                ))
+                .font(.system(size: 8.8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var endpointDescription: String {
+        switch server.transport {
+        case .stdio:
+            return ([server.command ?? ""] + (server.args ?? []))
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        case .http:
+            return server.url ?? ""
+        }
+    }
+
+    /// Key names only — the panel shows *that* a secret is set, never its
+    /// value, not even masked, at this zoom level.
+    private var secretKeys: [String] {
+        let map = server.transport == .stdio ? server.envMasked : server.headersMasked
+        return (map ?? [:]).keys.sorted()
+    }
+}
+
+/// One `env`/`headers` entry while it is being edited.
+///
+/// The two cases are the whole point of this type: a `.stored` entry is a
+/// secret that lives sidecar-side and reached Swift only as a mask, and a
+/// `.typed` entry is a value the user actually entered in this session. They
+/// render differently (static text vs. a `SecureField`) and submit differently
+/// (the mask, which the sidecar resolves back to the stored secret, vs. the
+/// literal text), so the distinction can't be collapsed into a plain string.
+private struct McpSecretEntry: Identifiable, Equatable {
+    enum Value: Equatable {
+        /// Already saved sidecar-side; `mask` is all Swift ever sees of it.
+        case stored(mask: String)
+        /// Entered by the user in this editing session.
+        case typed(String)
+    }
+
+    let id = UUID()
+    var key: String
+    var value: Value
+
+    var isStored: Bool {
+        if case .stored = value { return true }
+        return false
+    }
+
+    /// The key as submitted. A `.typed` key is trimmed, because the user may
+    /// have left a stray space around something they typed. A `.stored` key is
+    /// sent back **exactly** as it arrived: the sidecar matches masks per key,
+    /// so normalising one here would leave the mask with no stored counterpart
+    /// to resolve against — and a mask that fails to resolve is written as that
+    /// key's literal value. The key is not editable, so there is nothing to
+    /// normalise anyway.
+    var submittedKey: String {
+        isStored ? key : key.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// What goes into the request. For a `.stored` entry this is the mask, and
+    /// sending it verbatim is exactly how the sidecar is told "unchanged" —
+    /// it resolves a value equal to the stored mask, for that same server and
+    /// that same key, back to the stored secret.
+    var submittedValue: String {
+        switch value {
+        case .stored(let mask): return mask
+        case .typed(let text): return text
+        }
+    }
+}
+
+/// The add/edit form, used for both (`existing == nil` is a create).
+///
+/// Masking rules, which are the security-relevant part of this view:
+///
+///  1. A stored secret is seeded as `.stored(mask:)` and rendered as static
+///     text with a "已保存" tag. It is never placed in an editable field, so no
+///     edit to an unrelated field can carry a mask into a value the user
+///     believes is real.
+///  2. Its *key* is not editable either. The sidecar resolves masks per key, so
+///     renaming a key while keeping its mask would store the mask itself as
+///     that key's literal value — the exact bug rule 1 avoids, one level up.
+///     Changing a key means replacing the entry.
+///  3. "更换" starts from an empty `SecureField`, never from the mask.
+///  4. A `.typed` entry that is left half-filled blocks Save with a stated
+///     reason, rather than silently writing an empty secret or dropping the row.
+///  5. Only the active transport's map is submitted, and the editor closes on a
+///     successful save. Together those keep every `.stored` mask matched to a
+///     secret the sidecar still holds under that same key.
+private struct McpServerEditor: View {
+    @ObservedObject var model: AppModel
+    /// `nil` when adding a server.
+    let existing: McpServerSummary?
+    let onDone: () -> Void
+    let onCancel: () -> Void
+
+    @State private var name = ""
+    @State private var transport: McpTransport = .stdio
+    @State private var command = ""
+    @State private var argsText = ""
+    @State private var url = ""
+    @State private var envEntries: [McpSecretEntry] = []
+    @State private var headerEntries: [McpSecretEntry] = []
+    @State private var testResult: McpTestResultSummary?
+    @State private var isTesting = false
+    @State private var isSaving = false
+    /// Why the last Save from *this* form failed. Held locally, and shown next
+    /// to the Save button, the way `WhisperSetupContent`/`LLMProviderSetupContent`
+    /// do it — the panel-level banner sits above the whole server list, which
+    /// is the wrong end of the section to explain a button the user just
+    /// pressed at the bottom of it.
+    @State private var saveError: String?
+    @State private var didSeed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField(
+                OpenTypeL10n.text("名称（字母、数字、_ 或 -）", english: "Name (letters, digits, _ or -)"),
+                text: $name
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 10))
+
+            Picker(
+                OpenTypeL10n.text("连接方式", english: "Transport"),
+                selection: $transport
+            ) {
+                ForEach(McpTransport.allCases) { candidate in
+                    Text(candidate.title).tag(candidate)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if transport == .stdio {
+                TextField(
+                    OpenTypeL10n.text("命令，例如 npx", english: "Command, e.g. npx"),
+                    text: $command
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(OpenTypeL10n.text("参数（每行一个）", english: "Arguments (one per line)"))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $argsText)
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(height: 52)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.75)
+                        )
+                }
+
+                McpSecretEntryList(
+                    title: OpenTypeL10n.text("环境变量", english: "Environment variables"),
+                    entries: $envEntries
+                )
+            } else {
+                TextField(
+                    "URL",
+                    text: $url,
+                    prompt: Text("https://mcp.example.com/mcp")
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+
+                McpSecretEntryList(
+                    title: OpenTypeL10n.text("请求头", english: "Headers"),
+                    entries: $headerEntries
+                )
+            }
+
+            if let blocker = saveBlocker {
+                Label(blocker, systemImage: "exclamationmark.circle")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 8) {
+                Button(isTesting
+                    ? OpenTypeL10n.text("测试中…", english: "Testing…")
+                    : OpenTypeL10n.text("测试连接", english: "Test Connection")
+                ) {
+                    test()
+                }
+                .controlSize(.small)
+                .disabled(saveBlocker != nil || isTesting || isSaving || renameBlocksTest)
+
+                Button(isSaving
+                    ? OpenTypeL10n.text("保存中…", english: "Saving…")
+                    : OpenTypeL10n.text("保存", english: "Save")
+                ) {
+                    save()
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .disabled(saveBlocker != nil || isSaving)
+
+                Button(OpenTypeL10n.text("取消", english: "Cancel")) {
+                    onCancel()
+                }
+                .controlSize(.small)
+                .disabled(isSaving)
+            }
+
+            if let saveError {
+                Text(saveError)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if renameBlocksTest {
+                Text(OpenTypeL10n.text(
+                    "改名后请先保存，再测试连接：已保存的密钥是按原来的名字存的。",
+                    english: "Save the rename first, then test: the saved secrets are stored under the old name."
+                ))
+                .font(.system(size: 8.8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if hasStoredSecret {
+                Text(OpenTypeL10n.text(
+                    "「测试连接」会把已保存的密钥发送到上面填写的地址／命令。",
+                    english: "Test Connection sends the saved secrets to whatever address/command is entered above."
+                ))
+                .font(.system(size: 8.8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let testResult {
+                McpTestResultView(result: testResult)
+            }
+        }
+        .task {
+            guard !didSeed else { return }
+            didSeed = true
+            seed()
+        }
+    }
+
+    // MARK: Seeding
+
+    /// Populates the form from `existing`. Secrets are seeded as their masks in
+    /// `.stored` state — see the type's doc comment for why that is not the
+    /// same thing as putting a mask in a field.
+    private func seed() {
+        guard let existing else {
+            transport = .stdio
+            return
+        }
+        name = existing.name
+        transport = existing.transport
+        command = existing.command ?? ""
+        argsText = (existing.args ?? []).joined(separator: "\n")
+        url = existing.url ?? ""
+        envEntries = Self.entries(from: existing.envMasked)
+        headerEntries = Self.entries(from: existing.headersMasked)
+    }
+
+    private static func entries(from masked: [String: String]?) -> [McpSecretEntry] {
+        (masked ?? [:]).keys.sorted().map { key in
+            McpSecretEntry(key: key, value: .stored(mask: masked?[key] ?? ""))
+        }
+    }
+
+    // MARK: Validation
+
+    private var activeEntries: [McpSecretEntry] {
+        transport == .stdio ? envEntries : headerEntries
+    }
+
+    private var hasStoredSecret: Bool {
+        activeEntries.contains(where: \.isStored)
+    }
+
+    /// Testing a renamed server would submit masks the sidecar can't resolve
+    /// (it looks the stored record up by the *submitted* name), so they'd be
+    /// probed as literal credentials and fail for a reason that has nothing to
+    /// do with the user's config. Blocked with a stated reason instead.
+    private var renameBlocksTest: Bool {
+        guard let existing else { return false }
+        return hasStoredSecret && name.trimmingCharacters(in: .whitespaces) != existing.name
+    }
+
+    /// Why Save is disabled, or `nil` when it isn't. Stated to the user rather
+    /// than left as a mysteriously grey button.
+    private var saveBlocker: String? {
+        if name.trimmingCharacters(in: .whitespaces).isEmpty {
+            return OpenTypeL10n.text("请填写名称", english: "Enter a name")
+        }
+        if transport == .stdio {
+            if command.trimmingCharacters(in: .whitespaces).isEmpty {
+                return OpenTypeL10n.text("请填写命令", english: "Enter a command")
+            }
+        } else if url.trimmingCharacters(in: .whitespaces).isEmpty {
+            return OpenTypeL10n.text("请填写 URL", english: "Enter a URL")
+        }
+
+        let entries = activeEntries
+        if entries.contains(where: { $0.submittedKey.isEmpty }) {
+            return OpenTypeL10n.text("有一行还没填名字", english: "One row has no name yet")
+        }
+        // An empty replacement would be written as an empty secret — almost
+        // always someone who pressed 更换 and then didn't type. Say so instead.
+        if entries.contains(where: { entry in
+            if case .typed(let text) = entry.value { return text.isEmpty }
+            return false
+        }) {
+            return OpenTypeL10n.text("有一项的值还没填", english: "One value is still empty")
+        }
+        // Compared as *submitted*, so this catches exactly the collisions the
+        // request would actually contain — one of which would otherwise silently
+        // drop an entry when the dictionary is built below.
+        let keys = entries.map(\.submittedKey)
+        if Set(keys).count != keys.count {
+            return OpenTypeL10n.text("有重复的名字", english: "Two rows share a name")
+        }
+        return nil
+    }
+
+    // MARK: Submission
+
+    /// Builds the request. Only the active transport's map is sent, and the
+    /// inactive one is left out entirely (`nil`, i.e. omitted from the JSON)
+    /// rather than sent empty — the sidecar drops the other half anyway, and a
+    /// mask from the *other* map has no stored counterpart under this one, so
+    /// carrying it across is precisely how a mask would end up saved as a
+    /// literal value.
+    private func request() -> McpServerRequest {
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        var map: [String: String] = [:]
+        for entry in activeEntries {
+            map[entry.submittedKey] = entry.submittedValue
+        }
+        if transport == .stdio {
+            let args = argsText
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            return McpServerRequest(
+                name: trimmedName,
+                transport: .stdio,
+                command: command.trimmingCharacters(in: .whitespaces),
+                args: args,
+                env: map,
+                url: nil,
+                headers: nil
+            )
+        }
+        return McpServerRequest(
+            name: trimmedName,
+            transport: .http,
+            command: nil,
+            args: nil,
+            env: nil,
+            url: url.trimmingCharacters(in: .whitespaces),
+            headers: map
+        )
+    }
+
+    private func test() {
+        isTesting = true
+        testResult = nil
+        let candidate = request()
+        Task { @MainActor in
+            testResult = await model.testMcpServer(candidate)
+            isTesting = false
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        saveError = nil
+        let candidate = request()
+        Task { @MainActor in
+            let ok: Bool
+            if let existing {
+                ok = await model.updateMcpServer(name: existing.name, candidate)
+            } else {
+                ok = await model.createMcpServer(candidate)
+            }
+            isSaving = false
+            if ok {
+                // Close on success so the next edit re-seeds from what the
+                // sidecar now actually stores. A form kept open across a save
+                // could still hold `.stored` masks for secrets that write just
+                // dropped (a transport switch clears the other half), and those
+                // masks would then save as literal values.
+                onDone()
+            } else {
+                // Take the message off the model and clear it there, so the one
+                // sentence appears once — here, beside the button that produced
+                // it — rather than twice. The panel-level banner stays for the
+                // failures that have no form to land in, i.e. a failed delete.
+                saveError = model.mcpEditError
+                model.clearMcpEditError()
+            }
+        }
+    }
+}
+
+/// The `env`/`headers` editor: existing secrets as static masked rows, new ones
+/// as key + `SecureField` pairs.
+private struct McpSecretEntryList: View {
+    let title: String
+    @Binding var entries: [McpSecretEntry]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(OpenTypeL10n.text("添加一项", english: "Add")) {
+                    entries.append(McpSecretEntry(key: "", value: .typed("")))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
+
+            ForEach($entries) { $entry in
+                McpSecretRow(entry: $entry) {
+                    entries.removeAll { $0.id == entry.id }
+                }
+            }
+        }
+    }
+}
+
+private struct McpSecretRow: View {
+    @Binding var entry: McpSecretEntry
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            switch entry.value {
+            case .stored(let mask):
+                // Static text, not a field: this is a mask, and it must never
+                // sit somewhere that reads as "the real value, editable".
+                // The key is static too — the sidecar matches masks per key, so
+                // a renamed key would save the mask itself as its value.
+                Text(entry.key)
+                    .font(.system(size: 10, design: .monospaced))
+                    .lineLimit(1)
+                Text(mask)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Text(OpenTypeL10n.text("已保存", english: "Saved"))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.green)
+                    .help(OpenTypeL10n.text(
+                        "已保存的密钥不会回传，这里显示的是掩码。保存时保持不变。",
+                        english: "Saved secrets are never sent back; this is a mask. Saving leaves the stored value untouched."
+                    ))
+                Spacer()
+                Button(OpenTypeL10n.text("更换", english: "Replace")) {
+                    // Deliberately empty, never seeded from the mask.
+                    entry.value = .typed("")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+
+            case .typed:
+                TextField(
+                    OpenTypeL10n.text("名称", english: "Name"),
+                    text: $entry.key
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+                .frame(maxWidth: 130)
+
+                SecureField(
+                    OpenTypeL10n.text("值", english: "Value"),
+                    text: Binding(
+                        get: {
+                            if case .typed(let text) = entry.value { return text }
+                            return ""
+                        },
+                        set: { entry.value = .typed($0) }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10))
+            }
+
+            Button {
+                onDelete()
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help(OpenTypeL10n.text("删除这一项", english: "Remove this entry"))
+        }
+    }
+}
+
+/// The Test Connection outcome. The tool list is the decision-relevant part —
+/// it is literally the set of unsandboxed capabilities this server would hand
+/// the agent — so it is shown in full rather than summarized as a count.
+private struct McpTestResultView: View {
+    let result: McpTestResultSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if result.success {
+                Label(
+                    OpenTypeL10n.text("连接成功", english: "Connected"),
+                    systemImage: "checkmark.circle.fill"
+                )
+                .font(.system(size: 9.5))
+                .foregroundStyle(.green)
+
+                let tools = result.tools ?? []
+                if tools.isEmpty {
+                    Text(OpenTypeL10n.text(
+                        "这个服务器没有提供任何工具。",
+                        english: "This server exposes no tools."
+                    ))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text(OpenTypeL10n.text(
+                        "Agent 将获得以下 \(tools.count) 个工具：",
+                        english: "Agent mode would get these \(tools.count) tools:"
+                    ))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+
+                    ForEach(tools) { tool in
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(tool.name)
+                                .font(.system(size: 9, design: .monospaced))
+                            if let description = tool.description, !description.isEmpty {
+                                Text(description)
+                                    .font(.system(size: 8.8))
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            } else {
+                Label(
+                    result.error ?? OpenTypeL10n.text("连接失败", english: "Connection failed"),
+                    systemImage: "xmark.circle.fill"
+                )
+                .font(.system(size: 9.5))
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
 }
 
 /// A single row in the Agent tab's "in progress" strip

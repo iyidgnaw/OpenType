@@ -8,10 +8,16 @@ function makeStore(): MemoryStore {
   return new MemoryStore(openDatabase(":memory:"));
 }
 
+/**
+ * `"agent"`, not `"transcribe"`: transcribe events are excluded from every
+ * consolidation pass as a privacy contract
+ * (`CONSOLIDATION_EXCLUDED_MODES`), so seeding them here would leave
+ * `consolidate_memory_now` with nothing to consolidate.
+ */
 function seedEvents(store: MemoryStore, count: number): void {
   for (let i = 0; i < count; i++) {
     store.recordEpisodicEvent({
-      mode: "transcribe",
+      mode: "agent",
       rawTranscript: `raw ${i}`,
       correctedTranscript: `corrected ${i}`,
       effectiveInput: null,

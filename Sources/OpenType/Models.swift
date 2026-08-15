@@ -8,6 +8,7 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+
     var title: String {
         switch self {
         case .transcribe: return OpenTypeL10n.text("听写", english: "Transcribe")
@@ -85,12 +86,22 @@ enum InputMode: String, CaseIterable, Codable, Identifiable {
 
 }
 
-/// The two ways `transcribe` mode can deliver its result, chosen in Settings
+/// The three ways `transcribe` mode can deliver its result, chosen in Settings
 /// and applied to every `transcribe`-mode recording until changed (not a
 /// per-recording toggle — see `docs/superpowers/specs/2026-08-09-current-system-state.md`
 /// for the design rationale). `ask`/`agent` are unaffected by this setting.
+///
+/// All three stay inside `transcribe`'s promise that dictation never reaches a
+/// model: `tidy` cleans by fixed local rules, so the axis is *how much
+/// deterministic processing happens before delivery*, never *whether an LLM
+/// sees the text*.
 enum TranscribeVariant: String, CaseIterable, Codable, Identifiable {
     case direct
+    /// Deterministic local cleanup — **never an LLM call**. See
+    /// `TidyTranscript`. Ordered between `direct` and `review` because the
+    /// three form a ladder of increasing intervention (raw ⇢ rules ⇢ human),
+    /// and `allCases` is what Settings' picker renders.
+    case tidy
     case review
 
     var id: String { rawValue }
@@ -98,6 +109,7 @@ enum TranscribeVariant: String, CaseIterable, Codable, Identifiable {
     var title: String {
         switch self {
         case .direct: return OpenTypeL10n.text("直接模式", english: "Direct")
+        case .tidy: return OpenTypeL10n.text("轻整理", english: "Tidy")
         case .review: return OpenTypeL10n.text("复核模式", english: "Review")
         }
     }
@@ -109,11 +121,54 @@ enum TranscribeVariant: String, CaseIterable, Codable, Identifiable {
                 "松开后直接写入光标所在位置",
                 english: "Released speech is inserted straight into the focused field"
             )
+        case .tidy:
+            return OpenTypeL10n.text(
+                "松开后按固定规则去掉口癖、整理标点再写入，不经过任何 AI 模型",
+                english: "Released speech has fillers dropped and punctuation normalised by fixed rules before it's inserted — no AI model involved"
+            )
         case .review:
             return OpenTypeL10n.text(
                 "松开后先在预览面板中查看、编辑或用语音修改，确认后再写入",
                 english: "Released speech is staged in a review panel to check, edit, or voice-correct before it's inserted"
             )
+        }
+    }
+
+    /// What this variant hands to the delivery path, or `nil` when it delivers
+    /// nothing yet.
+    ///
+    /// The routing seam for the whole variant axis, kept here rather than
+    /// inline in `AppModel.process` so it is testable without instantiating the
+    /// model, and so adding a variant is one exhaustive `switch` the compiler
+    /// checks rather than a chain of `== .review` comparisons scattered across
+    /// the pipeline.
+    ///
+    /// `nil` means "dispatched, don't deliver yet" — today only `review`, which
+    /// stages the transcript in its panel and delivers on commit. `tidy`
+    /// deliberately does **not** join it: cleanup is instant and deterministic,
+    /// so making the user confirm it would buy nothing and cost the whole
+    /// point of a tier that sits between "unchanged" and "reviewed".
+    func deliverableText(for transcript: String) -> String? {
+        switch self {
+        case .direct: return transcript
+        case .tidy: return TidyTranscript.tidy(transcript)
+        case .review: return nil
+        }
+    }
+
+    /// Whether a finished recording in this variant lands text in the app the
+    /// user was looking at — the condition the post-delivery correction window
+    /// (`CorrectionWindow`) is built on, since there is nothing to fix in place
+    /// until something has actually been pasted.
+    ///
+    /// The mirror image of `deliverableText(for:)`'s `nil`, stated as its own
+    /// exhaustive `switch` rather than as `!= .review` so that a fourth variant
+    /// has to answer both questions here, in one place, instead of silently
+    /// inheriting an answer from a comparison somewhere down the pipeline.
+    var deliversIntoTargetApp: Bool {
+        switch self {
+        case .direct, .tidy: return true
+        case .review: return false
         }
     }
 }
@@ -537,24 +592,32 @@ enum VoiceSurfacePanelLayout {
         )
     }
 
-    /// The spec §1 size table.
+    /// The panel's size for a state.
+    ///
+    /// Forwards to `VoiceSurfacePanelMetrics` (`OverlayController.swift`)
+    /// rather than carrying its own numbers. It used to hold a second copy of
+    /// the table, which is how the 2026-08-14 redesign found the panel using
+    /// six different widths: two tables, each locally reasonable, drifting
+    /// apart one state at a time. One table, one place to change it.
     static func size(for state: VoiceSurfaceState) -> CGSize {
         switch state {
         case .hidden:
             return .zero
-        // One size for every pre-result state. `.processing` and `.working`
-        // render the SAME view, so the 24pt `.working` used to add was dead
-        // space rather than room for anything, and resizing between two
-        // identical-looking pills read as a twitch. The panel now holds still
-        // from the first word until it morphs into the card.
         case .listening, .processing, .working:
-            return CGSize(width: 388, height: 96)
-        case .asking:
-            // Wide enough to read a question and its choices, but well short
-            // of the result card: this is a prompt, not a document.
-            return CGSize(width: 480, height: 260)
+            return CGSize(
+                width: VoiceSurfacePanelMetrics.pill.width,
+                height: VoiceSurfacePanelMetrics.pill.height
+            )
+        case .asking(let detail):
+            let size = VoiceSurfacePanelMetrics.asking(
+                optionCount: detail.question.options?.count ?? 0
+            )
+            return CGSize(width: size.width, height: size.height)
         case .result, .failed:
-            return CGSize(width: 620, height: 480)
+            return CGSize(
+                width: VoiceSurfacePanelMetrics.card.width,
+                height: VoiceSurfacePanelMetrics.card.height
+            )
         }
     }
 }
@@ -871,6 +934,25 @@ enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
 
     var id: String { rawValue }
 
+    /// The recording gesture in as few characters as fit under a mode name.
+    ///
+    /// Distinct from `note` (a full paragraph) and from `modeSwitchHint` (about
+    /// Tab). The sidebar's mode card answers "how do I start talking", which is
+    /// the one thing someone looking at that card wants.
+    var holdHint: String {
+        switch self {
+        case .leftOption: return OpenTypeL10n.text("按住 ⌥ 说话", english: "Hold ⌥ to talk")
+        case .fnKey: return OpenTypeL10n.text("按住 fn 说话", english: "Hold fn to talk")
+        case .doubleControl: return OpenTypeL10n.text("双击 ⌃ 开始", english: "Double-tap ⌃")
+        case .doubleOption: return OpenTypeL10n.text("双击 ⌥ 开始", english: "Double-tap ⌥")
+        case .doubleShift: return OpenTypeL10n.text("双击 ⇧ 开始", english: "Double-tap ⇧")
+        case .controlShiftSpace: return OpenTypeL10n.text("⌃⇧Space 开始", english: "⌃⇧Space")
+        case .optionSpace: return OpenTypeL10n.text("⌥Space 开始", english: "⌥Space")
+        case .controlSpace: return OpenTypeL10n.text("⌃Space 开始", english: "⌃Space")
+        case .controlOptionSpace: return OpenTypeL10n.text("⌃⌥Space 开始", english: "⌃⌥Space")
+        }
+    }
+
     var title: String {
         switch self {
         case .leftOption: return OpenTypeL10n.text("左 Option", english: "Left Option")
@@ -917,6 +999,51 @@ enum HotKeyPreset: String, CaseIterable, Codable, Identifiable {
         self == .leftOption || self == .fnKey
     }
 
+    /// The mode-cycle chord's one-line hint, derived from the preset rather
+    /// than hardcoded in the UI, so it always names the key the user is
+    /// actually holding — telling an `fn` user to hold left Option was the
+    /// copy-side half of the same hardcoding bug the Tab gate had.
+    ///
+    /// `nil` for the Space-chord presets: they register a Carbon hot key
+    /// instead of the modifier-only event tap, so there is no Tab handling
+    /// there at all and nothing to advertise. Presence tracks
+    /// `usesModifierOnlyEventTap` exactly.
+    ///
+    /// The old Shift half of the chord ("按住时点 Shift 或 Tab") is gone — Tab
+    /// is the only mode-switch key now — so no hint tells the user to *tap*
+    /// Shift; `.doubleShift` names Shift only as the key it asks them to hold.
+    var modeSwitchHint: String? {
+        switch self {
+        case .leftOption:
+            return OpenTypeL10n.text(
+                "按住左 Option 时点 Tab 切换模式",
+                english: "While holding left Option, tap Tab to switch modes"
+            )
+        case .fnKey:
+            return OpenTypeL10n.text(
+                "按住 fn 时点 Tab 切换模式",
+                english: "While holding fn, tap Tab to switch modes"
+            )
+        case .doubleControl:
+            return OpenTypeL10n.text(
+                "按住 Ctrl 时点 Tab 切换模式",
+                english: "While holding Ctrl, tap Tab to switch modes"
+            )
+        case .doubleOption:
+            return OpenTypeL10n.text(
+                "按住 Option 时点 Tab 切换模式",
+                english: "While holding Option, tap Tab to switch modes"
+            )
+        case .doubleShift:
+            return OpenTypeL10n.text(
+                "按住 Shift 时点 Tab 切换模式",
+                english: "While holding Shift, tap Tab to switch modes"
+            )
+        case .controlShiftSpace, .optionSpace, .controlSpace, .controlOptionSpace:
+            return nil
+        }
+    }
+
     var note: String {
         switch self {
         case .leftOption:
@@ -942,6 +1069,67 @@ enum HotKeyBehavior: Equatable {
     case doubleTapThenAnyKey
     case pressThenAnyKey
     case holdToTalk
+}
+
+/// What one mode-cycle leaves behind: the mode the *next* recording will use,
+/// and the mode the recording currently in flight is being processed as (`nil`
+/// when there is none).
+struct ModeCycleOutcome: Equatable {
+    let selectedMode: InputMode
+    let activeMode: InputMode?
+}
+
+/// The mode-cycle chord's decisions, factored out of `AppModel.cycleMode()` so
+/// both halves are pure and testable (see `ModeSwitchChordTests`).
+///
+/// The chord is "hold the recording modifier, then tap Tab" — and holding the
+/// recording modifier is *what starts a recording*. So `.listening` is not an
+/// edge case the guard should reject, it is the state the user is in every time
+/// they use the gesture; rejecting it (which is what `cycleMode()` used to do)
+/// made mode switching dead past the 300ms long-press threshold. Cycling
+/// while listening therefore also **retargets the in-flight recording** rather
+/// than only moving the next-recording default — retargeting mid-flight is an
+/// established capability here, not a new concept (`VoiceModeRouter` already
+/// reassigns `activeMode` after transcription).
+enum ModeCyclePolicy {
+    /// The mid-pipeline states are the ones that stay closed: once the audio is
+    /// being recognized/transformed/inserted, the mode this run is processed as
+    /// has been committed and moving it would rewrite a decision already acted
+    /// on. `isBusy`/`isStartingRecording` keep refusing in every state.
+    static func allows(
+        state: ProcessingState,
+        isBusy: Bool,
+        isStartingRecording: Bool
+    ) -> Bool {
+        guard !isBusy, !isStartingRecording else { return false }
+        switch state {
+        case .transcribing, .transforming, .inserting:
+            return false
+        case .idle, .modeChanged, .listening, .success, .copied,
+             .dispatched, .cancelled, .failure:
+            return true
+        }
+    }
+
+    /// While listening, the mode being advanced is the one the recording locked
+    /// in (`activeMode`) — which is also what the voice surface is showing
+    /// (`AppModel.voiceSurfaceMode`) — and both it and the selected default land
+    /// on the new mode. Otherwise nothing is in flight, so only the default
+    /// moves; a finished run keeps the mode it ran as.
+    static func cycle(
+        selectedMode: InputMode,
+        activeMode: InputMode?,
+        state: ProcessingState
+    ) -> ModeCycleOutcome {
+        guard state == .listening, let inFlight = activeMode else {
+            return ModeCycleOutcome(
+                selectedMode: selectedMode.next,
+                activeMode: activeMode
+            )
+        }
+        let next = inFlight.next
+        return ModeCycleOutcome(selectedMode: next, activeMode: next)
+    }
 }
 
 struct CapturedContext {
@@ -1240,15 +1428,65 @@ enum ErrorMessagePresenter {
 }
 
 /// One row of the sidecar's `GET /memory/terms` response — the entity
-/// dictionary shown read-only in the Settings "Memory" panel. Mirrors (a
-/// subset of) `EntityTerm` from `sidecar/src/memory/MemoryStore.ts`.
+/// dictionary the Settings "Memory" panel shows and (since P0-4) edits.
+/// Mirrors (a subset of) `EntityTerm` from `sidecar/src/memory/MemoryStore.ts`.
+///
+/// `id` is the sidecar's real `entity_terms.id`, not a value synthesized from
+/// `canonicalTerm`: it is what `PUT`/`DELETE /memory/terms/:id` address, and a
+/// canonical-term key could not survive a rename — which is precisely the edit
+/// the panel exists for. `origin` is optional because older payloads (and test
+/// fixtures) may omit it; the panel reads `nil` as unknown provenance.
 struct EntityTermSummary: Decodable, Identifiable {
+    let id: Int
     let canonicalTerm: String
     let aliases: [String]
     let category: String
     let confidence: Double
+    let origin: String?
+}
 
-    var id: String { canonicalTerm }
+/// One row of the sidecar's `GET /memory/owner-facts` response — the free-text
+/// owner facts (`OwnerFact` in `sidecar/src/memory/MemoryStore.ts`), listed for
+/// every origin so a user can find and delete one the agent planted from
+/// untrusted context (P1-12). `createdAt` is epoch milliseconds.
+struct OwnerFactSummary: Decodable, Identifiable {
+    let id: Int
+    let content: String
+    let createdAt: Int
+    let origin: String?
+}
+
+/// Body for `POST /memory/terms` — a term the user typed into the dictionary
+/// panel. Deliberately carries no `confidence`/`origin`: the sidecar pins an
+/// owner-created term at confidence 1.0 / origin "owner", and a client-claimed
+/// provenance would make the `origin` badge worthless.
+struct MemoryTermCreateRequest: Encodable {
+    let canonicalTerm: String
+    let aliases: [String]
+}
+
+/// Body for `PUT /memory/terms/:id` — a *patch*. A field the user did not touch
+/// must be absent from the JSON rather than encoded as `null`: the sidecar
+/// reads a present key as "set this field", so a null `canonicalTerm` would be
+/// a 400 and a null `aliases` would silently wipe every alias. Synthesized
+/// `Encodable` already omits a nil optional; this spells the `encodeIfPresent`
+/// calls out by hand so the patch semantics survive someone later adding a
+/// field or a custom `CodingKeys`, rather than resting on synthesis.
+struct MemoryTermUpdateRequest: Encodable {
+    let canonicalTerm: String?
+    let aliases: [String]?
+    let confidence: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case canonicalTerm, aliases, confidence
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(canonicalTerm, forKey: .canonicalTerm)
+        try container.encodeIfPresent(aliases, forKey: .aliases)
+        try container.encodeIfPresent(confidence, forKey: .confidence)
+    }
 }
 
 /// One row of the sidecar's `GET /memory/consolidation-runs` response — the
@@ -1310,6 +1548,15 @@ struct ConversationSummary: Decodable, Identifiable, Equatable {
     let title: String
     let createdAt: Int
     let updatedAt: Int
+    /// The newest message in the thread, for the row's second line.
+    ///
+    /// Optional because a conversation can exist with no messages yet, and
+    /// because older sidecars do not send it — an absent preview draws a
+    /// single-line row rather than an empty second line.
+    ///
+    /// Defaulted so the many existing constructions of this type, none of
+    /// which are about previews, do not have to state one.
+    var preview: String? = nil
 }
 
 /// Mirrors the sidecar's `ConversationMessage`.
@@ -1446,4 +1693,136 @@ struct ProviderTestResultSummary: Decodable, Equatable {
 struct ProviderModelListSummary: Decodable, Equatable {
     let models: [String]
     let fallback: Bool
+}
+
+// MARK: - MCP servers (P2-13)
+//
+// Wire models for the sidecar's `/config/mcp*` routes
+// (`sidecar/src/agent/mcpConfigRoutes.ts`), which back the Settings
+// "MCP 服务器" panel. Same shape of split the provider models above use: a
+// `*Summary` for what comes back (secrets masked) and a `*Request` for what
+// goes out (secrets real).
+
+/// The two kinds of MCP server the sidecar can attach to Agent mode: a local
+/// child process spoken to over stdio, or a remote HTTP endpoint. The choice
+/// decides which half of a server record is meaningful — `command`/`args`/`env`
+/// for stdio, `url`/`headers` for http — and the sidecar drops the other half
+/// at normalization time (`normalizeMcpServer`), so a switched server can't
+/// keep credentials it no longer has any use for.
+enum McpTransport: String, Codable, CaseIterable, Identifiable, Equatable {
+    case stdio
+    case http
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .stdio:
+            return OpenTypeL10n.text("本地命令（stdio）", english: "Local command (stdio)")
+        case .http:
+            return OpenTypeL10n.text("远程 HTTP", english: "Remote HTTP")
+        }
+    }
+}
+
+/// Which of the sidecar's two config sources actually supplied the servers in a
+/// `GET /config/mcp` response. `saved` is the user's own persisted list;
+/// `env` is the `OPENTYPE_MCP_SERVERS` zero-config dev fallback, which is shown
+/// but never presented as the user's configuration — same "configured is
+/// explicit, never ambient" stance `ProviderConfigStatus` takes.
+enum McpConfigSource: String, Decodable, Equatable {
+    case saved
+    case env
+}
+
+/// One MCP server as the sidecar reports it.
+///
+/// Secrets arrive **only** as `envMasked`/`headersMasked`. There is
+/// deliberately no `env`/`headers` property to decode into, so a real token
+/// cannot reach Swift (and therefore cannot reach a text field, a log line, or
+/// the pasteboard) even if a future sidecar change started sending one. Map
+/// *keys* are not masked: the user needs to see that `GITHUB_TOKEN` is set,
+/// just not what it is set to.
+struct McpServerSummary: Decodable, Identifiable, Equatable {
+    let name: String
+    let transport: McpTransport
+    let command: String?
+    let args: [String]?
+    let url: String?
+    let envMasked: [String: String]?
+    let headersMasked: [String: String]?
+    /// Absent reads as enabled — the value every config written before this
+    /// field existed implies, and the same default `normalizeMcpServer` applies
+    /// on the other side of the wire.
+    let enabled: Bool?
+
+    /// The name is what `PUT`/`DELETE /config/mcp/:name` address, so it is also
+    /// the row identity — there is no separate id to key on.
+    var id: String { name }
+
+    var isEnabled: Bool { enabled ?? true }
+}
+
+/// Mirrors `GET /config/mcp`.
+struct McpConfigSummary: Decodable, Equatable {
+    let configured: Bool
+    let source: McpConfigSource
+    let servers: [McpServerSummary]
+}
+
+/// The `POST /config/mcp`, `PUT /config/mcp/:name` and `POST /config/mcp/test`
+/// request body — the one direction secrets travel in the clear, over the local
+/// Unix socket.
+///
+/// Every optional is encoded with `encodeIfPresent` (the synthesized default),
+/// which is load-bearing in two places:
+///
+///  * `nil` leaves the key out of the JSON entirely rather than sending `null`.
+///    A null `url`/`command` reads on the sidecar side as "supplied but empty"
+///    and 400s a perfectly valid server of the other transport.
+///  * an *empty* `env`/`args` still goes out as `{}`/`[]`, which is how
+///    "delete every entry" is expressed — the write is a replace, not a patch.
+///
+/// A value equal to the mask the sidecar previously reported for that same
+/// server *and* the same key means "unchanged" and is resolved back to the
+/// stored secret server-side. `McpServerEditor` (`Views.swift`) relies on that
+/// round-trip, so masks are passed through verbatim here rather than being
+/// filtered out on the way.
+struct McpServerRequest: Encodable, Equatable {
+    let name: String
+    let transport: McpTransport
+    let command: String?
+    let args: [String]?
+    let env: [String: String]?
+    let url: String?
+    let headers: [String: String]?
+    /// `nil` omits the key, letting the sidecar apply its own `true` default —
+    /// so every existing call site keeps behaving exactly as it did. Sent as
+    /// `false` by 停用并保存, which is the whole reason this is expressible: a
+    /// server whose test failed can be kept without being handed to the next
+    /// start.
+    ///
+    /// Defaulted rather than required: a caller with no opinion about whether a
+    /// server should boot is exactly the caller that should not have to state
+    /// one, and requiring it would have meant editing call sites — including a
+    /// test — that have nothing to do with this field.
+    var enabled: Bool? = nil
+}
+
+/// One tool an MCP server exposes, as reported by `POST /config/mcp/test`.
+struct McpToolSummary: Decodable, Identifiable, Equatable {
+    let name: String
+    /// MCP servers are not required to describe their tools.
+    let description: String?
+
+    var id: String { name }
+}
+
+/// Mirrors `POST /config/mcp/test`. `success == true` with an empty `tools` is a
+/// server that connected but exposes nothing — distinct both from a failure and
+/// from `tools` being absent.
+struct McpTestResultSummary: Decodable, Equatable {
+    let success: Bool
+    let error: String?
+    let tools: [McpToolSummary]?
 }

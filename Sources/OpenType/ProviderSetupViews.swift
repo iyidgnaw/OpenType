@@ -501,6 +501,7 @@ struct OnboardingWizardView: View {
             }
             .padding(20)
         }
+        .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 

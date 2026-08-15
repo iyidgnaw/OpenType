@@ -3,11 +3,13 @@ import { dirname, join } from "node:path";
 import { buildAgentRoutes } from "./agent/routes";
 import { withApproval, yoloApprovalPolicy } from "./agent/approval";
 import type { AgentChatFn } from "./agent/loop";
-import { connectConfiguredMcpServers } from "./agent/mcpClient";
+import { startMcpConnections } from "./agent/mcpClient";
+import { McpConfigStore, resolveMcpServers } from "./agent/mcpConfigStore";
+import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
 import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
-import { buildAsrRoutes } from "./asr/routes";
+import { buildAsrRoutes, type TranscribeFn } from "./asr/routes";
 import { createRemoteWhisperClient } from "./asr/remoteWhisperClient";
 import { defaultWhisperClientFactories, WhisperClient } from "./asr/whisperClient";
 import { loadEnv } from "./env";
@@ -18,6 +20,7 @@ import { buildMemoryRoutes } from "./memory/routes";
 import { ConversationStore } from "./memory/conversations";
 import { buildConversationRoutes } from "./memory/conversationRoutes";
 import type { CallLLM } from "./memory/consolidator";
+import { scheduleStartupConsolidation } from "./memory/startupConsolidation";
 import { buildOneShotRoutes } from "./oneshot/routes";
 import { createFileContextUsageLogWriter, type ContextUsageLogWriter } from "./oneshot/contextDebugLog";
 import { createDeepSeekClient } from "./provider/deepseek";
@@ -51,7 +54,7 @@ export function buildApp(
   tools: ToolSet,
   contextLogWriter: ContextUsageLogWriter,
   callLLM: CallLLM,
-  transcribe: (audio: Uint8Array) => Promise<string>,
+  transcribe: TranscribeFn,
   providerConfigStore: ProviderConfigStore,
   /**
    * Root for spilled oversized tool results (T2). Omitted -- as every
@@ -60,7 +63,17 @@ export function buildApp(
    */
   spillRoot?: string,
   /** Root for durable per-run step logs (T7); omitted disables recording. */
-  runLogRoot?: string
+  runLogRoot?: string,
+  /**
+   * Backs the Settings "MCP 服务器" panel (P2-13). Optional so pre-existing
+   * assembly call sites keep compiling; omitted, the app simply serves no
+   * `/config/mcp` routes. `mcpEnvJson` is the `OPENTYPE_MCP_SERVERS` fallback
+   * those routes report as `source: "env"` -- passed in rather than read from
+   * `process.env` here so it is one explicit wiring decision, made in
+   * `main()`.
+   */
+  mcpConfigStore?: McpConfigStore,
+  mcpEnvJson?: string
 ) {
   return createRouter([
     {
@@ -80,9 +93,20 @@ export function buildApp(
       runLogRoot
     ),
     ...buildConversationRoutes(conversations),
-    ...buildAsrRoutes(transcribe),
-    ...buildTranscribeRoutes(chat),
+    // P0-1: the entity dictionary feeds back into recognition -- read per
+    // request (not captured once) so a term taught mid-session applies to the
+    // very next utterance. See `asr/dictionaryBias.ts`. P1-7 adds the other
+    // direction: each successful dictation appends an episodic event, so
+    // consolidation's raw material is no longer agent tasks alone.
+    ...buildAsrRoutes(transcribe, {
+      listTerms: () => store.allTerms(),
+      recordEpisodicEvent: (input) => store.recordEpisodicEvent(input),
+    }),
+    ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),
+    ...(mcpConfigStore
+      ? buildMcpConfigRoutes(mcpConfigStore, { envJson: mcpEnvJson })
+      : []),
   ]);
 }
 
@@ -127,16 +151,47 @@ async function main() {
     const result = await resolveChat([{ role: "user", content: prompt }]);
     return result.content ?? "";
   };
-  const mcpTools = await connectConfiguredMcpServers(process.env.OPENTYPE_MCP_SERVERS);
+  // MCP servers: the user's saved config (Settings' "MCP 服务器" panel, P2-13)
+  // if they have any, otherwise the `OPENTYPE_MCP_SERVERS` env var kept as the
+  // zero-config dev fallback -- `resolveMcpServers` owns that precedence, and
+  // the same "configured is explicit, never ambient" rule as the provider
+  // config: an env var alone never reports as configured. Persisted next to
+  // the SQLite DB, same data-directory convention as `provider-config.json`.
+  //
+  // Connections are established once, here, for this process's lifetime: a
+  // server added or edited through the API applies from the next sidecar
+  // start, not mid-run.
+  const mcpConfigStore = new McpConfigStore(
+    join(dirname(env.dbPath), "mcp-servers.json")
+  );
+  const resolvedMcpServers = resolveMcpServers(
+    mcpConfigStore,
+    process.env.OPENTYPE_MCP_SERVERS
+  );
+  // NOT awaited, and that is the whole point. Connecting used to block this
+  // line until every configured server had answered, so one server that hung
+  // on `initialize` meant the voice service never started -- and since
+  // `SidecarClient.waitUntilReady` gives up after 5s, the supervisor restarted
+  // into the same hang forever. The Settings panel that would delete the bad
+  // server is served by this process, so there was no way out from inside the
+  // product. MCP can now cost its own tools and nothing else: the set is
+  // usable immediately and fills in as servers answer, each bounded by its own
+  // budget. `mcpBootResilience.test.ts` reads this file and fails if an await
+  // ever reappears above `Bun.serve`.
+  const mcpTools = startMcpConnections(resolvedMcpServers.servers);
   const builtInTools = createBuiltInTools({ store, callLLM });
   const coreTools = createCoreTools({});
   // The approval seam wraps the *merged* set so built-in memory tools, core
-  // tools, and MCP tools all flow through the same gate; v2 ships only the
-  // always-allow YOLO policy (see agent/approval.ts for the swap-in seam).
-  // No guards are registered: the YOLO stance is unchanged (T6 added the
-  // guard SEAM and its monotonicity, not a policy). The audit sink is left
-  // unset here because the approval pair belongs to a run, and only the agent
-  // route knows which run a call belongs to.
+  // tools, and MCP tools all flow through the same gate. The policy here is
+  // the always-allow baseline, and stays that way on purpose: this is the set
+  // `/oneshot/ask` also narrows down to its two web tools, and ask has no run
+  // to prompt through. `/agent/run` applies the real, user-prompting policy
+  // (P1-6, `agent/approval.ts`) on top of this, per run, because asking needs
+  // that run's id, signal and question broker -- none of which exist here. See
+  // `agent/routes.ts`. No guards are registered: the YOLO stance is unchanged
+  // (T6 added the guard SEAM and its monotonicity, not a policy). The audit
+  // sink is left unset here because the approval pair belongs to a run, and
+  // only the agent route knows which run a call belongs to.
   const tools = withApproval(mergeToolSets(builtInTools, coreTools, mcpTools), yoloApprovalPolicy);
   const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
 
@@ -200,7 +255,10 @@ async function main() {
   // -- same "configured" precision as `resolveChat` above. The
   // request/response contract `asr/routes.ts` exposes stays identical
   // either way; only which backend actually serves the request changes.
-  const resolveTranscribe = async (audio: Uint8Array): Promise<string> => {
+  const resolveTranscribe = async (
+    audio: Uint8Array,
+    options: { initialPrompt?: string } = {}
+  ): Promise<string> => {
     const status = providerConfigStore.getStatus();
     const whisperConfig = providerConfigStore.getWhisperConfig();
     if (
@@ -214,10 +272,14 @@ async function main() {
         apiKey: whisperConfig.apiKey,
         model: whisperConfig.model,
       });
+      // The remote (OpenAI-shaped) transcription API has no equivalent of
+      // `initial_prompt`, so a remote user gets only the deterministic half of
+      // the dictionary feedback -- the alias rewrite `asr/routes.ts` applies to
+      // whatever comes back.
       return remoteClient.transcribe(audio);
     }
     await whisperReady;
-    return whisperClient.transcribe(audio);
+    return whisperClient.transcribe(audio, options.initialPrompt);
   };
 
   const fetch = buildApp(
@@ -230,7 +292,9 @@ async function main() {
     resolveTranscribe,
     providerConfigStore,
     env.spillRoot,
-    env.runLogRoot
+    env.runLogRoot,
+    mcpConfigStore,
+    process.env.OPENTYPE_MCP_SERVERS
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to
@@ -269,6 +333,11 @@ async function main() {
   });
 
   console.log(`opentype-sidecar listening on unix:${env.socketPath}`);
+
+  // P1-7: the consolidation gate finally gets a caller. One check, on a delay,
+  // after we're serving -- not a polling timer, and never on the startup path.
+  // See `memory/startupConsolidation.ts` for why the policy lives in a seam.
+  scheduleStartupConsolidation(store, callLLM);
 
   // P1-7: on a termination signal, tear down the local whisper python child
   // (otherwise it's orphaned and keeps holding its socket/model) and remove our

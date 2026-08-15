@@ -162,4 +162,74 @@ describe("ConversationStore", () => {
       });
     });
   });
+
+  describe("deleteConversation", () => {
+    test("deletes the conversation and returns true", () => {
+      const store = makeStore();
+      const id = store.createConversation("ask", "delete me");
+
+      expect(store.deleteConversation(id)).toBe(true);
+      expect(store.getConversation(id)).toBeNull();
+    });
+
+    test("returns false for an unknown id, leaving nothing to delete", () => {
+      const store = makeStore();
+      expect(store.deleteConversation(999_999)).toBe(false);
+    });
+
+    test("deletes the conversation's messages along with it", () => {
+      const store = makeStore();
+      const id = store.createConversation("ask", "what is 2+2?");
+      store.appendMessage(id, "user", "what is 2+2?");
+      store.appendMessage(id, "assistant", "4");
+
+      store.deleteConversation(id);
+
+      // Reach past the store's own read API (which already 404s on a missing
+      // conversation) to confirm the messages row itself is gone, not just
+      // unreachable through getConversation -- an orphaned row would still be
+      // sitting in conversation_messages, invisible to the UI but still on
+      // disk, which is exactly the bug a schema without ON DELETE enforcement
+      // (bun:sqlite's `foreign_keys` pragma defaults off) would produce.
+      const orphans = store.db
+        .query("SELECT * FROM conversation_messages WHERE conversationId = ?")
+        .all(id);
+      expect(orphans).toEqual([]);
+    });
+
+    test("leaves other conversations and their messages untouched", () => {
+      const store = makeStore();
+      const keep = store.createConversation("ask", "keep me");
+      store.appendMessage(keep, "user", "keep me");
+      store.appendMessage(keep, "assistant", "kept");
+      const doomed = store.createConversation("agent", "delete me");
+      store.appendMessage(doomed, "user", "delete me");
+
+      store.deleteConversation(doomed);
+
+      const kept = store.getConversation(keep);
+      expect(kept).not.toBeNull();
+      expect(kept!.messages).toHaveLength(2);
+    });
+
+    test("does not touch unrelated tables (entity_terms, owner_facts)", () => {
+      const store = makeStore();
+      const id = store.createConversation("ask", "delete me");
+      const now = Date.now();
+      store.db.run(
+        `INSERT INTO entity_terms (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ["Diyi", "[]", "person", 1.0, "owner", "[]", now, now]
+      );
+      store.db.run(
+        `INSERT INTO owner_facts (content, createdAt, origin) VALUES (?, ?, ?)`,
+        ["likes tea", now, "owner"]
+      );
+
+      store.deleteConversation(id);
+
+      expect(store.db.query("SELECT * FROM entity_terms").all()).toHaveLength(1);
+      expect(store.db.query("SELECT * FROM owner_facts").all()).toHaveLength(1);
+    });
+  });
 });

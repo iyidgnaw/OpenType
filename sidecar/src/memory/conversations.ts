@@ -153,4 +153,30 @@ export class ConversationStore {
 
     return { ...conversation, messages };
   }
+
+  /**
+   * Deletes a conversation and every message in it, atomically. Returns
+   * `true` if a conversation was actually removed, `false` if `id` didn't
+   * exist (the route maps that to 404, matching `getConversation`'s "no such
+   * row" contract rather than treating a no-op delete as success).
+   *
+   * The two DELETEs run in one `db.transaction` rather than leaning on the
+   * schema's `conversation_messages.conversationId ... ON DELETE CASCADE`:
+   * bun:sqlite ships with the `foreign_keys` pragma off by default, so that
+   * constraint is not actually enforced and a single `DELETE FROM
+   * conversations` would leave the messages behind as invisible-but-still-
+   * on-disk orphans -- exactly what deleting is supposed to prevent. Deleting
+   * messages before the conversation (rather than after) also means a crash
+   * mid-transaction can never leave a message pointing at an
+   * already-gone conversation, though the transaction wrapper makes that
+   * ordering belt-and-suspenders rather than load-bearing.
+   */
+  deleteConversation(id: number): boolean {
+    const run = this.db.transaction((): boolean => {
+      this.db.run(`DELETE FROM conversation_messages WHERE conversationId = ?`, [id]);
+      const result = this.db.run(`DELETE FROM conversations WHERE id = ?`, [id]);
+      return result.changes > 0;
+    });
+    return run();
+  }
 }

@@ -59,6 +59,19 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE INDEX IF NOT EXISTS conversations_kind_updated_at
 ON conversations(kind, updatedAt DESC);
 
+-- NOTE: the ON DELETE CASCADE below is documentation, not behaviour. bun:sqlite
+-- opens connections with \`PRAGMA foreign_keys = 0\`, and nothing here turns it
+-- on, so deleting a conversation does NOT remove its messages -- they are left
+-- behind as rows no query reaches and nothing cleans up. Verified directly:
+-- \`PRAGMA foreign_keys\` reads 0, and a raw DELETE against \`conversations\`
+-- leaves the message rows in place.
+--
+-- So any code that deletes a row referenced here must delete the children
+-- itself, in one transaction. \`ConversationStore.deleteConversation\` is the
+-- one such caller today and does exactly that. Turning the pragma on would be
+-- the tidier fix, but it makes every existing insert subject to a constraint
+-- that has never been enforced on live data -- a separate change with its own
+-- migration question, not a one-liner.
 CREATE TABLE IF NOT EXISTS conversation_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   conversationId INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

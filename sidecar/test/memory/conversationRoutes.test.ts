@@ -84,3 +84,81 @@ describe("GET /conversations/:id", () => {
     expect(response.status).toBe(404);
   });
 });
+
+describe("DELETE /conversations/:id", () => {
+  test("deletes the conversation and its messages", async () => {
+    const store = makeStore();
+    const id = store.createConversation("ask", "delete me");
+    store.appendMessage(id, "user", "delete me");
+    store.appendMessage(id, "assistant", "ok");
+
+    const router = createRouter(buildConversationRoutes(store));
+    const response = await router(
+      new Request(`http://sidecar/conversations/${id}`, { method: "DELETE" })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ deleted: true });
+    expect(store.getConversation(id)).toBeNull();
+    expect(
+      store.db.query("SELECT * FROM conversation_messages WHERE conversationId = ?").all(id)
+    ).toEqual([]);
+  });
+
+  // Same precedent as GET /conversations/:id in this file: a missing id is a
+  // 404 "not_found", not a 204-idempotent success -- deleting is one of the
+  // panel's editing actions (the same spirit as `/memory/terms/:id`'s DELETE),
+  // and a UI that thinks it deleted something that was already gone should
+  // hear about the mismatch rather than get a silent 2xx.
+  test("404s for an unknown conversation id", async () => {
+    const store = makeStore();
+    const router = createRouter(buildConversationRoutes(store));
+
+    const response = await router(
+      new Request("http://sidecar/conversations/999999", { method: "DELETE" })
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  test("400s for a non-numeric id, never reaching SQL", async () => {
+    const store = makeStore();
+    const id = store.createConversation("ask", "keep me");
+    const router = createRouter(buildConversationRoutes(store));
+
+    const response = await router(
+      new Request("http://sidecar/conversations/not-a-number", { method: "DELETE" })
+    );
+
+    expect(response.status).toBe(400);
+    // The well-formed conversation was never touched by the malformed request.
+    expect(store.getConversation(id)).not.toBeNull();
+  });
+
+  test("leaves other conversations, their messages, and the memory store intact", async () => {
+    const store = makeStore();
+    const keep = store.createConversation("agent", "keep me");
+    store.appendMessage(keep, "user", "keep me");
+    const doomed = store.createConversation("ask", "delete me");
+    const now = Date.now();
+    store.db.run(
+      `INSERT INTO entity_terms (canonicalTerm, aliases, category, confidence, origin, sourceEventIds, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["Diyi", "[]", "person", 1.0, "owner", "[]", now, now]
+    );
+    store.db.run(`INSERT INTO owner_facts (content, createdAt, origin) VALUES (?, ?, ?)`, [
+      "likes tea",
+      now,
+      "owner",
+    ]);
+
+    const router = createRouter(buildConversationRoutes(store));
+    await router(new Request(`http://sidecar/conversations/${doomed}`, { method: "DELETE" }));
+
+    const keptConversation = store.getConversation(keep);
+    expect(keptConversation).not.toBeNull();
+    expect(keptConversation!.messages).toHaveLength(1);
+    expect(store.db.query("SELECT * FROM entity_terms").all()).toHaveLength(1);
+    expect(store.db.query("SELECT * FROM owner_facts").all()).toHaveLength(1);
+  });
+});

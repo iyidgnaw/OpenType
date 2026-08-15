@@ -318,13 +318,36 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 ---
 
-## L. 菜单栏模板图标（review #12）
+## L. 菜单栏模板图标（review #12）—— 已完成（2026-08-15）
 
 - `OpenTypeApp.swift:389` 的 `image.isTemplate = false` → `true`，状态改用**形状**区分
   （idle 点 / listening 波形 / processing 齿轮或进度），而不是颜色。
 - 录音中允许保留一点强调色（这是 HIG 认可的例外），但 idle/processing 必须是模板图。
 
 **测试**：状态 → 图标名的纯映射函数（每个状态一个断言）。
+
+**落地**：`MenuBarStatusIcon`（`OpenTypeApp.swift`）拆成三个纯函数——`symbolName(for:mode:)` /
+`tint(for:)` / `accessibilityDescription(for:mode:runningAgentCount:)`——加一个只负责合成的
+`image(...)`，`Tests/OpenTypeTests/MenuBarStatusIconTests.swift` 22 例。红的证据不是「函数还不存在」，
+是把旧图标栅格化之后只留 alpha 通道（模板图就只有这个）：**idle / listening / processing / 三个 mode
+两两之间全部 0.0000**，即彩色去掉之后它们是同一张图——review #12 说的就是这件事，只是现在量出来了。
+
+四处与本节字面写法不同：
+
+- **idle 不是「点」，是当前 mode 的图形**（`InputMode.symbol`，跟 popover 里那张 mode 卡同一个形状）。
+  一个图形答不了两个问题，所以让它答当前活着的那个：静止时是「下一次按下会做什么」，
+  一旦有事发生就被状态接管。这条也是 `listening` 不能用 `mic.fill` 的原因——那是 transcribe 的
+  mode 图形，复用它会让**用得最多的那个 mode** 的 idle 和录音变成同一张图。
+- **processing 不用齿轮**：菜单栏里的齿轮读作「设置」。用 `ellipsis.circle`，而且是带圈的——
+  先试了裸 `ellipsis`，它的视觉重量只有其他图形的三分之一，工作那一秒图标像是消失了又回来。
+- **允许合并的状态是列出来的，不是漏掉的**：`transcribing`/`transforming`/`inserting` 共用一个
+  「在做」的记号（各自只有几百毫秒，用户没有依赖于区分它们的动作），`success`/`copied` 共用一个，
+  `idle`/`modeChanged` 共用一个（宣布 mode 本身就是 mode）。其余两两必须不同，测试里按这个清单断言。
+  `switch` **不写 `default:`**，所以 `ProcessingState` 新增 case 是编译失败而不是静默继承别人的形状。
+- **角标丢掉了数字，这是变好不是妥协**：原来是 36px 精灵图里的 9.5pt 字，屏幕上不到 5 点，
+  彩色时就已经读不出来，而 mask 里根本没有第二种颜色可以印它。现在是 5pt 圆点 + 一圈**挖空**
+  （mask 里两个不透明形状挨在一起会糊成一块，分隔只能是「没有」），数字移进 tooltip 和 VoiceOver
+  标签——这两处也从常量 `"OpenType"` 改成随状态更新，因为形状之外只剩文字能说清楚现在是什么状态。
 
 ---
 

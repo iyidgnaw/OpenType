@@ -163,9 +163,10 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.title = ""
-        button.toolTip = "OpenType"
-        button.setAccessibilityLabel("OpenType")
         statusItem = item
+        // Tooltip and accessibility label are set per state by
+        // `updateStatusIcon`, not once here: the icon is a mask now, so the
+        // words are the only place the state exists as text.
         updateStatusIcon(
             for: model.state,
             mode: model.configuration.selectedMode
@@ -268,6 +269,20 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
             runningAgentCount: runningAgentCount,
             mode: mode
         )
+        // The image is a template — AppKit throws its colour away and re-fills
+        // the mask — so the button's tint is the only route left for the one
+        // accent the HIG allows, and `nil` is what hands every other state back
+        // to the standard treatment: adapting to a light or dark menu bar, and
+        // inverting while the popover is open.
+        button.contentTintColor = MenuBarStatusIcon.tint(for: state)
+
+        let description = MenuBarStatusIcon.accessibilityDescription(
+            for: state,
+            mode: mode,
+            runningAgentCount: runningAgentCount
+        )
+        button.setAccessibilityLabel(description)
+        button.toolTip = description
     }
 
     @objc private func togglePopover() {
@@ -345,14 +360,124 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+/// The status-bar icon: a **template image**, so the state is carried by the
+/// shape and nothing else.
+///
+/// This used to be a coloured rounded square with a white mode glyph knocked
+/// out of it, `isTemplate = false`, and the fill colour was the only thing
+/// saying what the app was doing (`docs/reviews/2026-08-15-product-review.md`
+/// §12). That is three faults in one: a menu bar extra is supposed to be a
+/// template so the system can invert it for a dark menu bar and for an open
+/// menu; a colour-blind user got one flat square in every state; and an opaque
+/// square drawn as-is over a translucent menu bar sat on the wallpaper rather
+/// than in the bar. The measurement that settles it: rasterise the old icon and
+/// keep only its alpha channel — what a template image actually is — and idle,
+/// listening and processing came out *byte-identical*, because the square
+/// covered the whole canvas and the white glyph was opaque on top of it.
+///
+/// So the mapping below spends the one glyph it has on whichever question is
+/// live. **At rest the icon shows the mode** — `InputMode.symbol`, the same
+/// shape as that mode's card in the popover, which is the standing product
+/// decision that the menu bar answers "what will the next press do" without
+/// opening anything. **Once something is happening the state takes the glyph
+/// over**, because "what is it doing right now" is then the only question worth
+/// 18 points, and an answer that still depended on remembering the mode would
+/// not be one.
+///
+/// Deliberate groupings, and why they are not a loss: `transcribing` /
+/// `transforming` / `inserting` share one "working" mark (a few hundred
+/// milliseconds each, no user action depends on which, and three legible
+/// variants of "busy" do not exist at this size); `success` / `copied` share
+/// one; `idle` / `modeChanged` share one because a mode announcement *is* the
+/// mode. Everything else is distinct, and
+/// `Tests/OpenTypeTests/MenuBarStatusIconTests.swift` both pins the mapping and
+/// compares the rendered masks, so "distinguishable" is measured rather than
+/// asserted.
 enum MenuBarStatusIcon {
-    /// Per the product owner: the menu bar icon itself should say which mode
-    /// is active, glanceable without opening the popover — not just a
-    /// generic "OpenType is here" mark. One SF Symbol per mode, matching
-    /// `InputMode.symbol` (`Models.swift`) so the glyph here and the glyph on
-    /// that mode's card in the popover are always the same shape.
-    private static func glyphName(for mode: InputMode) -> String {
-        mode.symbol
+    /// Menu bar extras are laid out in an 18pt square (`squareLength`), and the
+    /// glyph is composed into a canvas of exactly that rather than handed
+    /// through at its own size, so a wide symbol (`waveform`) and a tall one
+    /// (`exclamationmark.triangle.fill`) occupy the same box.
+    private static let canvas = NSSize(width: 18, height: 18)
+
+    /// The whole product requirement, as a pure function: state (plus the mode,
+    /// which only the two at-rest cases read) to an SF Symbol name.
+    ///
+    /// The `switch` has **no `default:`** on purpose. A new `ProcessingState`
+    /// case then fails to build here instead of quietly inheriting some other
+    /// state's shape, which is a stronger guard than any test could be — a test
+    /// cannot enumerate a case that does not exist yet.
+    static func symbolName(for state: ProcessingState, mode: InputMode) -> String {
+        switch state {
+        case .idle, .modeChanged:
+            return mode.symbol
+        case .listening:
+            // Not `mic.fill`, which is transcribe's *mode* glyph: reusing it
+            // would make idle and recording the same picture in the mode people
+            // record in most. A waveform is also the more honest mark — it says
+            // sound is arriving, not that a microphone exists.
+            return "waveform"
+        case .transcribing, .transforming, .inserting:
+            // Three dots rather than the spec's suggested gear: a gear in a menu
+            // bar reads as settings. Enclosed rather than bare, which was the
+            // first attempt — a bare `ellipsis` is a third the optical weight of
+            // every other glyph here, so the icon appeared to vanish for the
+            // second it was working and come back when it finished.
+            return "ellipsis.circle"
+        case .success, .copied:
+            return "checkmark"
+        case .dispatched:
+            return "paperplane.fill"
+        case .cancelled:
+            // `ProcessingState.symbol` uses `circle.slash` for this, which the
+            // overlay can afford and the menu bar cannot — a slashed circle at
+            // 18pt is a smudge. The two surfaces are allowed to differ here
+            // because only one of them is 18 points wide.
+            return "xmark"
+        case .failure:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    /// The single HIG-sanctioned exception to a monochrome menu bar: an accent
+    /// while a recording is actually in progress. Everything else returns `nil`,
+    /// which is what keeps the mask under the system's own treatment.
+    ///
+    /// It is `AppAccent.nsPrimary` rather than a recording red because the
+    /// product has exactly one accent (the six-way theme picker was deleted),
+    /// and because the tint is no longer carrying information — the waveform
+    /// already said "listening" to someone who cannot see the colour at all.
+    static func tint(for state: ProcessingState) -> NSColor? {
+        switch state {
+        case .listening:
+            return AppAccent.nsPrimary
+        case .idle, .modeChanged, .transcribing, .transforming, .inserting,
+             .success, .copied, .dispatched, .cancelled, .failure:
+            return nil
+        }
+    }
+
+    /// The same information as the shape, in words — for VoiceOver and for the
+    /// tooltip, which are now the only place it exists as text. Both halves are
+    /// always named, since the glyph only ever draws one of them.
+    static func accessibilityDescription(
+        for state: ProcessingState,
+        mode: InputMode,
+        runningAgentCount: Int = 0
+    ) -> String {
+        let status = OpenTypeL10n.text(
+            "OpenType — \(mode.title) · \(state.title)",
+            english: "OpenType — \(mode.title) · \(state.title)"
+        )
+        guard runningAgentCount > 0 else { return status }
+        // The badge lost its numeral in the move to a mask (see
+        // `drawRunningAgentBadge`), so this sentence is where the count went.
+        return OpenTypeL10n.text(
+            "\(status) · \(runningAgentCount) 个 Agent 任务进行中",
+            english: runningAgentCount == 1
+                ? "\(status) · 1 Agent task running"
+                : "\(status) · \(runningAgentCount) Agent tasks running"
+        )
     }
 
     static func image(
@@ -360,133 +485,97 @@ enum MenuBarStatusIcon {
         runningAgentCount: Int = 0,
         mode: InputMode = .transcribe
     ) -> NSImage {
-        let size = NSSize(width: 18, height: 18)
-        let pixelWidth = 36
-        guard let representation = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixelWidth,
-            pixelsHigh: pixelWidth,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bitmapFormat: [],
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ), let context = NSGraphicsContext(bitmapImageRep: representation) else {
-            return NSImage(size: size)
-        }
+        let symbol = NSImage(
+            systemSymbolName: symbolName(for: state, mode: mode),
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(
+            // Regular weight, not the semibold the old icon needed to stay
+            // legible against its own coloured fill. Standing on the menu bar
+            // itself, the glyph should match the system's extras rather than
+            // shout over them.
+            NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        )
+        let isBadged = runningAgentCount > 0
 
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = context
-        context.imageInterpolation = .high
-        drawPixels(for: state, mode: mode)
-        if runningAgentCount > 0 {
-            drawRunningAgentBadge(count: runningAgentCount)
+        // A drawing handler rather than a fixed 2× bitmap: the handler is asked
+        // to draw at whatever scale the display in front of the user needs, so
+        // the glyph stays crisp on a non-Retina external monitor instead of
+        // being a downsampled 36px sprite.
+        let image = NSImage(size: canvas, flipped: false) { _ in
+            guard let symbol else { return true }
+            symbol.draw(in: glyphRect(for: symbol))
+            if isBadged {
+                drawRunningAgentBadge()
+            }
+            return true
         }
-        context.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
-
-        representation.size = size
-        let image = NSImage(size: size)
-        image.addRepresentation(representation)
-        image.isTemplate = false
-        image.accessibilityDescription = OpenTypeL10n.text(
-            "OpenType — \(mode.title)",
-            english: "OpenType — \(mode.title)"
+        image.isTemplate = true
+        image.accessibilityDescription = accessibilityDescription(
+            for: state,
+            mode: mode,
+            runningAgentCount: runningAgentCount
         )
         return image
     }
 
-    private static func drawPixels(
-        for state: ProcessingState,
-        mode: InputMode
-    ) {
-        let rect = NSRect(x: 0, y: 0, width: 36, height: 36)
-        backgroundColor(for: state).setFill()
-        NSBezierPath(
-            roundedRect: rect.insetBy(dx: 1, dy: 1),
-            xRadius: 10,
-            yRadius: 10
-        ).fill()
+    /// Fits `symbol` into the canvas at its own aspect ratio, centred, never
+    /// enlarged. Scaling down matters for the wide glyphs — `waveform` is
+    /// noticeably wider than tall at a given point size — which would otherwise
+    /// be the only ones clipped by the 18pt box.
+    ///
+    /// The badge does not move or shrink it. An earlier version laid a badged
+    /// glyph out in a smaller box anchored away from the corner, which made the
+    /// whole icon lurch down and left the moment a background task started —
+    /// motion in the menu bar that says nothing about the task.
+    private static func glyphRect(for symbol: NSImage) -> NSRect {
+        let box = NSRect(origin: .zero, size: canvas)
+        let size = symbol.size
+        guard size.width > 0, size.height > 0 else { return box }
 
-        drawModeGlyph(mode, in: rect)
-    }
-
-    /// Renders `mode`'s SF Symbol in white, centered in `rect`. SF Symbols
-    /// draw as multicolor/hierarchical by default; `.paletteColors([.white])`
-    /// forces a flat white render so it reads clearly against the colored
-    /// background regardless of which symbol a given mode uses.
-    private static func drawModeGlyph(_ mode: InputMode, in rect: NSRect) {
-        let configuration = NSImage.SymbolConfiguration(
-            pointSize: 16,
-            weight: .semibold
-        ).applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
-
-        guard
-            let symbol = NSImage(
-                systemSymbolName: glyphName(for: mode),
-                accessibilityDescription: nil
-            )?.withSymbolConfiguration(configuration)
-        else {
-            return
-        }
-
-        let symbolSize = symbol.size
-        let drawRect = NSRect(
-            x: rect.midX - symbolSize.width / 2,
-            y: rect.midY - symbolSize.height / 2,
-            width: symbolSize.width,
-            height: symbolSize.height
-        )
-        symbol.draw(in: drawRect)
-    }
-
-    /// Lightweight "N Agent tasks running" indicator (Part B, requirement 3):
-    /// a small filled dot in the icon's top-right corner, with the count
-    /// inside once it's more than a single task. Deliberately minimal —
-    /// this is meant to be glanceable, not a second status surface; the real
-    /// detail lives in the Task List panel (`AgentTaskLogView`) in the main
-    /// app window.
-    private static func drawRunningAgentBadge(count: Int) {
-        let badgeDiameter: CGFloat = 15
-        let badgeRect = NSRect(
-            x: 36 - badgeDiameter - 1,
-            y: 36 - badgeDiameter - 1,
-            width: badgeDiameter,
-            height: badgeDiameter
-        )
-        NSColor.white.setFill()
-        NSBezierPath(ovalIn: badgeRect.insetBy(dx: -1.4, dy: -1.4)).fill()
-        NSColor.systemBlue.setFill()
-        NSBezierPath(ovalIn: badgeRect).fill()
-
-        let text = count > 9 ? "9+" : "\(count)"
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9.5, weight: .bold),
-            .foregroundColor: NSColor.white
-        ]
-        let attributedText = NSAttributedString(string: text, attributes: attributes)
-        let textSize = attributedText.size()
-        attributedText.draw(
-            at: NSPoint(
-                x: badgeRect.midX - textSize.width / 2,
-                y: badgeRect.midY - textSize.height / 2
-            )
+        let scale = min(box.width / size.width, box.height / size.height, 1)
+        let drawn = NSSize(width: size.width * scale, height: size.height * scale)
+        return NSRect(
+            x: box.midX - drawn.width / 2,
+            y: box.midY - drawn.height / 2,
+            width: drawn.width,
+            height: drawn.height
         )
     }
 
-    static func backgroundColor(for state: ProcessingState) -> NSColor {
-        switch state {
-        case .listening:
-            return .systemRed
-        case .transcribing, .transforming, .inserting:
-            return .systemPurple
-        case .failure:
-            return .systemOrange
-        default:
-            return AppAccent.nsPrimary
-        }
+    /// "At least one Agent task is running" — a dot in the top-right corner.
+    ///
+    /// It **lost its count** in the move to a template image, and that is an
+    /// improvement rather than a concession: the old numeral was a 9.5pt font in
+    /// a 36px sprite, i.e. under 5 points on screen and unreadable even in
+    /// colour, and a mask has no second colour to print it in — it would have
+    /// had to be a hole punched in a 5pt dot. The number now lives in the
+    /// tooltip and the VoiceOver label, where it can actually be read; the menu
+    /// bar keeps the part a glance can take in, which is that something is
+    /// running at all. The detail was always in the popover's 进行中 section.
+    private static func drawRunningAgentBadge() {
+        let diameter: CGFloat = 5
+        let rect = NSRect(
+            x: canvas.width - diameter,
+            y: canvas.height - diameter,
+            width: diameter,
+            height: diameter
+        )
+        // Saved and restored around the `.clear` below, which is a context-wide
+        // setting: leaving it changed would apply to whatever AppKit draws next
+        // into the same context.
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+
+        // Clear a ring first. Two opaque shapes that touch merge into one blob
+        // in a mask, and there is no outline colour available to separate them
+        // with — so the separation has to be an absence.
+        NSGraphicsContext.current?.compositingOperation = .clear
+        NSBezierPath(ovalIn: rect.insetBy(dx: -1.2, dy: -1.2)).fill()
+
+        NSGraphicsContext.current?.compositingOperation = .sourceOver
+        // The colour is discarded — a template image keeps only alpha — so black
+        // here is the conventional placeholder, not a palette choice.
+        NSColor.black.setFill()
+        NSBezierPath(ovalIn: rect).fill()
     }
 }

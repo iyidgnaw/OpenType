@@ -208,22 +208,40 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 ---
 
-## G. MCP 启动超时（review #11）
+## G. MCP 启动失败的可见性（review #11）
 
-**目标**：一个挂起的 MCP server 不能让整个应用起不来。
+> **2026-08-15 范围更正（stage-1 发现，已独立核实）。** 本节原本要求「每个 server 加 8 秒超时」。
+> **那一半早就做完了**：`1245eb7`（1.0.0 的祖先）已经让 `startMcpConnections` 并发、
+> 每 server 受 `MCP_CONNECT_TIMEOUT_MS = 12_000` 约束且可注入，并且 `server.ts:181` 不再 await 它——
+> `test/agent/mcpBootResilience.test.ts` 钉着这些。误判来源是 `current-state §11` 的过期条目，
+> 详见 `docs/reviews/2026-08-15-product-review.md` §11 的更正块。
+>
+> **8 秒这个数不要去「修正」成 12 秒。** 8s 是在「连接仍然阻塞 `Bun.serve`、必须塞进 Swift 5s 预算」
+> 这个前提下算出来的，而那个前提已经不存在了。本节不钉任何一个数。
 
-- `sidecar/src/agent/mcpClient.ts` 的 `connectConfiguredMcpServers`：每个 server 加一个
-  **8 秒**超时（`AbortSignal.timeout` 或 `Promise.race`），超时就跳过这个 server 并记录，
-  继续下一个。今天唯一的界是 MCP SDK 的 60s，而 Swift 的 `waitUntilReady` 只给 5s。
-- 8 秒的理由：Swift 侧 5s 的预算已经因为其它原因被 `SidecarClient` 的重试吸收；真正要防的是
-  60s 级别的挂起。冷启动 `npx -y …` 本来就超过任何合理预算——**把「应用起不来」换成
-  「Agent 少了几个工具」正是这条想要的取舍**（current-state §11 已经论证过，此处不重复）。
-- 跳过的 server 要能被用户看见：`GET /config/mcp` 的返回里带 `lastStartupError`，
-  MCP 面板那一行显示「启动超时，已跳过」。**静默跳过等于换一个静默失败**。
-- **不做**：不改成完全非阻塞的 lazy `openAiTools`（current-state §11 说明了那是独立的一块工作）。
+**目标**：一个因为超时/失败被跳过的 server，不能在面板上和正常工作的 server 长得一样。
 
-**测试**：`connectConfiguredMcpServers` 对一个「永不 resolve」的假 transport 在超时后返回，
-且其余 server 照常连上；`lastStartupError` 出现在配置响应里。
+`startMcpConnections` 已经把每个 server 的结局记成 `connecting | connected | failed | timedOut` 外加错误文本，
+但这份报告**没有出口**——`LazyMcpToolSet.status()` 无人读取，`buildMcpConfigRoutes` 也拿不到它。要做的是接上出口：
+
+- `McpConfigRouteDeps` 增加**可选**的 `connectionReport?: () => McpConnectionReport`，
+  `GET /config/mcp` 的每一行增加可选 `lastStartupError?: string`。可选是为了让
+  `mcpConfigRoutes.test.ts` 既有的约 50 个测试与「没有 MCP 工具集可交」的装配保持原样。
+- `buildApp` 多一个可选参数，`main()` 把 `mcpTools.status` 传进去。
+- 三条载重性质，各有测试：
+  1. **按请求读，不在建路由时快照**（所以是 getter 不是值）。路由在启动时构建，那时每个 server 都还是
+     `connecting`；快照会永久报告「无错误」，等于把静默跳过原样搬到上一层。
+  2. **按 name 匹配，绝不按下标**。响应列的是 `allServers`（含被禁用的，以便还能重新启用），
+     而只有 enabled 子集会被连接——一旦有 server 被关掉，两个列表的长度和顺序就不同，
+     按下标 zip 会把失败扣到一个从没被启动过的行上。
+  3. **timeout 与 outright failure 在文本里保持可区分**。用户的修法不同（「太慢/连不上，已跳过」
+     vs「你的 command 写错了」），而面板只有一个字符串可渲染。
+- 响应的顶层形状不变（仍是 `{ configured, source, servers }`）——`mcpConfigRoutes.test.ts` 第一个测试
+  用严格 `toEqual` 钉着它，而这是 per-server 信息。
+- **不做**：不改成完全非阻塞的 lazy `openAiTools`（那是独立的一块工作）。
+
+**测试**：见 `sidecar/test/agent/mcpStartupErrorReporting.test.ts`（stage-1 已写，红在可见性这一半）。
+连接超时行为本身**不重复测**——`mcpBootResilience.test.ts` 已经覆盖，再写一遍只是引入第二套假 transport。
 
 ---
 

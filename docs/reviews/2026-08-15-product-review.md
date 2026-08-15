@@ -173,17 +173,31 @@ Prompt Studio 文案——真正的资产是那 670 个内联 `english:` 参数�
 
 ---
 
-## 11. MCP 启动阻塞仍未修 —— 唯一一条用户能把产品彻底弄坏且无法自救的路径
+## 11. ~~MCP 启动阻塞仍未修~~ —— **本条写错了**，只剩可见性那一半
 
-不是产品功能，但必须在产品清单里，因为后果是产品级的。
+> **2026-08-15 更正（写下当天即被推翻，保留原文而不是删掉）。**
+> 原文说 `connectConfiguredMcpServers` 仍然在 `Bun.serve` 之前被 `await`、串行、无超时，
+> 是「唯一一条用户能把产品彻底弄坏且无法自救的路径」。**这是错的。**
+> `1245eb7`「Stop one hung MCP server from bricking the app」——**1.0.0 的祖先提交**——已经修完了：
+> `MCP_CONNECT_TIMEOUT_MS = 12_000` 按 server 生效且可注入，连接并发进行，
+> `server.ts:181` 的 `startMcpConnections` **不再被 await**，`Bun.serve` 照常在 330 行起。
+> 应用被一个挂起的 MCP server 弄砖这条路径**已经关了**，有 `test/agent/mcpBootResilience.test.ts` 钉着。
+>
+> 我依据的是 `docs/superpowers/specs/2026-08-09-current-system-state.md` §11 记录的未决项，
+> 而那段文档在同一天被 `1245eb7` 作废却没有同步更新——**这是第二次犯同一个错**：
+> 上一轮 review 的「分发是最大的漏斗」也是在一个正在被并行修改的仓库里按静态快照下的判断
+> （见 `2026-08-14-product-review.md` §2「首次」）。教训不是「要读代码」——我读了文档；
+> 是**当一份文档声称某处未修时，必须去那处代码确认，而不是引用文档**。
+> 已修项在文档里的残留，和未修项一样会误导排期。
 
-`current-state §11` 记录得很清楚：`connectConfiguredMcpServers` 在 `Bun.serve` 之前被 `await`、
-按顺序连接、没有自己的超时（只有 MCP SDK 的 60s），而 Swift 侧 `waitUntilReady` 只给 5s。
-一个保存了的、会挂起的 MCP server ⇒ sidecar 起不来 ⇒ **听写也用不了**（一个只想口述的用户被 Agent 配置搞死），
-而且**无法从应用内恢复**——配置 UI 就在那个起不来的应用里，唯一出路是手工删 `mcp-servers.json`。
+真正还缺的是**可见性那一半**，原文的最后一句说对了一半：
 
-P2-13 上线时明确说了「留给下一轮 sidecar pass」。这就是下一轮。
-按每个 server 加一个短超时即可，把「应用起不来」换成「Agent 少了几个工具」。
+- 一个因为超时被跳过的 server，在 MCP 面板上和一个正常工作的 server **长得一模一样**。
+  用户的心智模型是「我保存了，所以 Agent 有这个工具」，而这个模型是错的，屏幕上没有任何东西纠正它。
+- `startMcpConnections` 已经把每个 server 的结局记成 `connecting / connected / failed / timedOut` 外加错误文本，
+  但那份报告**没有出口**：`LazyMcpToolSet.status()` 无人读取，`buildMcpConfigRoutes` 也拿不到它。
+- 所以要做的是把这份已有的报告接到 `GET /config/mcp` 的每一行上（`lastStartupError`），
+  让面板能显示「启动超时，已跳过」。**静默跳过等于把一种静默失败换成另一种。**
 
 ---
 

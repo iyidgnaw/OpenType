@@ -53,6 +53,7 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
         // A real dark palette is a design deliverable, not a colour flip; when
         // one exists, this line is what it replaces.
         NSApp.appearance = NSAppearance(named: .aqua)
+        registerToolTipDelay()
         NSApp.setActivationPolicy(.accessory)
         restoreMainWindowIfItWasOpen()
         configurePopover()
@@ -134,6 +135,33 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 
     func applicationWillTerminate(_ notification: Notification) {
         model.stopSidecar()
+    }
+
+    /// Speeds up **every** `.help(...)` tooltip in the app — not just the
+    /// Settings `InfoHint` **?** hints that motivated this, but any other
+    /// `.help()` call anywhere in OpenType, since AppKit's tooltip delay is a
+    /// single process-wide setting.
+    ///
+    /// `NSToolTipManager`'s stock delay is roughly a second and a half, which
+    /// makes a "hover the **?** to see what this row does" affordance read as
+    /// broken: by the time the tooltip shows, the person has already given up
+    /// and moved the pointer on. `NSInitialToolTipDelay` (milliseconds) is the
+    /// user default AppKit actually reads for that delay — long-standing but
+    /// undocumented API, confirmed empirically here rather than assumed, by
+    /// building the app, hovering a Settings **?**, and timing the reveal:
+    /// unset (stock) is a beat-and-a-half; set to 300 the hint reads as an
+    /// immediate response to the pointer arriving.
+    ///
+    /// 300ms rather than lower: a tooltip that fires the instant the pointer
+    /// crosses the glyph while travelling somewhere else is its own
+    /// annoyance, distinct from — and not fixed by — the "too slow" complaint
+    /// this exists to answer.
+    ///
+    /// `register(defaults:)`, not `set(_:forKey:)`: a user who has their own
+    /// `NSInitialToolTipDelay` (e.g. set via `defaults write`) keeps it: this
+    /// only fills in the value AppKit falls back to when nothing is set.
+    private func registerToolTipDelay() {
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 300])
     }
 
     private func configureStatusItem() {

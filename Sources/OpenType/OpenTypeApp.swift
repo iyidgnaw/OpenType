@@ -76,6 +76,11 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
 
     func applicationDidBecomeActive(_ notification: Notification) {
         guard didFinishLaunching else { return }
+        // Coming back from System Settings is exactly how a `.requiresApproval`
+        // login item gets cleared, and the Settings page's own `.task` does not
+        // re-run for a window that never disappeared — so reactivation is the
+        // one moment 开机自启 has to be re-read outside that page.
+        model.refreshLaunchAtLogin()
         handleReactivation()
     }
 

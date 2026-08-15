@@ -222,6 +222,23 @@ final class AppModel: ObservableObject {
     /// launchd refused leaves the switch reading 「关」, and without this the
     /// user would see a switch that simply refuses to move.
     @Published private(set) var launchAtLoginError: String?
+
+    /// 更新检查 (§B). What the last check concluded, or `nil` before one has
+    /// finished. `.unknown` is kept rather than discarded: 设置 can then say
+    /// 「上次没查成功」 instead of pretending no check ever ran — the silence §B
+    /// requires is about popping things up, not about lying in the one place
+    /// that exists to answer 「我这个版本还行吗」.
+    @Published private(set) var updateCheckOutcome: UpdateCheckOutcome?
+    /// When the last check finished, successful or not.
+    @Published private(set) var lastUpdateCheckAt: Date?
+    /// True while one is in flight, so 「检查更新」 can say so rather than
+    /// looking like it did nothing.
+    @Published private(set) var isCheckingForUpdate = false
+    private let updateChecker = UpdateChecker(localVersion: AppVersion.short)
+    /// The 10s-then-daily loop. At most one exists; see
+    /// `startUpdateCheckLoop()`.
+    private var updateCheckTask: Task<Void, Never>?
+
     private let auditStore = ImmutableAuditStore()
 
     /// Central append point for the immutable audit trail. The audit log is the
@@ -691,6 +708,8 @@ final class AppModel: ObservableObject {
             preference: configuration.hotKeyPreset,
             installed: installed
         )
+
+        startUpdateCheckLoop()
     }
 
     func hotKeyPressed() {
@@ -1144,6 +1163,96 @@ final class AppModel: ObservableObject {
 
     func openLoginItemsSettings() {
         contextBridge.openLoginItemsSettings()
+    }
+
+    // MARK: - 更新检查 (§B)
+
+    /// 10 seconds after launch, then once a day (`UpdateCheckSchedule`).
+    ///
+    /// The delay is the point of the first number: the sidecar is still coming
+    /// up at t+0 and a first-run Whisper model download is saturating the link,
+    /// and an update check has no business competing with either. The loop is
+    /// started once from `start()` and again whenever the user turns the
+    /// setting back on; the `updateCheckTask == nil` guard is what keeps a
+    /// second one from ever existing.
+    private func startUpdateCheckLoop() {
+        guard configuration.updateCheckEnabled, updateCheckTask == nil else { return }
+        updateCheckTask = Task { [weak self] in
+            try? await Task.sleep(
+                nanoseconds: UInt64(UpdateCheckSchedule.initialDelay * 1_000_000_000)
+            )
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.performUpdateCheck()
+                try? await Task.sleep(
+                    nanoseconds: UInt64(UpdateCheckSchedule.interval * 1_000_000_000)
+                )
+            }
+        }
+    }
+
+    /// Turning the switch off cancels the loop rather than hiding what it
+    /// finds: the setting exists because a periodic outbound request the user
+    /// never asked for deserves to be refusable, and a checker that goes on
+    /// checking silently would answer a different promise than the one the row
+    /// makes.
+    func changeUpdateCheckEnabled(_ enabled: Bool) {
+        configuration.updateCheckEnabled = enabled
+        if enabled {
+            startUpdateCheckLoop()
+        } else {
+            updateCheckTask?.cancel()
+            updateCheckTask = nil
+        }
+    }
+
+    /// 设置's 「检查更新」. Deliberately works even with the periodic check
+    /// switched off — that switch governs requests the app makes on its own,
+    /// and a pressed button is not one of them.
+    func checkForUpdatesNow() {
+        Task { [weak self] in
+            await self?.performUpdateCheck()
+        }
+    }
+
+    /// One check, one recorded answer. `isCheckingForUpdate` doubles as the
+    /// coalescing guard: the daily tick and a pressed 「检查更新」 landing
+    /// together should cost one request, not two.
+    private func performUpdateCheck() async {
+        guard !isCheckingForUpdate else { return }
+        isCheckingForUpdate = true
+        let outcome = await updateChecker.check()
+        isCheckingForUpdate = false
+        lastUpdateCheckAt = Date()
+        updateCheckOutcome = outcome
+    }
+
+    /// The version to put on the menubar popover, or `nil` when there is
+    /// nothing to say — no update, a failed check, or an update the user has
+    /// already been shown and acted on.
+    var announcedUpdateVersion: String? {
+        guard let updateCheckOutcome,
+              case .updateAvailable(let version, _) = updateCheckOutcome,
+              UpdatePromptPolicy.shouldAnnounce(
+                  updateCheckOutcome,
+                  lastSeenVersion: configuration.lastSeenUpdateVersion
+              )
+        else { return nil }
+        return version
+    }
+
+    /// 复制安装命令, from either surface.
+    ///
+    /// Copying is also the acknowledgement. The row has said its piece and the
+    /// command is on the clipboard, so this version stops being announced and
+    /// only a newer one brings the row back — stored in the display form the
+    /// outcome carries, which is what `UpdatePromptPolicy` compares against
+    /// next time.
+    func copyUpdateInstallCommand() {
+        contextBridge.copyToClipboard(UpdateInstall.command)
+        if case .updateAvailable(let version, _)? = updateCheckOutcome {
+            configuration.lastSeenUpdateVersion = version
+        }
     }
 
     func changeAutomaticOwnerProfileUpdates(_ enabled: Bool) {

@@ -39,6 +39,9 @@ struct MenuBarPopoverView: View {
             if !recentSessions.isEmpty {
                 recentSection
             }
+            if let version = announcedVersion {
+                updateRow(version)
+            }
             openWindowRow
             quitRow
         }
@@ -329,6 +332,74 @@ struct MenuBarPopoverView: View {
         onOpenMainWindow()
         model.selectedTab = .sessions
         model.focusedConversation = FocusedConversation(id: conversation.id, kind: kind)
+    }
+
+    // MARK: - 有新版本
+
+    /// The version this row just copied the command for. Kept for a beat after
+    /// the press so the button can say 「已复制」: acknowledging the update is
+    /// what hides the row, and a row that disappears out from under the cursor
+    /// leaves no evidence that anything was copied.
+    @State private var copiedVersion: String?
+
+    /// `nil` unless there is something to say — see
+    /// `AppModel.announcedUpdateVersion`, which is where 「同一个版本只提示
+    /// 一次」 is decided.
+    private var announcedVersion: String? {
+        model.announcedUpdateVersion ?? copiedVersion
+    }
+
+    /// §B's second surface, and the one that matters: this window is
+    /// `.accessory` and usually closed, so an update notice that only 设置
+    /// carries is one nobody ever sees. Not a modal, not a download — one row
+    /// and the command that does it.
+    private func updateRow(_ version: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DS.Colour.accent)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(OpenTypeL10n.text(
+                    "有新版本 \(version)",
+                    english: "Version \(version) available"
+                ))
+                .font(DS.Text.size(12.5))
+
+                Text(OpenTypeL10n.text(
+                    "复制命令，在终端里跑一次就更新好了",
+                    english: "Copy the command and run it once in a terminal"
+                ))
+                .font(DS.Text.mono(10.5))
+                .foregroundStyle(DS.Colour.ink(0.45))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Button {
+                model.copyUpdateInstallCommand()
+                copiedVersion = version
+                Task {
+                    try? await Task.sleep(nanoseconds: 1_600_000_000)
+                    copiedVersion = nil
+                }
+            } label: {
+                Text(
+                    copiedVersion == version
+                        ? OpenTypeL10n.text("已复制", english: "Copied")
+                        : OpenTypeL10n.text("复制安装命令", english: "Copy command")
+                )
+                .font(DS.Text.caption())
+                .foregroundStyle(DS.Colour.accent)
+            }
+            .buttonStyle(.plain)
+            .disabled(copiedVersion == version)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        // The same accent wash 进行中 uses: this row wants attention without
+        // being a warning, and the app has exactly one colour for that.
+        .background(DS.Colour.accent.opacity(0.05))
+        .dsHairline(.top, color: DS.Colour.border)
     }
 
     // MARK: - Footer

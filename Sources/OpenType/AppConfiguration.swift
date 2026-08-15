@@ -91,6 +91,34 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(launchAtLogin, forKey: Keys.launchAtLogin) }
     }
 
+    /// Whether the app asks GitHub, once a day, whether a newer release exists
+    /// (§B). On by default: an install that never learns it is outdated is the
+    /// problem this feature exists for, and the check is two requests a day
+    /// with no payload of ours attached.
+    ///
+    /// It is a switch at all because this is a local-first product where every
+    /// other outbound request is one the user initiated by speaking. A periodic
+    /// one they did not ask for deserves to be refusable — and turning it off
+    /// stops the loop rather than hiding its result
+    /// (`AppModel.changeUpdateCheckEnabled`).
+    @Published var updateCheckEnabled: Bool {
+        didSet { defaults.set(updateCheckEnabled, forKey: Keys.updateCheckEnabled) }
+    }
+
+    /// The newest version the user has already been shown, in the same
+    /// `v`-stripped display form `UpdateCheckOutcome.updateAvailable` carries —
+    /// storing a tag's `v1.1.0` here and later comparing it against `1.1.0`
+    /// would re-announce the same release forever. `UpdatePromptPolicy`
+    /// compares it as a version rather than as text, so the round trip survives
+    /// a stored value in any shape.
+    ///
+    /// `""` (never announced anything) is deliberately the empty-string default
+    /// rather than `nil`: it is unparseable, and an unparseable stored value
+    /// means 「说」, which is exactly right for a fresh install.
+    @Published var lastSeenUpdateVersion: String {
+        didSet { defaults.set(lastSeenUpdateVersion, forKey: Keys.lastSeenUpdateVersion) }
+    }
+
     /// Set once the user explicitly chose the first-run "just local
     /// transcription, skip AI setup" path. Persisted so the choice survives
     /// relaunches — `OnboardingPolicy.needsProviderOnboarding` reads it to let a
@@ -137,6 +165,8 @@ final class AppConfiguration: ObservableObject {
         playFeedbackSounds = defaults.object(forKey: Keys.playFeedbackSounds) as? Bool ?? true
         liveCaptionsEnabled = defaults.object(forKey: Keys.liveCaptionsEnabled) as? Bool ?? true
         launchAtLogin = defaults.object(forKey: Keys.launchAtLogin) as? Bool ?? false
+        updateCheckEnabled = defaults.object(forKey: Keys.updateCheckEnabled) as? Bool ?? true
+        lastSeenUpdateVersion = defaults.string(forKey: Keys.lastSeenUpdateVersion) ?? ""
         localTranscriptionOnlyAcknowledged = defaults.object(
             forKey: Keys.localTranscriptionOnlyAcknowledged
         ) as? Bool ?? false
@@ -155,6 +185,8 @@ final class AppConfiguration: ObservableObject {
         static let playFeedbackSounds = "playFeedbackSounds"
         static let liveCaptionsEnabled = "liveCaptionsEnabled"
         static let launchAtLogin = "launchAtLogin"
+        static let updateCheckEnabled = "updateCheckEnabled"
+        static let lastSeenUpdateVersion = "lastSeenUpdateVersion"
         static let localTranscriptionOnlyAcknowledged = "localTranscriptionOnlyAcknowledged"
     }
 }

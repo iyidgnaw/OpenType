@@ -89,6 +89,7 @@ struct SettingsColumn: View {
                                 engineGroup
                                 permissionsGroup
                                 dataGroup
+                                aboutGroup
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -102,6 +103,7 @@ struct SettingsColumn: View {
                             engineGroup
                             permissionsGroup
                             dataGroup
+                            aboutGroup
                         }
                         .padding(.horizontal, pagePadding)
                         .padding(.bottom, pagePadding)
@@ -541,6 +543,120 @@ struct SettingsColumn: View {
             "audit-events.v1.jsonl · \(auditEventCount.formatted()) 条",
             english: "audit-events.v1.jsonl · \(auditEventCount.formatted()) events"
         )
+    }
+
+    // MARK: 关于
+
+    /// Version, what the last update check found, and the switch that governs
+    /// whether there is a next one (§B).
+    ///
+    /// The announcement itself does not live here — the menubar popover carries
+    /// it, because this window is `.accessory` and usually closed, and a notice
+    /// only Settings shows is one nobody sees. What this group is for is the
+    /// other half: the user who came looking, who gets the version, the last
+    /// result including a failed one, and a way to check right now.
+    private var aboutGroup: some View {
+        SettingsGroup(OpenTypeL10n.text("关于", english: "About")) {
+            SettingsRow(
+                divided: false,
+                title: OpenTypeL10n.text("当前版本", english: "Version"),
+                subtitle: updateStatusLine,
+                mono: AppVersion.displayText.isEmpty ? nil : AppVersion.displayText
+            ) {
+                SmallButton(
+                    model.isCheckingForUpdate
+                        ? OpenTypeL10n.text("检查中…", english: "Checking…")
+                        : OpenTypeL10n.text("检查更新", english: "Check now")
+                ) {
+                    model.checkForUpdatesNow()
+                }
+                .disabled(model.isCheckingForUpdate)
+            }
+
+            // Shown whenever an update exists, not only the first time — unlike
+            // the popover's row, which is a notification and stops after the
+            // user has acted on it. Someone who opened 设置 and scrolled here is
+            // asking.
+            if let version = availableUpdateVersion {
+                SettingsRow(
+                    title: OpenTypeL10n.text(
+                        "有新版本 \(version)",
+                        english: "Version \(version) is available"
+                    ),
+                    subtitle: OpenTypeL10n.text(
+                        "在终端里重新跑一次安装命令就是更新；命令是幂等的，重复执行没有副作用。",
+                        english: "Re-running the install command in a terminal is the update — it is idempotent, so running it again is harmless."
+                    ),
+                    mono: UpdateInstall.command
+                ) {
+                    SmallButton(OpenTypeL10n.text("复制安装命令", english: "Copy command")) {
+                        model.copyUpdateInstallCommand()
+                    }
+                }
+            }
+
+            SettingsRow(
+                title: OpenTypeL10n.text("自动检查更新", english: "Check for updates automatically"),
+                subtitle: OpenTypeL10n.text(
+                    "启动 10 秒后查一次，之后每天一次。只问 GitHub 最新版本号，不上传任何内容；失败时不提示。",
+                    english: "Once 10 seconds after launch, then daily. It asks GitHub for the latest version number and uploads nothing; a failed check says nothing."
+                )
+            ) {
+                SettingsSwitch(
+                    isOn: Binding(
+                        get: { configuration.updateCheckEnabled },
+                        set: { model.changeUpdateCheckEnabled($0) }
+                    )
+                )
+                .accessibilityLabel(
+                    OpenTypeL10n.text("自动检查更新", english: "Check for updates automatically")
+                )
+            }
+        }
+    }
+
+    private var availableUpdateVersion: String? {
+        guard case .updateAvailable(let version, _)? = model.updateCheckOutcome else {
+            return nil
+        }
+        return version
+    }
+
+    /// The one line under 当前版本. A `.unknown` is named rather than hidden:
+    /// 「查不到」 and 「已是最新」 are different facts, and only one of them is
+    /// a reason to stop wondering.
+    private var updateStatusLine: String {
+        if model.isCheckingForUpdate {
+            return OpenTypeL10n.text("正在检查…", english: "Checking…")
+        }
+        guard let outcome = model.updateCheckOutcome,
+              let checkedAt = model.lastUpdateCheckAt
+        else {
+            return configuration.updateCheckEnabled
+                ? OpenTypeL10n.text("还没有检查过", english: "Not checked yet")
+                : OpenTypeL10n.text("自动检查已关闭", english: "Automatic checks are off")
+        }
+
+        // The app's one clock formatter, already bound to `OpenTypeL10n.locale`
+        // — a second one here would be a second thing to localize later.
+        let when = MenuBarSessionTime.text(for: checkedAt)
+        switch outcome {
+        case .upToDate:
+            return OpenTypeL10n.text(
+                "已是最新版本 · \(when) 检查",
+                english: "Up to date · checked \(when)"
+            )
+        case .updateAvailable(let version, _):
+            return OpenTypeL10n.text(
+                "有新版本 \(version) · \(when) 检查",
+                english: "Version \(version) available · checked \(when)"
+            )
+        case .unknown:
+            return OpenTypeL10n.text(
+                "上次没能查到 · \(when)",
+                english: "The last check did not get an answer · \(when)"
+            )
+        }
     }
 
     private var automaticProfileUpdateDescription: String {

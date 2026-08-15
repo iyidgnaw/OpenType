@@ -309,7 +309,7 @@ agent 在同一批文件里改动），要么另起一条并行的分发路径�
 
 ---
 
-## I. 历史：正文搜索 / 单条删除 / 导出（review #7）
+## I. 历史：正文搜索 / 单条删除 / 导出（review #7）—— 已完成（2026-08-15），会话删除除外
 
 - `HistoryStore`：`delete(id:)`，`entries` 上限从 100 提到 **1000**（JSON 文件，1000 条量级完全够用；
   真要再大就该换存储，那是另一件事）。
@@ -322,6 +322,25 @@ agent 在同一批文件里改动），要么另起一条并行的分发路径�
 
 **测试**：`HistoryStore.delete` / 上限迁移（老的 100 条文件读进来不丢）；搜索匹配的纯函数
 （大小写、CJK 子串、空查询返回全部）；导出格式的快照测试。
+
+**落地**（与本节字面写法有一处出入，是实现阶段的范围决定，不是漏做）：
+
+- `HistoryStore.delete(id:)` + 上限 1000（`Sources/OpenType/HistoryStore.swift`）：老的 100 条
+  `history.json` 按原样迁移，不改顺序、不丢字段（含 `contextPreview` 缺省/显式 `null`/有值三种历史形状）。
+- 正文搜索抽成纯函数 `Sources/OpenType/HistorySearch.swift`：`HistorySearch`（听写：transcript +
+  result + applicationName，AND-of-terms，大小写不敏感但不走 locale）供两个列表共用；
+  `SessionSearch` 在其上再包一层 `SessionSearchOutcome`（`.matches` / `.noMatches` /
+  `.noMatchesInLoadedSubset(bodiesSearched:total:)`），把「没有匹配」和「只搜了已加载部分、没有匹配」
+  两种断言分开传到 `SessionsListColumn` 的空状态文案，不在视图边界塌缩成一个 `Bool`。
+- 导出 `Sources/OpenType/HistoryExport.swift`（纯函数，不碰文件系统/`NSSavePanel`，Markdown +
+  JSON 两种格式；JSON 侧原样往返，`ConversationDetail` 保持 `Decodable`-only，导出用一个
+  file-private 的 encodable mirror 而不是把它拓宽成 `Codable`）+ `Sources/OpenType/
+  HistoryExportPanel.swift`（薄的 `NSSavePanel` 落盘层，两个列表的 `…` 菜单都调它）。
+- **会话（对话）的单条删除没有做**，与本节字面写法「会话的 `…` 菜单」不一致：sidecar 至今没有
+  `DELETE /conversations/:id`（`sidecar/src/memory/conversationRoutes.ts` 只读），补一个既要动
+  `sidecar/`（本批其他条目正在改，越权）又要动 `AppModel.swift`（同一批的实现分工里是别的 agent
+  在用的文件），而这一半也没有被 stage-1/2 的红测试钉住。听写历史的单条删除（`HistoryStore.delete`）
+  和两个列表的导出都按原计划做了；会话删除是唯一留白的一项，留给下一批单独排期。
 
 ---
 

@@ -500,7 +500,7 @@ struct SettingsDetailColumn: View {
                         model.settingsRoute = nil
                     } label: {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(DS.Text.size(15, .semibold))
                             .foregroundStyle(DS.Colour.accent)
                             .frame(width: 20, height: 20)
                             .contentShape(Rectangle())
@@ -523,7 +523,11 @@ struct SettingsDetailColumn: View {
                     english: "Pick a setting on the left"
                 ))
                 .font(DS.Text.caption())
-                .foregroundStyle(.tertiary)
+                // .4 — 03C's quietest informational step (已授权, the header's
+                // status line). The pushed column is not in the mockup, so it
+                // borrows an alpha the mockup draws instead of `.tertiary`,
+                // which resolves to ≈ .26, lighter than anything on 03C.
+                .foregroundStyle(DS.Colour.ink(0.4))
                 Spacer(minLength: 0)
             }
         }
@@ -584,7 +588,9 @@ private struct AuditLogPage: View {
                 english: "Every recognition, correction, completion, cancellation and failure appends one JSON line to this file. It is append-only and untouched by Clear local data; raw audio is never kept."
             ))
             .font(DS.Text.caption())
-            .foregroundStyle(.secondary)
+            // .5 — the alpha 03C sets on an explanatory note. The sub-pages are
+            // not drawn, so their prose takes the step the drawn prose takes.
+            .foregroundStyle(DS.Colour.ink(0.5))
             .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 0) {
@@ -603,7 +609,9 @@ private struct AuditLogPage: View {
                 ) {
                     Text(eventCount.map { $0.formatted() } ?? "—")
                         .font(DS.Text.mono(12))
-                        .foregroundStyle(.secondary)
+                        // The same 12pt mono at .5 that 03C's read-only 「Tab」
+                        // trailing value takes.
+                        .foregroundStyle(DS.Colour.ink(0.5))
                 }
             }
             .dsCard()
@@ -638,7 +646,7 @@ private struct ClearLocalDataPage: View {
                 english: "These act on local data only and cannot be undone. The audit trail (audit-events.v1.jsonl) is not included — it is append-only."
             ))
             .font(DS.Text.caption())
-            .foregroundStyle(.secondary)
+            .foregroundStyle(DS.Colour.ink(0.5))
             .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 0) {
@@ -841,7 +849,7 @@ private struct SettingsRow<Trailing: View>: View {
                     // height, and a chevron fills about two thirds of a
                     // Material box — so 16px of box is ~13pt of symbol.
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(DS.Text.size(13, .semibold))
                         .foregroundStyle(DS.Colour.ink(0.3))
                 }
             }
@@ -1087,7 +1095,7 @@ private struct ControlChip: View {
                 // chevrons fill a box more completely than one does, so this
                 // maps lower than the 16px `chevron.right` above, not higher.
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(DS.Text.size(10, .semibold))
                     .foregroundStyle(DS.Colour.ink(0.35))
             }
         }

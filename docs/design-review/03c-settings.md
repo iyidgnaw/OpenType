@@ -223,7 +223,7 @@ below rather than restated per row:
 | Property | Design | Implemented | Status |
 |---|---|---|---|
 | Height | `26px` (README: 26–28) | `.frame(height: 26)` | ✅ |
-| Radius | `7px` | was the bare literal `7` | 🔧 → `DS.Radius.iconButton` = 7; same value, now named |
+| Radius | `7px` | was the bare literal `7` | 🔧 → `DS.Radius.smallControl` = 7; same value, now named |
 | Track colour | `#F0F0EE` | was `Color.primary.opacity(0.06)` = `#F0F0F0` over white — achromatic, so no alpha of it can be warm | 🔧 → `DS.Colour.controlTrack` = `#F0F0EE`. Not `segmentTrack` (`#EDEDEA`), which is the darker track the handoff draws on a *sheet*; 03C's sits on a white card. |
 | Track padding | `2px` | `.padding(2)` | ✅ |
 | Segment gap | `gap:2px` | `HStack(spacing: 2)` | ✅ |
@@ -236,7 +236,8 @@ below rather than restated per row:
 ### Small button (`SmallButton`) — 授权 and the sub-pages' actions
 
 Specced in §7. Matches on all nine properties; the `.12` border is now
-`DS.Colour.ink(0.12)` rather than a bare literal.
+`DS.Colour.buttonBorder` (literal black at .12) rather than a bare
+`Color.primary.opacity(0.12)`, which rendered at .102.
 
 ### Chevron row
 
@@ -290,7 +291,8 @@ Five sub-page routes all still reachable: `.speechRecognition`, `.languageModel`
 `DesignTokens.swift` is still not edited from here, but it grew the literal steps
 03C needs in the same batch, so the four gaps the first pass recorded are down to
 two — and `SettingsViews2.swift` now contains no bare colour or radius literal at
-all.
+all, nor (after §15) any platform text semantic except `.primary`, which the
+handoff's own colour table names for 文字主.
 
 All four are closed, and nothing on 03C is still blocked on a token:
 
@@ -307,16 +309,22 @@ All four are closed, and nothing on 03C is still blocked on a token:
 Three more that the first pass had not flagged, because their *values* were
 right and only their expression was a literal, are now named too: the toggle's
 off track (`DS.Colour.fieldBorder`), its knob shadow (`DS.Shadow.knob`), and the
-two control radii `5` / `7` (`DS.Radius.tag` / `DS.Radius.iconButton`).
+two control radii `5` / `7` (`DS.Radius.tag` / `DS.Radius.smallControl` — that
+7pt step was briefly `iconButton`, renamed because the segmented track that
+takes it is not an icon button).
 
 The borders and fills above are literal black; the ink values are literal
 `#1C1C1E`. The handoff uses both bases and they are not interchangeable —
 `Color.primary` is `labelColor`, black at 0.85, so the old
 `Color.primary.opacity(0.12)` was rendering at .102.
 
-Two literals remain by necessity, not by gap: the icon point sizes (13 / 10),
-which exist only because the handoff ships no Material→SF size table, and the
-control heights (24 / 26), which are per-control specs the scale does not name.
+Two sets of values remain outside the handoff's own tables, by necessity rather
+than by gap: the icon point sizes (15 / 13 / 10), which exist only because the
+handoff ships no Material→SF size table, and the control heights (24 / 26), which
+are per-control specs the scale does not name. The three icon sizes now go
+through `DS.Text.size(_:_:)` rather than a bare `.system(size:)` — the value is
+still this file's judgement call, but it is spelled the way 03A spells the same
+kind of call, so a later sweep can find all of them at once.
 
 ## 12 · Out-of-scope changes needed
 
@@ -350,7 +358,7 @@ reordered or rebound; §10's inventory check still holds.
   rendering at .102.
 - **Two bare radius literals and one bare shadow** — the segmented track's `7`,
   its selected chip's `5`, and the toggle knob's `0 1px 2px rgba(0,0,0,.25)` —
-  now `DS.Radius.iconButton`, `DS.Radius.tag` and `DS.Shadow.knob`.
+  now `DS.Radius.smallControl`, `DS.Radius.tag` and `DS.Shadow.knob`.
 - **The segmented track** from an achromatic overlay to `DS.Colour.controlTrack`
   = `#F0F0EE`, and its **selected chip's shadow** from `DS.Shadow.control`
   (`.05`) to `DS.Shadow.lifted` (`.1`), which is what the markup draws.
@@ -359,6 +367,28 @@ Everything marked ⚠️ above for a reason other than a rounded value is untouc
 the narrow fallback, the shortcut-health row, the live 启动方式 note, the dimmed
 写入后恢复原剪贴板, the mute toggle, the two 数据 preferences, the unconfigured
 status dot and the 打开设置 / 授权 split all stay exactly as they were.
+
+## 15 · Third pass — the pushed sub-pages
+
+03C draws the list column only, so the second pass stopped at its edge and the
+pushed pages (审计记录, 清除本地数据, and the "pick a setting" placeholder) kept
+their platform semantics. That left one screen carrying two grey axes: the list
+on the handoff's warm `#1C1C1E` scale, the page pushed beside it on
+`labelColor`'s cooler one. Four values, no structural change:
+
+- **The two sub-pages' intro paragraphs** — `.secondary` → `DS.Colour.ink(0.5)`,
+  the alpha 03C sets on 松开之后's note, which is the same role.
+- **审计记录's 记录条数 value** — `.secondary` → `ink(0.5)`, matching the read-only
+  12pt mono trailing value 03C does draw (「Tab」).
+- **The empty detail column's placeholder** — `.tertiary` (≈ .26) → `ink(0.4)`,
+  03C's quietest informational step (已授权, the provider rows' mono line).
+
+And the three `.system(size:)` glyph literals — the back chevron (15),
+`chevron.right` (13), `unfold_more` (10) — now go through `DS.Text.size(_:_:)`.
+Same rendered sizes; §11 records why the numbers themselves are local.
+
+§10's inventory still holds — re-checked against the file after these edits: all
+ten preferences bound, all five routes reachable, no row added or removed.
 
 ## 14 · Verification
 

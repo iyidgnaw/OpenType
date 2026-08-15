@@ -20,6 +20,16 @@
 
 现在这一整条轴在 `DS.Colour.ink(_:)` 里，基色是字面的 `#1C1C1E`，α 直接照抄稿子。下表写作 `ink(0.42)` 的即是。同一批里 `DS.Colour.hairline` / `border` 也从 `Color.primary.opacity(α)` 换成了 `Color.black.opacity(α)` —— `labelColor` 本身就是黑 0.85，旧写法把 `rgba(0,0,0,.07)` 解析成了 0.0595。
 
+## 第三批（2026-08-15）：收尾，把最后 4 处平台语义色换掉
+
+第二批把稿子画了的每一处都撤回来了，但漏了三个稿子**没画**的元素 —— 它们仍然写着 `.secondary` / `.tertiary`，于是同一屏上「稿子画过的部分」在 `.30–.55` 这条暖轴上，「稿子没画的部分」在系统的冷轴上（`.tertiary` ≈ 黑 0.26，`.secondary` ≈ 黑 0.50），两组灰并排就能看出来。稿子没画不等于可以换一条轴：新增元素照样从稿子画过的档位里取一档。本批 4 处：
+
+1. **搜索占位文案** —— 唯一一处稿子**明确写了值**（`rgba(28,28,30,.4)`）却仍由平台决定的颜色。`TextField` 的占位色是 `placeholderTextColor` = 黑 0.25。改成自绘占位层，见第 1 节该行。
+2. **搜索框清除按钮** `.tertiary` → `ink(0.35)`。
+3. **空列表**的图标 `.tertiary` → `ink(0.3)`、副文案 `.secondary` → `ink(0.45)`。
+
+顺带核了两条统计带的编辑规则，都成立（06C 逐行对过）：空值印「—」不印 0，唯独「说出的字数」印一个 `ink(0.3)` 的 `0`（`hasData: summary.wordsDictated > 0`，`Self.grouped` 出 `"0"`）；四个数里只有第四个 `accented: true`，且 `valueStyle` 在 `!hasData` 时先返回 `ink(0.3)`，accent 透不过去。
+
 ---
 
 ## 1 · 页头（3A，高 52pt，`padding: 0 24px`，`gap: 14px`）
@@ -36,7 +46,7 @@
 | 计数「248 条 · 全部保存在本机」 | 是否存在 | 3A 画了，6A **没画**（同一个页头，只剩 `flex:1` 的空档） | 不渲染，位置由 `Spacer(minLength: 0)` 吃掉 | ✅ 对 6A。稿子这两节自相矛盾，而实现的是 6A —— 统计带就在页头下面，那条免责声明已经把「全部保存在本机」讲了一遍。审查后由产品负责人拍板去掉（`36ff2a7`），不属于本批的令牌坍缩 |
 | 搜索框 | height | `26px` | `.frame(height: 26)` | ✅ |
 | 搜索框 | padding-x | `11px` | `.padding(.horizontal, 11)` | ✅ |
-| 搜索框 | radius | `7px` | `DS.Radius.iconButton` = 7 | 🔧 原先 `DS.Radius.control` = 6 |
+| 搜索框 | radius | `7px` | `DS.Radius.smallControl` = 7 | 🔧 原先 `DS.Radius.control` = 6 |
 | 搜索框 | background | `#fff` | `DS.Colour.card` = `Color.white` | ✅ |
 | 搜索框 | border | `.75px rgba(0,0,0,.09)` | `DS.Colour.controlBorder` = 黑 0.09，0.75pt | 🔧 原先 `DS.Colour.border`。页头控件躺在 `#F5F5F3` 上而不是卡里，明度差本来就小，这 0.02 就是稿子花在「让它看着像个控件」上的钱 |
 | 搜索框 | shadow | `0 1px 1.5px rgba(0,0,0,.05)` | `DS.Shadow.control` = 黑 0.05 / radius 0.75 / y 1（CSS blur 1.5 ≈ radius 0.75） | ✅ |
@@ -45,8 +55,8 @@
 | 搜索图标 | icon / size | `search` 15px → `magnifyingglass` | `.system(size: 15)` | 🔧 原先 `DS.Text.section()`（15pt **semibold**）；字号对，字重把字形画粗了。改成 15pt regular |
 | 搜索图标 | color | `rgba(28,28,30,.5)` | `ink(0.5)` | 🔧 原先 `.secondary`（≈ 0.50，只差在没锚到 `#1C1C1E`） |
 | 搜索占位文案 | font | `12px` | `DS.Text.caption()` = 12pt | ✅ |
-| 搜索占位文案 | color | `rgba(28,28,30,.4)` | 系统 placeholder 色 | ⚠️ `TextField` 的占位色由 `.plain` 样式给，改它要自绘占位层 |
-| 清除按钮（`xmark`） | — | 稿件没有 | 有输入时出现，11pt `.tertiary` | ⚠️ 新增。稿件只画了静态态；一个 26pt 的搜索框没有清除入口，只能靠全选删除 |
+| 搜索占位文案 | color | `rgba(28,28,30,.4)` | `ink(0.4)`，自绘占位层 | 🔧 第三批。原先交给 `TextField` 自己的占位色 = `placeholderTextColor` = 黑 0.25，比这个屏幕上任何一档都浅。占位文案改成 `overlay(alignment: .leading)` 里的一个 `Text`（`allowsHitTesting(false)` + `accessibilityHidden`），字段本身带 `accessibilityLabel`，可访问名不变 |
+| 清除按钮（`xmark`） | — | 稿件没有 | 有输入时出现，11pt `ink(0.35)` | ⚠️ 新增。稿件只画了静态态；一个 26pt 的搜索框没有清除入口，只能靠全选删除。颜色第三批从 `.tertiary` 改成 `ink(0.35)` —— 稿件没画这个按钮，所以取它给同一个页头里另一个可点小字形（来源下拉的 `unfold_more`）的那一档，而不是自己编一档 |
 | 来源下拉 | height / padding-x / radius / bg / border / shadow / gap | 同搜索框 | 同搜索框（共用 `dsHeaderControl()`） | 同上 |
 | 来源下拉文案 | font / color | `12px`，继承色 | `DS.Text.caption()` = 12pt，`.primary` | ✅ |
 | 来源下拉图标 | icon / size | `unfold_more` 14px → `chevron.up.chevron.down` | `.system(size: 14)` | 🔧 原先 `DS.Text.body()` = 13pt |
@@ -197,6 +207,7 @@
 | 动作图标 | hover 主体 | README 未指明 | **行** hover 时两个一起变深 | ⚠️ 稿件把 `.32 → .55` 写成这一对图标的共同属性，所以按行响应；原先的逐图标 hover 已去掉，避免多出一个稿件没有的第三态 |
 | 动作 | tooltip / a11y | 稿件没有 | 「复制」「重新使用」 | ⚠️ 新增。两个无标签图标按钮必须有可访问名 |
 | 空列表 | — | 稿件没画 | 「还没有听写记录」/「没有匹配的记录」两态 | ⚠️ 新增。稿件是满数据稿，首次启动和搜不到都会落到这里 |
+| 空列表 | 图标 / 副文案色 | 稿件没画 | `ink(0.3)` / `ink(0.45)` | 🔧 第三批。原先 `.tertiary` / `.secondary`。这一屏没有空态可抄，所以两行各取稿子给同一角色的档：`.3` 是 06C 给「测不出的数」的那一档，`.45` 是 3A / 3C 每一条行副文案的那一档 |
 
 ## 10 · 窄布局统计带（06B，394pt）
 
@@ -250,7 +261,7 @@
 
 4. **`DS.Text` 没有 11.5pt** —— 关闭，见上。06B 的标签现在是 `DS.Text.size(11.5)`。
 
-5. **`DS.Radius` 没有 7pt** —— 已加 `DS.Radius.iconButton` = 7（另有 `4 / 5 / 8 / 9 / 13 / 99`），`dsHeaderControl()` 改用它，边框同时换成 `DS.Colour.controlBorder` = 黑 0.09。
+5. **`DS.Radius` 没有 7pt** —— 已加 7pt 一档（另有 `4 / 5 / 8 / 9 / 13 / 99`），`dsHeaderControl()` 改用它，边框同时换成 `DS.Colour.controlBorder` = 黑 0.09。这一档最终定名 `DS.Radius.smallControl`：它先叫过 `iconButton`，但用它的两个元素（搜索框、来源下拉）都不是图标按钮，一个只描述其中一个调用点的名字正是下一个人取错值的方式。
 
 ## 需要改其他文件（本次范围外，已上报）
 

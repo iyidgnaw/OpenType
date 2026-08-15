@@ -60,7 +60,7 @@ struct MenuBarPopoverView: View {
             RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
                 .fill(
                     LinearGradient(
-                        colors: [DS.Colour.accent, Color(red: 0.341, green: 0.318, blue: 0.980)],
+                        colors: [DS.Colour.accent, DS.Colour.brandGradientEnd],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -400,7 +400,7 @@ private struct ModeCell: View {
             .frame(maxWidth: .infinity)
             .frame(height: 52)
             .background(
-                isSelected ? DS.Colour.accent : DS.Colour.ink(0.045),
+                isSelected ? DS.Colour.accent : DS.Colour.codeFill,
                 in: RoundedRectangle(cornerRadius: DS.Radius.nested, style: .continuous)
             )
             .contentShape(Rectangle())

@@ -646,7 +646,11 @@ private struct MemoryEmptyRow: View {
     var body: some View {
         Text(message)
             .font(DS.Text.caption())
-            .foregroundStyle(.secondary)
+            // .5 — the alpha 03C gives an explanatory note under a control.
+            // 03B has no empty state to copy from, so this takes a step the
+            // handoff draws rather than the platform's `.secondary`, which is
+            // a different base (`labelColor`, not `#1C1C1E`).
+            .foregroundStyle(DS.Colour.ink(0.5))
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, MemoryMetrics.rowH)
             .padding(.vertical, MemoryMetrics.factRowV)
@@ -679,8 +683,12 @@ private struct MemoryRowAction: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .font(DS.Text.size(11))
+                // 03B draws no icon here at all, so .5 is the nearest step on
+                // the handoff's own ink axis to what this was — not an invented
+                // level, and not `.secondary`, which is `labelColor`-based and
+                // so a slightly cooler grey than everything around it.
+                .foregroundStyle(DS.Colour.ink(0.5))
                 .frame(width: MemoryMetrics.actionButton, height: MemoryMetrics.actionButton)
                 .contentShape(Rectangle())
         }
@@ -727,14 +735,14 @@ private struct MemoryTermForm: View {
                 HStack(spacing: DS.Space.label) {
                     Text(OpenTypeL10n.text("置信度", english: "Confidence"))
                         .font(DS.Text.caption())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Colour.ink(0.5))
                     // A slider, not a field: confidence is 0…1 on the sidecar
                     // side and anything outside that is a 400, so the control
                     // simply cannot express an invalid value.
                     Slider(value: $confidence, in: 0...1)
                     Text(String(format: "%.0f%%", confidence * 100))
                         .font(DS.Text.mono())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Colour.ink(0.5))
                 }
             }
 

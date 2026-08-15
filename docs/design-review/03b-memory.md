@@ -34,7 +34,7 @@ rounding a value into it.
 | Header strip | height | `52px` | `DS.Size.headerHeight` = 52 via `ColumnHeader` | ✅ |
 | Header strip | padding | `0 24px` | `ColumnHeader` → `DS.Space.pageWide` = 24 (narrow: `pageNarrow` = 14) | ✅ |
 | Header strip | vertical align | `align-items: center` | `HStack` default `.center` | ✅ |
-| Header strip | gap | `14px` | `ColumnHeader` uses `HStack(spacing: 8)` | ⚠️ **Out of scope** — `SidebarShell.swift:335`. The same `14px` header gap is drawn in 03A and 06A, so this is one cross-screen fix, not a memory-page one. See *Out-of-scope*. |
+| Header strip | gap | `14px` | `ColumnHeader` uses `HStack(spacing: 14)` | ✅ fixed centrally in `SidebarShell.swift` — the same gap is drawn in 03A and 06A, so it belongs to the shared component rather than to any one screen. |
 | Content area | padding | `0 24px 24px` | was `DS.Space.content` (16) | 🔧 → `DS.Space.pageWide` (24) wide / `pageNarrow` (14) narrow |
 | Content area | column gap | `16px` | `DS.Space.content` = 16 | ✅ |
 | Left column | flex | `1.15` | `MemoryMetrics.leftColumnShare` = 1.15/2.15 of the width left after the gap | ✅ |
@@ -60,7 +60,7 @@ rounding a value into it.
 | Status line | truncation | not specified | `lineLimit(1)`, `.middle` | ✅ |
 | 立即整理 | height | `26px` | `MemoryMetrics.headerControlHeight` = 26 | ✅ |
 | 立即整理 | padding | `0 11px` | `.padding(.horizontal, 11)` | ✅ |
-| 立即整理 | radius | `7px` | was `DS.Radius.control` = 6 | 🔧 → `DS.Radius.iconButton` = 7 |
+| 立即整理 | radius | `7px` | was `DS.Radius.control` = 6 | 🔧 → `DS.Radius.smallControl` = 7 |
 | 立即整理 | background | `#fff` | `DS.Colour.card` | ✅ |
 | 立即整理 | border | `.75px rgba(0,0,0,.09)` | was `DS.Colour.border` (α .07) | 🔧 → `DS.Colour.controlBorder` = `rgba(0,0,0,.09)`, 0.75pt |
 | 立即整理 | shadow | `0 1px 1.5px rgba(0,0,0,.05)` | `DS.Shadow.control` = α .05, radius 0.75, y 1 (CSS blur 1.5 ≙ radius .75) | ✅ |
@@ -134,9 +134,9 @@ rounding a value into it.
 | Origin badge | labels | `确认` / `自动` / `未确认` | `确认` (owner) · `自动` (system) · `助理` (agent) · `未确认` (untrusted) · `未知` | ✅ (agent/unknown not drawn) |
 | Edit / delete | presence | hover-revealed, not persistent (README §4) | hover-revealed | ✅ |
 | Edit / delete | layout cost | 03B's row has three columns and no fourth slot | was a permanently reserved 46pt column, pushing every badge 58pt left of the design | 🔧 → trailing `.overlay` over the badge; row at rest is now pixel-exact and hovering still causes no reflow |
-| Edit / delete | icon | not drawn; README's symbol table maps 删除项 → `xmark` | `pencil` / `trash`, 11pt, `.secondary`, in 22pt hit targets | ⚠️ 03B draws no icons here. `xmark` in that table is for dismissing an inline chip; a row delete that opens a confirm dialog is the standard `trash` affordance, and `pencil` has no table entry at all. |
+| Edit / delete | icon | not drawn; README's symbol table maps 删除项 → `xmark` | `pencil` / `trash`, `DS.Text.size(11)`, `DS.Colour.ink(0.5)`, in 22pt hit targets | ⚠️ 03B draws no icons here. `xmark` in that table is for dismissing an inline chip; a row delete that opens a confirm dialog is the standard `trash` affordance, and `pencil` has no table entry at all. (Third pass: the glyph moved off `.secondary` and off a bare `.system(size: 11)` — see §Third pass.) |
 | Edit / delete | dismissal safety | — | `allowsHitTesting(false)` while hidden; delete opens a `confirmationDialog` | ✅ (addition) |
-| Empty state | — | not drawn | one card-shaped row explaining the emptiness, `padding 12 14` | ⚠️ Addition: the mockup always has 34 terms. |
+| Empty state | — | not drawn | one card-shaped row explaining the emptiness, `padding 12 14`, 12pt at `DS.Colour.ink(0.5)` | ⚠️ Addition: the mockup always has 34 terms. Third pass moved its text off `.secondary`; one `MemoryEmptyRow` serves all three empty states below. |
 
 ## 关于你
 
@@ -215,9 +215,11 @@ pass left. They now go through `DS.Colour.ink(_:)`, the scale's alpha axis, at
 the alpha the markup states.
 
 **2 — a 5pt radius, and a 7pt one.** `DS.Radius.tag` = 5 for the provenance
-badges (README §7 specifies the same 5pt for type tags), `DS.Radius.iconButton`
+badges (README §7 specifies the same 5pt for type tags), `DS.Radius.smallControl`
 = 7 for 立即整理 (README §5's `6–7pt` small controls). `DS.Radius.control` stays
-6 for everything the mockup actually draws at 6.
+6 for everything the mockup actually draws at 6. (That 7pt step was briefly
+named `iconButton`; it was renamed because neither element that reaches for it —
+立即整理 here, 3A's search field and source filter — is an icon button.)
 
 **3 — hairline/fill alphas.** `DS.Colour.control` (`rgba(0,0,0,.05)`, the
 neutral badge fill), `DS.Colour.borderStrong` (`.08`, the confidence-bar track)
@@ -301,5 +303,28 @@ the error banner, the busy state on 立即整理, the empty-state rows, the
 hover-revealed edit/delete, 确认 on every non-owner origin, the `已回滚 ·` prefix
 that keeps the summary — are all still there and still marked ⚠️ above with
 their reasons unchanged.
+
+## Changes made — third pass (the elements the mockup does not draw)
+
+The second pass reversed every collapse on an element 03B draws. It left the
+four elements 03B *doesn't* draw still expressed as platform semantics, so the
+page carried two grey axes at once: the drawn rows on the handoff's warm
+`#1C1C1E` scale, the additions on `labelColor`'s cooler one (`.secondary` ≈ black
+.50, `.tertiary` ≈ .26). Not being drawn is not a licence to leave the axis — an
+addition takes a step the handoff *does* draw:
+
+1. **The empty-state row** (`MemoryEmptyRow`, all three sections) — `.secondary`
+   → `DS.Colour.ink(0.5)`, the alpha 03C sets on an explanatory note.
+2. **The hover-revealed edit/delete glyph** — `.secondary` → `ink(0.5)`, the
+   nearest step on the handoff's own axis to what it was, and its bare
+   `.system(size: 11)` → `DS.Text.size(11)`.
+3. **The add/edit popover's 置信度 label and its percentage** — both `.secondary`
+   → `ink(0.5)`.
+
+No row, action, binding or state changed. 确认 and 删除 were re-checked while in
+the file and are unchanged: both are persistent text buttons sitting beside the
+provenance badge on every non-`owner` row (accent for 确认, `ink(0.45)` for 删除),
+not hover-revealed and not behind a menu — which is the point, since provenance
+exists so a flagged fact can be cleared after review.
 
 **Verification.** `swift build` clean, `swift test` 524 tests / 0 failures.

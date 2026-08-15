@@ -146,26 +146,44 @@ struct DictationColumn: View {
     }
 
     private func searchField(narrow: Bool) -> some View {
-        HStack(spacing: 6) {
+        let placeholder = OpenTypeL10n.text("搜索转写内容", english: "Search transcripts")
+
+        return HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 // 15pt, and regular rather than `DS.Text.section()`'s semibold:
                 // the token's weight is for headings, and a semibold glyph reads
                 // heavier than the mock's icon at the same size.
                 .font(DS.Text.size(15))
                 .foregroundStyle(DS.Colour.ink(0.5))
-            TextField(
-                OpenTypeL10n.text("搜索转写内容", english: "Search transcripts"),
-                text: $query
-            )
-            .textFieldStyle(.plain)
-            .font(DS.Text.caption())
+            // The placeholder is drawn rather than passed as the field's title.
+            // 3A sets it at `rgba(28,28,30,.4)`, and `TextField`'s own
+            // placeholder is `placeholderTextColor` — black at .25, lighter than
+            // anything on the screen and the last of this header's greys still
+            // resolved by the platform rather than by the handoff.
+            TextField("", text: $query)
+                .textFieldStyle(.plain)
+                .font(DS.Text.caption())
+                .overlay(alignment: .leading) {
+                    if query.isEmpty {
+                        Text(placeholder)
+                            .font(DS.Text.caption())
+                            .foregroundStyle(DS.Colour.ink(0.4))
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .accessibilityLabel(placeholder)
             if !query.isEmpty {
                 Button {
                     query = ""
                 } label: {
                     Image(systemName: "xmark")
-                        .font(DS.Text.mono())
-                        .foregroundStyle(.tertiary)
+                        // .35 — the alpha 3A gives the other small glyph a user
+                        // can click in this header, the source filter's
+                        // indicator. Not drawn by the handoff, so it takes a
+                        // step the handoff draws rather than inventing one.
+                        .font(DS.Text.size(11))
+                        .foregroundStyle(DS.Colour.ink(0.35))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(OpenTypeL10n.text("清除搜索", english: "Clear search"))
@@ -290,12 +308,16 @@ struct DictationColumn: View {
         VStack(spacing: 10) {
             Image(systemName: symbol)
                 .font(DS.Text.title())
-                .foregroundStyle(.tertiary)
+                // .3 and .45: the handoff has no empty state to copy, so the
+                // two lines take the alphas it gives the same two roles
+                // elsewhere — .3 is what 06C dims an absent figure to, .45 is
+                // every row subtitle on 03A and 03C.
+                .foregroundStyle(DS.Colour.ink(0.3))
             Text(title)
                 .font(DS.Text.body(.semibold))
             Text(subtitle)
                 .font(DS.Text.caption())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(DS.Colour.ink(0.45))
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)

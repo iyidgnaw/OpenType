@@ -1231,7 +1231,7 @@ private struct OverlayView: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(
-                        DS.Colour.ink(0.05),
+                        DS.Colour.control,
                         in: RoundedRectangle(cornerRadius: DS.Radius.tag, style: .continuous)
                     )
             }
@@ -1457,7 +1457,7 @@ private struct WindowCountdownBar: View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(DS.Colour.ink(0.08))
+                    .fill(DS.Colour.borderStrong)
                 Capsule()
                     .fill(DS.Colour.accent)
                     .frame(width: max(0, proxy.size.width * remaining))
@@ -1713,7 +1713,7 @@ private struct IndeterminateBar: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Capsule().fill(DS.Colour.ink(0.08))
+                Capsule().fill(DS.Colour.borderStrong)
                 Capsule()
                     .fill(DS.Colour.accent)
                     .frame(width: proxy.size.width * 0.36)
@@ -1790,7 +1790,7 @@ private struct AgentQuestionCard: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
-                        .strokeBorder(DS.Colour.ink(0.09), lineWidth: 0.75)
+                        .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
                 )
             }
 
@@ -2182,7 +2182,7 @@ private struct VoiceSurfaceCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: DS.Radius.nested, style: .continuous)
-                .strokeBorder(DS.Colour.ink(0.08), lineWidth: 0.75)
+                .strokeBorder(DS.Colour.borderStrong, lineWidth: 0.75)
         )
     }
 
@@ -2215,7 +2215,7 @@ private struct VoiceSurfaceCard: View {
                         .padding(.horizontal, 10)
                         .frame(height: 24)
                         .background(
-                            DS.Colour.ink(0.05),
+                            DS.Colour.control,
                             in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
                         )
                 }
@@ -2231,7 +2231,7 @@ private struct VoiceSurfaceCard: View {
                 .padding(.horizontal, 10)
                 .frame(height: 24)
                 .background(
-                    DS.Colour.ink(0.05),
+                    DS.Colour.control,
                     in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
                 )
             }
@@ -2282,7 +2282,7 @@ private struct VoiceSurfaceCard: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: DS.Radius.block, style: .continuous)
-                                .strokeBorder(DS.Colour.ink(0.09), lineWidth: 0.75)
+                                .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
                         )
                 )
             }
@@ -2313,7 +2313,7 @@ private struct VoiceSurfaceCard: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: DS.Radius.sheet, style: .continuous)
-                .strokeBorder(DS.Colour.ink(0.09), lineWidth: 0.75)
+                .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
         )
     }
 

@@ -222,7 +222,8 @@ struct AgentToolsPage: View {
             McpButton(
                 title: OpenTypeL10n.text("重启服务并连接", english: "Restart and connect"),
                 icon: "arrow.clockwise",
-                borderAlpha: 0.09
+                border: DS.Colour.controlBorder,
+                paddingH: 11
             ) {
                 model.restartSidecarManually()
             }
@@ -308,7 +309,8 @@ struct AgentToolsPage: View {
                 title: OpenTypeL10n.text(
                     "MCP 服务器 · \(servers.count)",
                     english: "MCP servers · \(servers.count)"
-                )
+                ),
+                alignment: .center
             ) {
                 if isEnvironmentOnly {
                     // 7D puts both actions in the card itself, so the header
@@ -369,6 +371,8 @@ struct AgentToolsPage: View {
             ))
             .font(DS.Text.groupLabel())
             .fontWeight(.regular)
+            // 1.6 line height at 11pt.
+            .lineSpacing(4)
             .foregroundStyle(DS.Colour.ink(0.45))
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 4)
@@ -405,19 +409,10 @@ struct AgentToolsPage: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(OpenTypeL10n.text("当前来自环境变量，只读", english: "Currently from an environment variable, read-only"))
                     .font(DS.Text.size(12.5, .semibold))
-                McpCodeSentence(
-                    OpenTypeL10n.text(
-                        "这 \(servers.count) 个服务器由 ",
-                        english: "These \(servers.count) servers come from "
-                    ),
-                    "OPENTYPE_MCP_SERVERS",
-                    OpenTypeL10n.text(
-                        " 提供，不能在这里改。一旦你在这里保存第一个服务器，环境变量会被整份忽略 —— 不是合并。",
-                        english: " and can't be edited here. The moment you save your first server, the environment variable is ignored in its entirety — not merged."
-                    ),
-                    fill: 0.05
-                )
+                environmentOnlyBody
                 .font(DS.Text.size(11.5))
+                // 1.6 line height at 11.5pt.
+                .lineSpacing(4)
                 .foregroundStyle(DS.Colour.ink(0.55))
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -462,6 +457,24 @@ struct AgentToolsPage: View {
         .dsCard()
     }
 
+    /// 「整份忽略」 carries the handoff's own `<b>` — the sentence's whole point
+    /// is that the environment variable is dropped rather than merged, and the
+    /// mockup emphasises exactly that phrase.
+    private var environmentOnlyBody: Text {
+        Text(OpenTypeL10n.text(
+            "这 \(servers.count) 个服务器由 ",
+            english: "These \(servers.count) servers come from "
+        ))
+        + Text(McpCodeChip("OPENTYPE_MCP_SERVERS", fill: DS.Colour.control))
+        + Text(OpenTypeL10n.text(
+            " 提供，不能在这里改。一旦你在这里保存第一个服务器，环境变量会被",
+            english: " and can't be edited here. The moment you save your first server, the environment variable is ignored "
+        ))
+        + Text(OpenTypeL10n.text("整份忽略", english: "in its entirety"))
+            .fontWeight(.semibold)
+        + Text(OpenTypeL10n.text(" —— 不是合并。", english: " — not merged."))
+    }
+
     // MARK: The two standing cards
 
     /// The handoff gives this the same `0 1px 2px rgba(0,0,0,.04)` every other
@@ -488,6 +501,8 @@ struct AgentToolsPage: View {
                     english: "No sandbox, no per-call confirmation. Adding a server hands the agent every tool it offers. Only add servers you trust."
                 ))
                 .font(DS.Text.size(11.5))
+                // 1.6 line height at 11.5pt.
+                .lineSpacing(4)
                 .foregroundStyle(DS.Colour.ink(0.55))
                 .fixedSize(horizontal: false, vertical: true)
             }
@@ -508,6 +523,8 @@ struct AgentToolsPage: View {
                 .font(DS.Text.size(12.5, .semibold))
             environmentCardBody
                 .font(DS.Text.size(11.5))
+                // 1.6 line height at 11.5pt.
+                .lineSpacing(4)
                 .foregroundStyle(DS.Colour.ink(0.55))
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -628,6 +645,8 @@ private struct McpBuiltInToolRow: View {
                     .font(DS.Text.mono(12))
                 Text(tool.summary)
                     .font(DS.Text.size(11.5))
+                    // 1.5 line height at 11.5pt.
+                    .lineSpacing(3)
                     .foregroundStyle(DS.Colour.ink(0.5))
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -1002,6 +1021,8 @@ struct McpServerSheet: View {
             nameHint
                 .font(DS.Text.groupLabel())
                 .fontWeight(.regular)
+                // 1.55 line height at 11pt.
+                .lineSpacing(3)
                 .foregroundStyle(nameViolation == nil ? DS.Colour.ink(0.45) : DS.Colour.warningText)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1011,17 +1032,23 @@ struct McpServerSheet: View {
         if let nameViolation {
             return Text(nameViolation)
         }
-        return McpCodeSentence(
-            OpenTypeL10n.text(
-                "会成为工具名的前缀 —— ",
-                english: "Becomes the prefix of every tool name — "
-            ),
-            "github__create_issue",
-            OpenTypeL10n.text(
-                "。只能用字母、数字、_ 和 -。",
-                english: ". Letters, digits, _ and - only."
-            )
-        )
+        // Three chips, not one: the handoff sets `_` and `-` in the same code
+        // treatment as the example tool name, and a rule about which literal
+        // characters are allowed is exactly the copy where the reader has to be
+        // able to tell the character from the punctuation around it.
+        return Text(OpenTypeL10n.text(
+            "会成为工具名的前缀 —— ",
+            english: "Becomes the prefix of every tool name — "
+        ))
+        + Text(McpCodeChip("github__create_issue"))
+        + Text(OpenTypeL10n.text(
+            "。只能用字母、数字、",
+            english: ". Letters, digits, "
+        ))
+        + Text(McpCodeChip("_"))
+        + Text(OpenTypeL10n.text(" 和 ", english: " and "))
+        + Text(McpCodeChip("-"))
+        + Text(OpenTypeL10n.text("。", english: " only."))
     }
 
     private var transportField: some View {
@@ -1079,7 +1106,7 @@ struct McpServerSheet: View {
                 .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.block, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.Radius.block, style: .continuous)
-                        .strokeBorder(DS.Colour.ink(0.1), lineWidth: 0.75)
+                        .strokeBorder(DS.Colour.blockBorder, lineWidth: 0.75)
                 )
             }
             Text(OpenTypeL10n.text(
@@ -1088,6 +1115,8 @@ struct McpServerSheet: View {
             ))
             .font(DS.Text.groupLabel())
             .fontWeight(.regular)
+            // 1.55 line height at 11pt.
+            .lineSpacing(3)
             .foregroundStyle(DS.Colour.ink(0.45))
             .fixedSize(horizontal: false, vertical: true)
         }
@@ -1119,18 +1148,32 @@ struct McpServerSheet: View {
         )
     }
 
+    /// 「停用」 is bold in the handoff, and it is the word that says what the
+    /// button under this block will actually do to the server.
+    private var failureAdviceText: Text {
+        Text(OpenTypeL10n.text(
+            "连不上的服务器会拖慢语音服务启动。仍要保存的话，它会以",
+            english: "A server that can't be reached slows the voice service down at start. Save anyway and it is stored "
+        ))
+        + Text(OpenTypeL10n.text("停用", english: "disabled"))
+            .fontWeight(.semibold)
+        + Text(OpenTypeL10n.text(
+            "状态存下，不参与下次连接。",
+            english: ", taking no part in the next connection."
+        ))
+    }
+
     private var failureAdvice: some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: McpIcon.inlineGlyph))
                 .foregroundStyle(DS.Colour.warningText)
-            Text(OpenTypeL10n.text(
-                "连不上的服务器会拖慢语音服务启动。仍要保存的话，它会以停用状态存下，不参与下次连接。",
-                english: "A server that can't be reached slows the voice service down at start. Save anyway and it is stored disabled, taking no part in the next connection."
-            ))
-            .font(DS.Text.size(11.5))
-            .foregroundStyle(DS.Colour.ink(0.6))
-            .fixedSize(horizontal: false, vertical: true)
+            failureAdviceText
+                .font(DS.Text.size(11.5))
+                // 1.6 line height at 11.5pt.
+                .lineSpacing(4)
+                .foregroundStyle(DS.Colour.ink(0.6))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 13)
@@ -1578,7 +1621,7 @@ private struct McpTestResultBlock: View {
         .overlay(
             RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
                 .strokeBorder(
-                    outcome.success ? DS.Colour.ink(0.09) : DS.Colour.error.opacity(0.35),
+                    outcome.success ? DS.Colour.controlBorder : DS.Colour.error.opacity(0.35),
                     lineWidth: 0.75
                 )
         )
@@ -1615,6 +1658,8 @@ private struct McpTestResultBlock: View {
         } else {
             Text(outcome.message ?? OpenTypeL10n.text("没有更多信息", english: "No further detail"))
                 .font(DS.Text.mono())
+                // 1.6 line height at 11pt.
+                .lineSpacing(4)
                 .foregroundStyle(DS.Colour.ink(0.6))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1642,7 +1687,7 @@ private struct McpWrappingTags: View {
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
                             .background(
-                                DS.Colour.ink(0.045),
+                                DS.Colour.codeFill,
                                 in: RoundedRectangle(cornerRadius: DS.Radius.tag, style: .continuous)
                             )
                     }
@@ -1699,7 +1744,7 @@ private struct McpArgumentRow: View {
         .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
-                .strokeBorder(DS.Colour.ink(0.12), lineWidth: 0.75)
+                .strokeBorder(DS.Colour.buttonBorder, lineWidth: 0.75)
         )
     }
 }
@@ -1782,10 +1827,14 @@ private struct McpSecretRowView: View {
 
 private struct McpGroupHeader<Trailing: View>: View {
     let title: String
+    /// The handoff aligns the two group headers differently — 内置工具's pair of
+    /// 11pt runs on their baseline, MCP 服务器's 11pt label and 11.5pt link on
+    /// their centres — so the caller says which of its own it is.
+    var alignment: VerticalAlignment = .firstTextBaseline
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: alignment, spacing: 8) {
             Text(title)
                 .font(DS.Text.groupLabel())
                 .tracking(DS.Tracking.groupLabel)
@@ -1854,7 +1903,7 @@ private struct McpTransportTag: View {
     var body: some View {
         switch transport {
         case .stdio:
-            McpTag(title: "stdio", fill: DS.Colour.ink(0.05), tint: DS.Colour.ink(0.5))
+            McpTag(title: "stdio", fill: DS.Colour.control, tint: DS.Colour.ink(0.5))
         case .http:
             // `askTag`, not `accent`: the handoff darkens the text on a tinted
             // blue fill so it stays legible against its own 11% wash.
@@ -1875,11 +1924,13 @@ private struct McpButton: View {
     let title: String
     var icon: String?
     var kind: McpButtonKind = .chrome
-    /// The handoff draws a chrome button's edge at two weights: `.09` for the
-    /// one in 7A's header, `.12` for the ones in the sheet and 7D footers. One
-    /// value for both would be visibly wrong at whichever end it landed, so the
-    /// call site names it and the common case is the default.
-    var borderAlpha: Double = 0.12
+    /// The handoff draws a chrome button's edge at two weights — `.09` for the
+    /// one in 7A's header, `.12` for the ones in the sheet and 7D footers — and
+    /// pads that first one `0 11px` against everyone else's `0 12px`. Picking
+    /// one of each pair would be visibly wrong at whichever end it landed, so
+    /// the odd call site names what it needs and the common case is the default.
+    var border: Color = DS.Colour.buttonBorder
+    var paddingH: CGFloat = 12
     var isEnabled: Bool = true
     let action: () -> Void
 
@@ -1896,12 +1947,12 @@ private struct McpButton: View {
                     .fontWeight(kind == .primary ? .medium : .regular)
                     .foregroundStyle(foreground)
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, paddingH)
             .frame(height: 26)
             .background(background)
             .overlay(
                 RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
-                    .strokeBorder(border, lineWidth: 0.75)
+                    .strokeBorder(borderColour, lineWidth: 0.75)
             )
             .modifier(McpButtonShadow(kind: kind))
         }
@@ -1923,9 +1974,9 @@ private struct McpButton: View {
             .fill(kind == .primary ? DS.Colour.accent : DS.Colour.card)
     }
 
-    private var border: Color {
+    private var borderColour: Color {
         switch kind {
-        case .chrome: return DS.Colour.ink(borderAlpha)
+        case .chrome: return border
         case .primary: return .clear
         case .danger: return DS.Colour.error.opacity(0.4)
         }
@@ -2000,7 +2051,7 @@ private struct McpTextField: View {
                 .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
-                        .strokeBorder(DS.Colour.ink(0.14), lineWidth: 0.75)
+                        .strokeBorder(DS.Colour.fieldBorder, lineWidth: 0.75)
                 )
         )
     }
@@ -2072,7 +2123,7 @@ private func McpCodeSentence(
     _ prefix: String,
     _ code: String,
     _ suffix: String,
-    fill: Double = 0.045
+    fill: Color = DS.Colour.codeFill
 ) -> Text {
     Text(prefix) + Text(McpCodeChip(code, fill: fill)) + Text(suffix)
 }
@@ -2088,10 +2139,10 @@ private func McpCodeSentence(
 /// `docs/design-review/07-mcp.md`.
 /// `fill` is a parameter because the handoff uses two: `rgba(0,0,0,.045)` in
 /// 7A and 7B's helper, `rgba(0,0,0,.05)` in 7D's read-only strip.
-private func McpCodeChip(_ code: String, fill: Double = 0.045) -> AttributedString {
+private func McpCodeChip(_ code: String, fill: Color = DS.Colour.codeFill) -> AttributedString {
     var chip = AttributedString("\u{2009}\(code)\u{2009}")
     chip.font = DS.Text.mono()
-    chip.backgroundColor = DS.Colour.ink(fill)
+    chip.backgroundColor = fill
     return chip
 }
 

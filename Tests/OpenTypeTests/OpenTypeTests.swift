@@ -555,9 +555,11 @@ final class OpenTypeTests: XCTestCase {
     }
 
     func testMainstreamTranscriptionLanguagesCoverAppleLiveCaptionLocales() {
-        // MLX-Whisper (the sidecar's ASR) auto-detects language on its own,
-        // so `TranscriptionLanguage` only still drives the Apple on-device
-        // live-caption preview's locale -- see `appleLocaleIdentifier`.
+        // The locale half of the setting, which drives the Apple on-device
+        // live-caption preview. Since the 2026-08-15 batch it is one of two
+        // vocabularies the same setting speaks -- `whisperCode` (the code the
+        // sidecar's ASR actually receives) is pinned separately, and neither
+        // is derivable from the other; see `TranscriptionLanguageWhisperCodeTests`.
         XCTAssertGreaterThanOrEqual(TranscriptionLanguage.allCases.count, 25)
         XCTAssertEqual(TranscriptionLanguage.automatic.appleLocaleIdentifier, "zh-CN")
         XCTAssertEqual(TranscriptionLanguage.japanese.appleLocaleIdentifier, "ja-JP")

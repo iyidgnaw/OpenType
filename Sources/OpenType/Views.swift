@@ -1503,7 +1503,7 @@ private struct SettingsView: View {
                     Divider()
 
                     Picker(
-                        "转写语言",
+                        OpenTypeL10n.text("语音识别语言", english: "Speech recognition language"),
                         selection: Binding(
                             get: { configuration.transcriptionLanguage },
                             set: { model.changeTranscriptionLanguage($0) }
@@ -1515,7 +1515,10 @@ private struct SettingsView: View {
                     }
                     .pickerStyle(.menu)
 
-                    Text("中英夹杂或一段音频包含多种语言时，请使用“自动识别”；单一语言可明确选择，以提高实时字幕预览的准确率。最终识别默认使用本机 MLX-Whisper，可在下方“语音识别”中切换为远程。")
+                    Text(OpenTypeL10n.text(
+                        "这个选项同时传给最终识别与实时字幕预览。中英夹杂或一段音频包含多种语言时，请保持默认的“自动识别”；只说一种语言时明确指定，两者都会更准。最终识别默认使用本机 MLX-Whisper，可在下方“语音识别”中切换为远程。",
+                        english: "This is sent to both the final recogniser and the live-caption preview. Keep the default \"auto-detect\" for mixed-language speech; naming a single language makes both more accurate. The final transcript comes from local MLX-Whisper by default — switch to a remote provider under \"Speech Recognition\" below."
+                    ))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

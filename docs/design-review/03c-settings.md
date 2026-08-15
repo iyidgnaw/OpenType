@@ -146,8 +146,8 @@ below rather than restated per row:
 | AI 模型 | second line | `deepseek-v4-flash · OpenAI 兼容` | `llmSummaryLine` = `model · type.title`, or 「未配置」 | ✅ |
 | AI 模型 | dot / chevron / push | as 语音识别 | same | ✅ |
 | Agent 工具 | row | **not in the HTML**; README §5 table lists it in 引擎 (「**Agent 工具 ›**」, bolded as new) | chevron row with subtitle「内置工具与 MCP 服务器」, pushes `.agentTools` | ✅ per README (HTML predates it) |
-| 转写语言 | title | `13px`, no subtitle | same | ✅ |
-| 转写语言 | control | dropdown chip, `12px` **non-mono** 「自动识别」 | `ControlChip(text:)`, `mono` defaults false | ✅ |
+| 语音识别语言 | title | `13px`, no subtitle | renamed from 「转写语言」 and **given** a subtitle (2026-08-15 §C: the setting now reaches Whisper, not only the caption preview, and the row has to say so) | 🔧 deliberate |
+| 语音识别语言 | control | dropdown chip, `12px` **non-mono** 「自动识别」 | `ControlChip(text:)`, `mono` defaults false | ✅ |
 
 ## 7 · 权限
 

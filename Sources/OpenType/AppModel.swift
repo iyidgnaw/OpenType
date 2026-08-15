@@ -2252,8 +2252,34 @@ final class AppModel: ObservableObject {
     /// Request/response bodies for the sidecar's `/asr/transcribe` endpoint
     /// (proxies to the local MLX-Whisper python process -- see
     /// `sidecar/src/asr/whisperClient.ts`), used by `transcribeLocally(audioURL:)`.
-    private struct TranscribeRequestBody: Encodable { let audioBase64: String }
+    ///
+    /// `language` is the user's transcription-language setting as Whisper's own
+    /// ISO-639-1 code. It is `nil` for `automatic`, and a `nil` optional is
+    /// *omitted* from the JSON (synthesised `encodeIfPresent`) rather than
+    /// encoded as null -- so the default setting sends byte-for-byte the body
+    /// that shipped before this field existed. That is the contract the sidecar
+    /// pins from its side: absent means auto-detect (`sidecar/src/asr/routes.ts`
+    /// only sets `options.language` for a non-empty string).
+    struct TranscribeRequestBody: Encodable {
+        let audioBase64: String
+        let language: String?
+    }
     private struct TranscribeResponseBody: Decodable { let text: String }
+
+    /// The one place the transcription-language setting becomes a wire field.
+    ///
+    /// Extracted as a pure function because `transcribeLocally` needs a live
+    /// recording, a sidecar and an `AppModel` to reach, and the thing worth
+    /// pinning is just this mapping -- `TranscribeRequestLanguageTests` drives
+    /// it directly. Keep `transcribeLocally` its only caller: a second call site
+    /// that builds the body by hand is how the setting quietly stopped reaching
+    /// Whisper in the first place.
+    nonisolated static func transcribeRequestBody(
+        audioBase64: String,
+        language: TranscriptionLanguage
+    ) -> TranscribeRequestBody {
+        TranscribeRequestBody(audioBase64: audioBase64, language: language.whisperCode)
+    }
 
     /// Request/response bodies for the sidecar's `/oneshot/ask` endpoint,
     /// used by the `ask` mode branch below. `conversationId` continues an
@@ -2903,13 +2929,19 @@ final class AppModel: ObservableObject {
     /// to a persistent MLX-Whisper python process (`sidecar/whisper/serve.py`,
     /// managed by `sidecar/src/asr/whisperClient.ts`) -- the ASR step shared
     /// by all modes, with no credential/provider configuration required.
+    ///
+    /// Carries the transcription-language setting, so the picker governs the
+    /// transcript the user keeps and not only the live-caption preview.
     private func transcribeLocally(audioURL: URL) async throws -> String {
         let audioData = try Data(contentsOf: audioURL)
         guard !audioData.isEmpty else { throw OpenTypeError.emptyRecording }
         let response: TranscribeResponseBody = try await sidecarClient.request(
             method: "POST",
             path: "/asr/transcribe",
-            body: TranscribeRequestBody(audioBase64: audioData.base64EncodedString())
+            body: AppModel.transcribeRequestBody(
+                audioBase64: audioData.base64EncodedString(),
+                language: configuration.transcriptionLanguage
+            )
         )
         let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw OpenTypeError.emptyRecording }

@@ -382,8 +382,16 @@ struct SettingsColumn: View {
                 model: model
             )
 
+            // Renamed from 「转写语言」 in the 2026-08-15 batch (§C), when the
+            // setting stopped being a live-caption-only preference and started
+            // reaching Whisper. The subtitle says which recognisers it governs
+            // because the old name was true of neither one in particular.
             SettingsRow(
-                title: OpenTypeL10n.text("转写语言", english: "Transcription language")
+                title: OpenTypeL10n.text("语音识别语言", english: "Speech recognition language"),
+                subtitle: OpenTypeL10n.text(
+                    "同时用于最终识别与实时字幕；默认「自动识别」，中英夹杂时保持默认",
+                    english: "Applies to both the final transcript and live captions; defaults to auto-detect, which is what mixed-language speech needs"
+                )
             ) {
                 Menu {
                     ForEach(TranscriptionLanguage.allCases) { language in

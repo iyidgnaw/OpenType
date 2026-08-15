@@ -6,33 +6,37 @@ markup, assets not inlined), plus that folder's `README.md` §7, 「MCP 的关�
 and the SF-Symbols table.
 
 Implementation: `Sources/OpenType/McpServerViews.swift`.
-Tokens: `Sources/OpenType/DesignTokens.swift` (not modified — this review is
-scoped to the one view file).
+Tokens: `Sources/OpenType/DesignTokens.swift` (read, not modified — every value
+below is referenced from there, none is written as a literal in the view).
 
-Status key — ✅ matches · ⚠️ deviates on purpose, reason given · ❌ blocked on a
-change outside this file.
+Status key — ✅ matches · 🔧 fixed in this batch · ⚠️ deviates on purpose, reason
+given · ❌ blocked on a change outside this file.
 
-**Standing token collapses — all three reversed (2026-08-15).** This review
-originally collapsed three whole classes of §07's literal CSS onto the README's
-closed scale, and argued per class why the token should win. The product owner
-has ruled the other way: **稿子优先 — 无条件还原设计稿**. The mockup's literal
-values win unconditionally, and `DesignTokens.swift` carries the extra steps
-this needs, so no row below is a naked literal.
+**Every token collapse is reversed (2026-08-15).** This review originally
+collapsed whole classes of §07's literal CSS onto the README's closed scale, and
+argued per class why the token should win. The product owner ruled the other
+way: **稿子优先 — 无条件还原设计稿**. The mockup's literal values win
+unconditionally, `DesignTokens.swift` carries the extra steps this needs, and no
+row below is a naked literal.
 
 | Was collapsed | §07 markup | Now |
 |---|---|---|
-| Type steps | `12.5` / `11.5` / `10.5` px | restored as literal steps; mono sizes go through `DS.Text.mono(_ size:)`, which already took a size |
-| Radii | `4` / `5` / `7` / `8` px | `5` / `7` / `8` restored (the `4` is the code chip's, still unexpressible — see below) |
-| Borders | `.045` / `.06` / `.09` / `.1` / `.12` / `.14` black | each α restored at the element that draws it |
+| Type steps | `12.5` / `11.5` / `10.5` px | restored as literal steps via `DS.Text.size(_:_:)`; mono sizes go through `DS.Text.mono(_ size:)`, which already took a size |
+| Radii | `4` / `5` / `7` / `8` px | `5` / `7` / `8` restored as `tag` / `smallControl` / `block` (the `4` is the code chip's, still unexpressible — see below) |
+| Borders and fills | `.045` / `.05` / `.06` / `.09` / `.1` / `.12` / `.14` **black** | each α restored at the element that draws it, from the named black-based tokens — not from `ink(_:)`, whose base is `#1C1C1E` and which is for text |
+| Ink | `.28` – `.65` of `#1C1C1E` | `DS.Colour.ink(_:)` at the drawn α; `.secondary` / `.tertiary` resolve against `labelColor` and land elsewhere |
+| Line height | `1.5` / `1.55` / `1.6` on body copy | `.lineSpacing(size × ratio − size × 1.24)`, rounded — additive points are not a ratio, but the same conversion §04 uses gets within a point |
+| Two shared controls | `0 11px` vs `0 12px`; `center` vs `baseline` | `McpButton(paddingH:)` and `McpGroupHeader(alignment:)` — the odd call site names what it needs, like `border` already did |
+| Emphasis | `<b>停用</b>`, `<b>整份忽略</b>` | semibold runs mid-`Text` |
 
-The three "why the token wins" arguments are recorded in git history rather than
+The "why the token wins" arguments are recorded in git history rather than
 re-stated here — the decision they lost is not a close call to re-litigate.
 
-Two things below are still ⚠️ and are **not** collapses, so they stay: the
-`4px`-radius inline code chip (a `Text` run has no box model — a SwiftUI limit,
-not a missing token), and 重启服务并连接's `0 11px` padding (`McpButton` is one
-control shared with the two sheet footers, which the handoff itself draws at
-`0 12px`).
+One thing below is still ⚠️ and is **not** a collapse, so it stays: the
+`4px`-radius inline code chip. A `Text` run carries colour and font but no box
+model, so its padding and corners have no expression — a SwiftUI limit, not a
+missing token. Everything else still marked ⚠️ is an element the mockup does not
+draw at all, or a state it does not have.
 
 ---
 
@@ -221,7 +225,7 @@ control shared with the two sheet footers, which the handoff itself draws at
 | 连接方式 | selected shadow | `0 1px 2px rgba(0,0,0,.1)` | `DS.Shadow.lifted` | 🔧 was `control`; §07 lifts the segment harder than a plain small control, so it takes its own step |
 | 连接方式 | selected / unselected type | `12px / 500` / `12px / 400 rgba(28,28,30,.55)` | `caption()` + `.medium` / `.regular` + `.secondary` | ✅ |
 | 连接方式 | labels | 「本地进程」 / 「远程 HTTP」 | identical | ✅ |
-| 命令 input | all | as 名称 input | same `McpTextField` | ✅ (same ⚠️s) |
+| 命令 input | all | as 名称 input | same `McpTextField` | ✅ |
 | 参数 label row | trailing action | 「添加一项」 `11.5px / 500` `#0D73FA` | `McpLinkButton` → `DS.Text.size(11.5, .medium)`, accent | 🔧 was 12pt |
 | 参数 list | gap | `5px` | `VStack(spacing: 5)` | ✅ |
 | 参数 row | height / radius | `26px`, `6px` | 26, `DS.Radius.control` = 6 | ✅ |
@@ -285,7 +289,7 @@ control shared with the two sheet footers, which the handoff itself draws at
 | Sheet | width | `460px` | `sheetWidth` = 460 when `transport == .http` | ✅ **fixed** |
 | Sheet | header title | 「编辑 linear」 | 「编辑 \(name)」 | ✅ |
 | 连接方式 | selected segment | 远程 HTTP | driven by `draft.transport` | ✅ |
-| 地址 input | all | as 名称 input, value `https://mcp.linear.app/sse` | same `McpTextField`, placeholder `https://mcp.example.com/mcp` | ✅ (same ⚠️s) |
+| 地址 input | all | as 名称 input, value `https://mcp.linear.app/sse` | same `McpTextField`, placeholder `https://mcp.example.com/mcp` | ✅ |
 | 地址 | label | 「地址」 | 「地址」 | ✅ |
 | 请求头 | label / action | 「请求头」 + 「添加一项」 | identical | ✅ |
 | 请求头 container | border / radius / background | `.75px rgba(0,0,0,.1)`, `8px`, `#fff` | `DS.Colour.blockBorder` (.1), `DS.Radius.block` = 8, `DS.Colour.card` | 🔧 was .07 / radius 10 |
@@ -293,7 +297,7 @@ control shared with the two sheet footers, which the handoff itself draws at
 | 请求头 row | key width | `110px` | `secretKeyWidth` = 110 for http | ✅ **fixed** — was 150 in both sheets |
 | 请求头 row | key / value fonts | `12px` mono; value `rgba(28,28,30,.4)` | `DS.Text.mono(12)`; `DS.Colour.ink(0.4)` | 🔧 colour was `.tertiary` |
 | 请求头 row | 「更改」 | `11.5px / 500`, `#0D73FA` | `McpLinkButton` → `DS.Text.size(11.5, .medium)`, accent | 🔧 was 12pt |
-| 请求头 row | delete | **not drawn** | `xmark`, 14, `.tertiary` | ⚠️ deviation — without it a header can be added and never removed; the mockup's single row simply has nothing to delete |
+| 请求头 row | delete | **not drawn** | `xmark`, 14, `DS.Colour.ink(0.3)` | ⚠️ deviation — without it a header can be added and never removed; the mockup's single row simply has nothing to delete |
 | 失败块 | border | `.75px rgba(217,72,59,.35)` | `DS.Colour.error.opacity(0.35)`, `0.75` | ✅ |
 | 失败块 | radius / background | `10px`, `#fff` | `DS.Radius.inset` = 10, `DS.Colour.card` | ✅ |
 | 失败块 header | padding / gap / separator | `10px 12px`, `8px`, `border-bottom .75px rgba(0,0,0,.06)` | `12 / 10`, `spacing: 8`, `dsHairline(.bottom)` | ✅ |
@@ -384,23 +388,35 @@ Re-read at the current file state, not assumed:
 
 ---
 
-## Token gaps (reported, not hard-coded)
+## Token gaps — all closed but one
 
-These are values §07 needs that `DesignTokens.swift` has no name for. All were
-left at the nearest token rather than written as literals.
+Every value this review previously reported as missing now has a name in
+`DesignTokens.swift`, and §07 references it rather than approximating.
 
-| Need | §07 value | Nearest token | Where it shows |
+| Need | §07 value | Token | Where it shows |
 |---|---|---|---|
-| Deep accent for a tinted tag's text | `#0A5CC8` | `DS.Colour.accent` `#0D73FA` | the `http` transport tag, 7A + 7D |
-| Sheet canvas | `#F7F7F5` | `DS.Colour.canvas` `#F5F5F3` | 7B/7C sheet background |
-| Sheet footer bar | `#F1F1EF` | `DS.Colour.inset` ≈ `#EDEDEB` | 7B/7C footer |
-| A stronger lift for a selected segment | `0 1px 2px rgba(0,0,0,.1)` | `DS.Shadow.control` `0 1px 0.75 rgba(0,0,0,.05)` | 连接方式 |
-| Field-weight border | `rgba(0,0,0,.14)` | `DS.Colour.border` `.07` | every 28pt input |
-| Inline code chip | `1.5px 5px` padding, radius `4px` | none — `Text` runs have no box model | `OPENTYPE_MCP_SERVERS`, `github__create_issue` |
+| Deep accent for a tinted tag's text | `#0A5CC8` | `DS.Colour.askTag` | the `http` transport tag, 7A + 7D |
+| Sheet canvas | `#F7F7F5` | `DS.Colour.recessed` | 7B/7C sheet background |
+| Sheet footer bar | `#F1F1EF` | `DS.Colour.footerBar` | 7B/7C footer |
+| Segment track | `#EDEDEA` | `DS.Colour.segmentTrack` | 连接方式 |
+| Card strip surface | `#FAFAF8` | `DS.Colour.insetSurface` | 本机 / 网络与记忆, 7D 说明块 |
+| A stronger lift for a selected segment | `0 1px 2px rgba(0,0,0,.1)` | `DS.Shadow.lifted` | 连接方式 |
+| Black fills | `.045` / `.05` | `DS.Colour.codeFill` / `DS.Colour.control` | code chips, tool chips, `stdio` tag |
+| Black borders | `.09` / `.1` / `.12` / `.14` | `controlBorder` / `blockBorder` / `buttonBorder` / `fieldBorder` | test block, secret container, chrome buttons, every 28pt input |
+| Half-point type | `10.5` / `11.5` / `12.5` | `DS.Text.size(_:_:)` | tags, body copy, card titles |
+| Radii between the four | `5` / `7` / `8` | `Radius.tag` / `.smallControl` / `.block` | tags, buttons and inputs, secret container |
+| Inline code chip | `1.5px 5px` padding, radius `4px` | **none** — `Text` runs have no box model | `OPENTYPE_MCP_SERVERS`, `github__create_issue`, `_`, `-` |
 
-The first four are candidates for real tokens if other screens want them; the
-fifth is a deliberate README-level decision ("全局唯一边框值") that §07's markup
-predates; the sixth is a SwiftUI limit, not a token gap.
+Two of these names describe a different caller than §07's: `codeFill` is
+documented as the inline-code fill and is also the `rgba(0,0,0,.045)` of a tool
+chip and 05's unselected mode cell, and `borderStrong` is documented as a border
+and is also §04's `rgba(0,0,0,.08)` progress track. The values are the drawn
+ones; only the doc comments are narrower than the use. Worth a rename pass if
+`DesignTokens.swift` is opened for another reason — not worth opening it for.
+
+The last row is the one real gap, and it is a SwiftUI limit rather than a
+missing token: splitting the sentence into views to get a padded, rounded chip
+would stop it wrapping as prose.
 
 ## Out of scope — needs a change elsewhere
 

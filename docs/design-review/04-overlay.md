@@ -66,7 +66,7 @@
 | 模式小胶囊 | font | `11px` | `DS.Text.size(11)` | ✅ |
 | 模式小胶囊 | padding | `2px 6px` | `.padding(.horizontal, 6)` + `.padding(.vertical, 2)` | ✅ |
 | 模式小胶囊 | radius | `5px` | `DS.Radius.tag` = 5 | 🔧 原先 6 |
-| 模式小胶囊 | background | `rgba(0,0,0,.05)` | `DS.Colour.ink(0.05)` | 🔧 原先 `inset` = .035 |
+| 模式小胶囊 | background | `rgba(0,0,0,.05)` | `DS.Colour.control`（黑 .05） | 🔧 原先 `inset` = .035，中途走过 `ink(0.05)`（基色是 `#1C1C1E` 不是黑） |
 | 模式小胶囊 | color | `rgba(28,28,30,.5)` | `DS.Colour.ink(0.5)` | 🔧 原先 `.secondary` |
 | Tab 提示行 | 是否渲染 | 稿件恒有 | `modeSwitchHintAvailable` 为假时整行不渲染 | ⚠️ Space 和弦那几个 preset 没有 Tab 切换；宣传一个按下去没反应的键比不说更糟 |
 
@@ -99,7 +99,7 @@
 | 工具名 · 参数 | font | `11.5px` mono | `DS.Text.mono(11.5)` | 🔧 原先 `mono()` = 11。mono 本来就收字号参数，不需要新令牌 |
 | 工具名 · 参数 | 截断 | `ellipsis`（尾） | `lineLimit(1)` + `.middle` | ⚠️ 这一行几乎总是路径或命令，尾截会把最有信息量的文件名截掉 |
 | 进度条 | height / radius | `2px` / `99px` | `.frame(height: 2)`，`Capsule()` | ✅ |
-| 进度条 | 轨道色 | `rgba(0,0,0,.08)` | `DS.Colour.ink(0.08)` | 🔧 原先 `border` = .07 |
+| 进度条 | 轨道色 | `rgba(0,0,0,.08)` | `DS.Colour.borderStrong`（黑 .08） | 🔧 原先 `border` = .07 |
 | 进度条 | 填充色 | `#0D73FA` | `DS.Colour.accent` | ✅ |
 | 进度条 | 填充比例 | `64%`（确定进度） | 36% 宽的往复扫动（不定进度） | ⚠️ 与「第 N 步」同一个理由：没有分母。填一个 64% 是我们编的数，扫动只声称「在动」 |
 
@@ -125,7 +125,7 @@
 | 合并行 | border-top | `.75px rgba(0,0,0,.07)` | `dsHairline(.top, color: DS.Colour.border)` (.07) | 🔧 原先 .06 |
 | 合并行 | padding-top / gap | `9px` / `9px` | `.padding(.top, 9)` / `HStack(spacing: 9)` | ✅ |
 | 倒计时条 | flex / height / radius | `flex:1` / `2px` / `99px` | `GeometryReader` 吃剩余宽（提示文字 `layoutPriority(1)`），高 2，`Capsule()` | ✅ |
-| 倒计时条 | 轨道 / 填充 | `rgba(0,0,0,.08)` / `#0D73FA` | `DS.Colour.ink(0.08)` / `DS.Colour.accent` | 🔧 轨道原先 `border` = .07 |
+| 倒计时条 | 轨道 / 填充 | `rgba(0,0,0,.08)` / `#0D73FA` | `DS.Colour.borderStrong` / `DS.Colour.accent` | 🔧 轨道原先 `border` = .07 |
 | 倒计时条 | 动画 | 静态 62% | 一条 `.linear(duration: seconds)` 从 1 走到 0，`.id(startedAt)` 保证重新武装时从满格重来 | ✅ 稿件是静帧 |
 | 提示文字 | font / color | `11px` mono / `rgba(28,28,30,.45)` | `DS.Text.mono()` / `DS.Colour.ink(0.45)` | 🔧 色原先 `.secondary` |
 | 提示文字 | 文案 | 「再按 ⌥ 可口述修改」 | 「选中说错的词，再按一次快捷键即可纠正」 | ⚠️ **按指示保留**。已发布的手势要求先选中文本，`CorrectionWindowTests` 钉住了「选中」「再按一次」两个词。稿件描述的是一个比现有实现更简单的功能 |
@@ -145,7 +145,7 @@
 | 问题正文 | font | `13.5px` | `DS.Text.size(13.5)` | 🔧 原先 13 |
 | 问题正文 | line-height | `1.55` | `.lineSpacing(4)` | 🔧 原先无 |
 | 问题正文 | color | 继承 | `.primary` | ✅ |
-| 选项列表容器 | border | `.75px rgba(0,0,0,.09)` | `DS.Colour.ink(0.09)` | 🔧 原先 `border` = .07 |
+| 选项列表容器 | border | `.75px rgba(0,0,0,.09)` | `DS.Colour.controlBorder`（黑 .09） | 🔧 原先 `border` = .07 |
 | 选项列表容器 | radius | `10px` | `DS.Radius.inset` = 10 | ✅ |
 | 选项列表容器 | background | `rgba(255,255,255,.6)` | `DS.Colour.card.opacity(0.6)` | ✅ |
 | 选项列表容器 | overflow | `hidden` | 行内容不越界（定高行 + 圆角背景） | ✅ |
@@ -197,7 +197,7 @@
 | 用户气泡 | font | `12.5px` | `DS.Text.size(12.5)` | 🔧 原先 13，中途落到 12，现按稿 12.5 |
 | 用户气泡 | line-height | `1.55` | `.lineSpacing(4)` | 🔧 原先无 |
 | 用户气泡 | 对齐 | `justify-content:flex-end` | `HStack(spacing: 0) { Spacer(minLength: 0); … }` | ✅ 与 `SessionsViews.SessionTurn` 同一写法 |
-| 步骤日志摘要 | border | `.75px rgba(0,0,0,.08)` | `DS.Colour.ink(0.08)` | 🔧 原先 `border` = .07 |
+| 步骤日志摘要 | border | `.75px rgba(0,0,0,.08)` | `DS.Colour.borderStrong` | 🔧 原先 `border` = .07 |
 | 步骤日志摘要 | radius | `9px` | `DS.Radius.nested` = 9 | 🔧 原先 10 |
 | 步骤日志摘要 | background | `rgba(255,255,255,.5)` | `DS.Colour.card.opacity(0.5)` | 🔧 原先 `DS.Colour.inset`（黑 .035）—— 稿件这一行是**抬起**的白，不是凹陷的灰 |
 | 步骤日志摘要 | padding / gap | `7px 11px` / `8px` | 11/7 / `HStack(spacing: 8)` | ✅ |
@@ -221,13 +221,13 @@
 | 动作 chip | height | `24px` | `.frame(height: 24)` | ✅ |
 | 动作 chip | padding-x | `10px` | `.padding(.horizontal, 10)` | ✅ |
 | 动作 chip | radius | `6px` | `DS.Radius.control` = 6 | ✅ |
-| 动作 chip | background | `rgba(0,0,0,.05)` | `DS.Colour.ink(0.05)` | 🔧 原先 `inset` = .035 |
+| 动作 chip | background | `rgba(0,0,0,.05)` | `DS.Colour.control` | 🔧 原先 `inset` = .035 |
 | 动作 chip | font | `11.5px` | `DS.Text.size(11.5)` | 🔧 原先 12 |
 | 动作 chip | color | `rgba(28,28,30,.6)` | `DS.Colour.ink(0.6)` | 🔧 原先 `.secondary` |
 | 动作 chip | 内容 | 按结果类型给具体动作 | 有产出文件 → 打开 X / 复制路径；否则 → 展开说说 / 换个说法（`VoiceResultActions`） | ✅ |
 | 「复制」 | — | 稿件没有 | 动作行右端 | ⚠️ 新增。稿件的三个动作里「复制路径」只在有文件时出现，答案类结果就没有任何复制入口了 |
 | 输入区 | background | `rgba(255,255,255,.7)` | `DS.Colour.card.opacity(0.7)` | ✅ |
-| 输入区 | border | `.75px rgba(0,0,0,.09)` | `DS.Colour.ink(0.09)` | 🔧 原先 `border` = .07 |
+| 输入区 | border | `.75px rgba(0,0,0,.09)` | `DS.Colour.controlBorder` | 🔧 原先 `border` = .07 |
 | 输入区 | radius | `13px` | `DS.Radius.sheet` = 13 | 🔧 原先 `card` = 14 |
 | 输入区 | padding | `9px 9px 9px 13px` | `.padding(.leading, 13)` + `.padding(.trailing, 9)` + `.padding(.vertical, 9)` | ✅ |
 | 输入区 | gap / align | `9px` / `flex-end` | `HStack(alignment: .bottom, spacing: 9)` | ✅ |
@@ -237,7 +237,7 @@
 | 麦克风按钮 | size | `28 × 28` | `.frame(width: 28, height: 28)` | ✅ |
 | 麦克风按钮 | radius | `8px` | `DS.Radius.block` = 8 | 🔧 原先 10 |
 | 麦克风按钮 | background | `#fff` | `DS.Colour.card` | ✅ |
-| 麦克风按钮 | border | `.75px rgba(0,0,0,.09)` | `DS.Colour.ink(0.09)` | 🔧 原先 `border` = .07 |
+| 麦克风按钮 | border | `.75px rgba(0,0,0,.09)` | `DS.Colour.controlBorder` | 🔧 原先 `border` = .07 |
 | 麦克风按钮 | shadow | `0 1px 1.5px rgba(0,0,0,.05)` | `DS.Shadow.control`（黑 .05 / radius 0.75 / y 1） | ✅ CSS 的 blur 1.5px ≈ SwiftUI 的 radius 0.75，这个令牌就是这条投影 |
 | 麦克风图标 | icon / size / color | `mic`（filled）→ `mic.fill` / `15px` / `#0D73FA` | `mic.fill` / 15 / `DS.Colour.accent` | 🔧 原先 14 |
 | 送出按钮 | size / radius | `28 × 28` / `8px` | 28×28 / `DS.Radius.block` = 8 | 🔧 原先 10 |
@@ -266,7 +266,7 @@
 | 头部 | gap | `9px` | `HStack(spacing: 9)` | ✅ |
 | 品牌方块 | size | `20 × 20` | `.frame(width: 20, height: 20)` | ✅ |
 | 品牌方块 | radius | `6px` | `DS.Radius.control` = 6 | ✅ |
-| 品牌方块 | background | `linear-gradient(135deg,#0D73FA,#5751FA)` | `LinearGradient([accent, Color(0.341,0.318,0.980)], .topLeading → .bottomTrailing)`（= `#5751FA`） | ✅ |
+| 品牌方块 | background | `linear-gradient(135deg,#0D73FA,#5751FA)` | `LinearGradient([DS.Colour.accent, DS.Colour.brandGradientEnd], .topLeading → .bottomTrailing)` | 🔧 端点原先是行内 `Color(0.341,0.318,0.980)`，令牌已有名字 |
 | 品牌图标 | icon / size / color | `graphic_eq` → `waveform` / `12px` / `#fff` | `waveform` / 12 semibold / `.white` | ✅ |
 | 「OpenType」 | font | `13px / 600` | `DS.Text.body(.semibold)` | ✅ |
 | 右上图标 | icon | `settings`（齿轮） | `slider.horizontal.3` | ⚠️ README 的对照表没有 `settings` 一行。这个按钮打开的是**主窗口**（会话 / 听写 / 记忆 / 设置），不是设置页；画个齿轮会误导。`slider.horizontal.3` 与侧边栏「设置」同字形，语义上是「OpenType 的控制面」 |
@@ -278,7 +278,7 @@
 | 模式格 | radius | `9px` | `DS.Radius.nested` = 9 | 🔧 原先 10 |
 | 模式格 | gap | `3px` | `VStack(spacing: 3)` | ✅ |
 | 模式格（选中） | background / color | `#0D73FA` / `#fff` | `DS.Colour.accent` / `.white` | ✅ |
-| 模式格（未选） | background | `rgba(0,0,0,.045)` | `DS.Colour.ink(0.045)` | 🔧 原先 `inset` = .035 |
+| 模式格（未选） | background | `rgba(0,0,0,.045)` | `DS.Colour.codeFill`（黑 .045） | 🔧 原先 `inset` = .035。令牌名说的是行内代码底，值是这一档唯一的黑 |
 | 模式格（未选） | color | `rgba(28,28,30,.6)` | `DS.Colour.ink(0.6)` | 🔧 原先 `.secondary` |
 | 模式图标 | icon | `mic`(filled) / `contact_support` / `auto_awesome` → `mic.fill` / `questionmark.bubble.fill` / `wand.and.stars` | `InputMode.symbol`，三个完全一致 | ✅ |
 | 模式图标 | size | `17px` | `.system(size: 17, weight: .medium)` | ✅ |
@@ -339,9 +339,9 @@
 还原稿件字面值之后，这两节用到的、原先没有令牌的值。逐条都是从 `OpenType 重设计.dc.html`
 第 693–925 行的行内 CSS 读出来的，不是从 README 的散文推的。
 
-1. **墨色刻度。** `rgba(28,28,30, α)`，§04/§05 用到 `.3 / .35 / .4 / .42 / .45 / .5 / .55 / .6` 八档。原先只有 `.secondary`（≈ .50）和 `.tertiary`（≈ .26）两档可用，`.4` 及以下全部偏浅。与 `03-dictation.md` 第 1 条、`07-mcp.md` 是同一套刻度，六个屏幕共用，必须一批改一批验。
-2. **发丝线 α。** §04/§05 的分隔线一律 `.07`，而 `dsHairline()` 画的是 `.06`。`dsHairline` 改画 `.07`，`.06` 留给稿件真的写 `.06` 的地方；另需 `.08`（4B 进度条轨道、4C 倒计时轨道、4E 步骤日志摘要边框）和 `.09`（4D 选项列表容器、4E 输入区与麦克风按钮边框）。
-3. **黑色浅填充两档。** `rgba(0,0,0,.045)`（05 未选中模式格）与 `rgba(0,0,0,.05)`（4A Tab 提示小胶囊、4E 动作 chip）。`DS.Colour.inset` 的 `.035` 仍然正确 —— 4B 工具块和 4D 麦克风行稿件就写 `.035` —— 所以是**新增两档，不是改 `inset`**。
+1. **墨色刻度。** `rgba(28,28,30, α)`，§04/§05 用到 `.3 / .35 / .4 / .42 / .45 / .5 / .55 / .6` 八档。原先只有 `.secondary`（≈ .50）和 `.tertiary`（≈ .26）两档可用，`.4` 及以下全部偏浅。与 `03-dictation.md` 第 1 条、`07-mcp.md` 是同一套刻度，六个屏幕共用，必须一批改一批验。→ `DS.Colour.ink(_:)`。
+2. **发丝线 α。** §04/§05 的分隔线一律 `.07`，而 `dsHairline()` 画的是 `.06`。`dsHairline` 现在收颜色参数，`.06` 留给稿件真的写 `.06` 的地方；另需 `.08`（4B 进度条轨道、4C 倒计时轨道、4E 步骤日志摘要边框）和 `.09`（4D 选项列表容器、4E 输入区与麦克风按钮边框）。→ `border` / `borderStrong` / `controlBorder`。**这三档和下面两档都是纯黑**：`ink(α)` 的基色是 `#1C1C1E`，拿它画稿件写的 `rgba(0,0,0,α)` 会浅半档，本批把这类调用点全部换成黑基令牌。
+3. **黑色浅填充两档。** `rgba(0,0,0,.045)`（05 未选中模式格）与 `rgba(0,0,0,.05)`（4A Tab 提示小胶囊、4E 动作 chip）。`DS.Colour.inset` 的 `.035` 仍然正确 —— 4B 工具块和 4D 麦克风行稿件就写 `.035` —— 所以是**新增两档，不是改 `inset`**。→ `codeFill` / `control`。两个令牌的文档注释说的是别的调用者（行内代码底、未选中 chip），值是对的；改名不值得为此单开一轮。
 4. **`#FAFAF8` 面色。** popover 的 `rgba(250,250,248,.94)`。浮层走 `.regularMaterial` 绕过去了，popover 没有材质可走，原先只能借 `canvas`（`#F5F5F3`）。
 5. **`#0A5CC8`。** 蓝色标签上的文字色，比 accent 暗一档。稿件只在**蓝色**标签上压暗（Agent 标签的 `#4B45E8` 不压暗），所以 `ModeTag` 需要把填充色和文字色拆成两个入参。
 6. **accent 色的控件投影。** 4E 送出键的 `0 1px 2px rgba(13,115,250,.3)`。`DS.Shadow` 只有中性的 `control` 和 α .10/radius 4 的 `running`。

@@ -11,7 +11,9 @@ Endpoints:
   GET  /health      -> {"status": "ok"}
   POST /transcribe   -> body is the raw bytes of a WAV file; returns {"text": "..."}
                         optional query parameter `initial_prompt` (URL-encoded)
-                        biases decoding toward known proper nouns.
+                        biases decoding toward known proper nouns; optional
+                        query parameter `language` (an ISO-639-1 code) pins the
+                        spoken language instead of letting Whisper detect it.
 
 Deliberately dependency-light: only the standard library plus `mlx_whisper`
 itself (`http.server` + `socketserver.UnixStreamServer` for the Unix-socket
@@ -85,12 +87,14 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
         # forms match the same way.
         return urlparse(self.path).path
 
-    def _initial_prompt(self) -> str:
-        # Sent as a query parameter rather than a header because a header value
-        # must be latin-1 safe and these terms are routinely CJK. Absent or
-        # empty means "no bias": mlx_whisper must receive the default (None),
-        # never initial_prompt="".
-        values = parse_qs(urlparse(self.path).query).get("initial_prompt", [])
+    def _query_param(self, name: str) -> str:
+        # Decode options are sent as query parameters rather than headers
+        # because a header value must be latin-1 safe and `initial_prompt`'s
+        # terms are routinely CJK. Absent or empty means "unset": mlx_whisper
+        # must receive its own default (None) rather than initial_prompt="" or
+        # language="" -- a language named "" is not the same request as "detect
+        # the language yourself".
+        values = parse_qs(urlparse(self.path).query).get(name, [])
         return values[0].strip() if values else ""
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib method name
@@ -115,7 +119,8 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "empty request body"})
             return
 
-        initial_prompt = self._initial_prompt()
+        initial_prompt = self._query_param("initial_prompt")
+        language = self._query_param("language")
 
         tmp_path = None
         try:
@@ -126,6 +131,13 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
             options = {"path_or_hf_repo": MODEL}
             if initial_prompt:
                 options["initial_prompt"] = initial_prompt
+            if language:
+                # Unlike `initial_prompt`, `language` is not one of
+                # `mlx_whisper.transcribe`'s named parameters -- it reaches the
+                # decoder through that function's trailing `**decode_options`,
+                # which is precisely what splatting this dict does. Keep it in
+                # the dict; there is no top-level argument to bind it to.
+                options["language"] = language
 
             with _transcribe_lock:
                 result = mlx_whisper.transcribe(tmp_path, **options)

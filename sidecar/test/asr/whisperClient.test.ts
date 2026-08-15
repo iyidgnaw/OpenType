@@ -168,6 +168,11 @@ describe("WhisperClient.transcribe", () => {
     await expect(client.transcribe(new Uint8Array([1]))).rejects.toThrow("boom");
   });
 
+  // The second argument became an options bag (`{ initialPrompt?, language? }`)
+  // when §C of the 2026-08-15 batch added a second decode option; a third
+  // positional optional is the shape that eventually gets called in the wrong
+  // order. `postAudio` stays positional — its extra parameter is purely
+  // additive, so every fake in this file keeps working.
   test("passes the initial prompt through to postAudio", async () => {
     let capturedPrompt: string | undefined;
     let promptArgSeen = false;
@@ -180,10 +185,9 @@ describe("WhisperClient.transcribe", () => {
     });
     const client = new WhisperClient({ socketPath: "/tmp/whisper-test.sock" }, factories);
 
-    const text = await client.transcribe(
-      new Uint8Array([1, 2, 3]),
-      "可能出现的专有名词：PayPal。"
-    );
+    const text = await client.transcribe(new Uint8Array([1, 2, 3]), {
+      initialPrompt: "可能出现的专有名词：PayPal。",
+    });
 
     expect(text).toBe("hello world");
     expect(promptArgSeen).toBe(true);

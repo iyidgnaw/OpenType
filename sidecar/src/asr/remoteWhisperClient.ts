@@ -29,6 +29,19 @@ export interface RemoteWhisperTestResult {
   error?: string;
 }
 
+/**
+ * Per-request decode options. Deliberately narrower than the local backend's:
+ * OpenAI's transcription endpoint has no `initial_prompt` equivalent, so the
+ * dictionary bias cannot cross this seam (a remote user still gets the
+ * deterministic alias rewrite `asr/routes.ts` applies afterwards). `language`
+ * it does take, and honouring it here is what keeps the setting from becoming
+ * a false promise again the moment someone configures remote Whisper.
+ */
+export interface RemoteWhisperTranscribeOptions {
+  /** ISO-639-1 code — the same vocabulary the local backend uses. */
+  language?: string;
+}
+
 export class RemoteWhisperError extends Error {
   readonly status: number;
 
@@ -69,14 +82,27 @@ async function parseJsonBody(response: Response): Promise<unknown> {
 export function createRemoteWhisperClient(
   config: RemoteWhisperConfig,
   fetchImpl: typeof fetch = fetch,
-  options: RemoteWhisperClientOptions = {}
+  // Named for the client rather than `options` so `transcribe`'s own
+  // per-request bag below doesn't shadow it -- the two are unrelated, and a
+  // reader of `options.language` should not have to check which one is in
+  // scope.
+  clientOptions: RemoteWhisperClientOptions = {}
 ) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const timeoutMs = clientOptions.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 
-  async function transcribe(audio: Uint8Array): Promise<string> {
+  async function transcribe(
+    audio: Uint8Array,
+    options: RemoteWhisperTranscribeOptions = {}
+  ): Promise<string> {
     const form = new FormData();
     form.set("model", config.model ?? DEFAULT_MODEL);
     form.set("file", new Blob([audio], { type: "audio/wav" }), "audio.wav");
+    // The field is left out of the form entirely rather than sent empty: the
+    // API reads a present-but-empty `language` as a language, which would
+    // suppress its own detection instead of requesting it.
+    if (options.language) {
+      form.set("language", options.language);
+    }
 
     const response = await fetchImpl(`${config.baseUrl}/audio/transcriptions`, {
       method: "POST",

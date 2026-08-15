@@ -9,7 +9,7 @@ import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
 import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
-import { buildAsrRoutes, type TranscribeFn } from "./asr/routes";
+import { buildAsrRoutes, type TranscribeFn, type TranscribeOptions } from "./asr/routes";
 import { createRemoteWhisperClient } from "./asr/remoteWhisperClient";
 import { defaultWhisperClientFactories, WhisperClient } from "./asr/whisperClient";
 import { loadEnv } from "./env";
@@ -268,7 +268,7 @@ async function main() {
   // either way; only which backend actually serves the request changes.
   const resolveTranscribe = async (
     audio: Uint8Array,
-    options: { initialPrompt?: string } = {}
+    options: TranscribeOptions = {}
   ): Promise<string> => {
     const status = providerConfigStore.getStatus();
     const whisperConfig = providerConfigStore.getWhisperConfig();
@@ -286,11 +286,13 @@ async function main() {
       // The remote (OpenAI-shaped) transcription API has no equivalent of
       // `initial_prompt`, so a remote user gets only the deterministic half of
       // the dictionary feedback -- the alias rewrite `asr/routes.ts` applies to
-      // whatever comes back.
-      return remoteClient.transcribe(audio);
+      // whatever comes back. `language` it does take, in the same ISO-639-1
+      // vocabulary, so the transcription-language setting means the same thing
+      // whichever backend is serving; the branch drops only what it cannot use.
+      return remoteClient.transcribe(audio, { language: options.language });
     }
     await whisperReady;
-    return whisperClient.transcribe(audio, options.initialPrompt);
+    return whisperClient.transcribe(audio, options);
   };
 
   const fetch = buildApp(

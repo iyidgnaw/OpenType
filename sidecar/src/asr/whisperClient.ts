@@ -32,16 +32,39 @@ export interface WhisperClientFactories {
   spawnProcess: (env: NodeJS.ProcessEnv) => SpawnedProcess;
   checkHealth: (socketPath: string) => Promise<boolean>;
   /**
-   * `initialPrompt` is the entity-dictionary bias (see `dictionaryBias.ts`).
-   * Optional and omitted rather than empty when there is nothing to bias with,
-   * so the decoder falls back to its own default instead of being handed "".
+   * `initialPrompt` is the entity-dictionary bias (see `dictionaryBias.ts`);
+   * `language` is the user's transcription-language setting as an ISO-639-1
+   * code. Both are optional and omitted rather than empty when unset, so the
+   * decoder falls back to its own defaults instead of being handed "".
+   *
+   * These stay positional (rather than following `transcribe` into an options
+   * bag) because each is purely additive here: every existing fake keeps
+   * working by simply not declaring the parameter it doesn't care about.
    */
   postAudio: (
     socketPath: string,
     audio: Uint8Array,
-    initialPrompt?: string
+    initialPrompt?: string,
+    language?: string
   ) => Promise<{ text: string }>;
   sleep: (ms: number) => Promise<void>;
+}
+
+/**
+ * The decode options a single transcription can carry. An options bag rather
+ * than a second and third positional optional: two same-typed trailing
+ * `string?` parameters are the shape that eventually gets called in the wrong
+ * order, and nothing in the type system would notice.
+ */
+export interface WhisperTranscribeOptions {
+  /** Entity-dictionary decoding bias; omitted when the dictionary is empty. */
+  initialPrompt?: string;
+  /**
+   * ISO-639-1 code (Whisper's own `LANGUAGES` keys — `"zh"`, `"en"`, `"ja"`),
+   * not a BCP-47 locale. Omitted means Whisper detects the language itself,
+   * which is what the setting's "自动识别" entry promises.
+   */
+  language?: string;
 }
 
 export interface WhisperClientOptions {
@@ -195,14 +218,20 @@ export class WhisperClient {
 
   /**
    * Sends raw WAV bytes to the running whisper server and returns the
-   * transcript. `initialPrompt`, when given, is passed to
-   * `mlx_whisper.transcribe(..., initial_prompt=...)` as decoding bias.
+   * transcript. Both options end up as `mlx_whisper.transcribe` keyword
+   * arguments (`initial_prompt=` for decoding bias, `language=` to pin the
+   * spoken language); each is independent, so setting one never drops the
+   * other.
    */
-  async transcribe(audio: Uint8Array, initialPrompt?: string): Promise<string> {
+  async transcribe(
+    audio: Uint8Array,
+    options: WhisperTranscribeOptions = {}
+  ): Promise<string> {
     const { text } = await this.factories.postAudio(
       this.socketPath,
       audio,
-      initialPrompt
+      options.initialPrompt,
+      options.language
     );
     return text;
   }
@@ -295,16 +324,26 @@ export function defaultWhisperClientFactories(
         return false;
       }
     },
-    postAudio: async (socketPath, audio, initialPrompt) => {
-      // The prompt travels as a percent-encoded query parameter rather than a
-      // header because headers must be latin-1 safe and the dictionary is full
-      // of CJK terms. `serve.py`'s `_path_only()` already strips the query
-      // before routing, so this doesn't disturb path matching. Absent prompt
-      // means no query string at all -- `?initial_prompt=` would reach
-      // mlx_whisper as "" instead of the default None.
-      const url = initialPrompt
-        ? `http://localhost/transcribe?initial_prompt=${encodeURIComponent(initialPrompt)}`
-        : "http://localhost/transcribe";
+    postAudio: async (socketPath, audio, initialPrompt, language) => {
+      // Both decode options travel as percent-encoded query parameters rather
+      // than headers because headers must be latin-1 safe and the dictionary is
+      // full of CJK terms. `serve.py`'s `_path_only()` already strips the query
+      // before routing, so this doesn't disturb path matching. An unset option
+      // contributes no parameter at all -- `?initial_prompt=` / `?language=`
+      // would reach mlx_whisper as "" instead of the default None, and for
+      // language that is the difference between "detect it yourself" and a
+      // language literally named "".
+      const params: string[] = [];
+      if (initialPrompt) {
+        params.push(`initial_prompt=${encodeURIComponent(initialPrompt)}`);
+      }
+      if (language) {
+        params.push(`language=${encodeURIComponent(language)}`);
+      }
+      const url =
+        params.length > 0
+          ? `http://localhost/transcribe?${params.join("&")}`
+          : "http://localhost/transcribe";
       const response = await fetch(url, {
         method: "POST",
         body: audio,

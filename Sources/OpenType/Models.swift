@@ -622,11 +622,23 @@ enum VoiceSurfacePanelLayout {
     }
 }
 
-/// Locale for the ASR pass. Fed to the sidecar's `/asr/transcribe` request
-/// isn't language-scoped (MLX-Whisper auto-detects), so this now only drives
-/// the Apple on-device live-caption preview's locale
-/// (`AppModel.hotKeyPressed`/`beginRecording` -> `LiveSpeechTranscriber.start`)
-/// via `appleLocaleIdentifier`.
+/// The user's chosen language for the ASR pass, expressed in two unrelated
+/// vocabularies because two different recognizers consume it:
+///
+///  - `appleLocaleIdentifier` — a BCP-47 locale for the Apple on-device
+///    live-caption *preview* (`AppModel.hotKeyPressed`/`beginRecording` ->
+///    `LiveSpeechTranscriber.start`).
+///  - `whisperCode` — an ISO-639-1 code for the backend that produces the
+///    transcript the user actually keeps, sent on `/asr/transcribe` and
+///    honoured by both the local MLX-Whisper process and a configured remote
+///    OpenAI-shaped provider.
+///
+/// The second one is the whole point of the setting and was missing until the
+/// 2026-08-15 batch (§C): the picker offered 27 languages and reached only the
+/// preview, so choosing "English" and still getting Chinese punctuation read as
+/// the product being broken. Do not derive either code from the other — see
+/// `whisperCode` for the three entries where that shortcut produces a wrong or
+/// nonexistent language.
 enum TranscriptionLanguage: String, CaseIterable, Codable, Identifiable {
     case automatic
     case chinese
@@ -721,6 +733,73 @@ enum TranscriptionLanguage: String, CaseIterable, Codable, Identifiable {
         case .norwegian: return "nb-NO"
         case .polish: return "pl-PL"
         case .swedish: return "sv-SE"
+        }
+    }
+
+    /// The language code Whisper expects, or `nil` for "let it detect".
+    ///
+    /// These are keys of Whisper's own `LANGUAGES` table (ISO-639-1), **not**
+    /// the BCP-47 identifiers above, and not something to compute from them:
+    /// `String(appleLocaleIdentifier.prefix(2))` yields `"fi"` (Finnish) for
+    /// Filipino and `"nb"` for Norwegian, which is not in Whisper's table at
+    /// all. Whisper rejects a code outside that table outright, so a wrong one
+    /// is an outage rather than a degradation.
+    ///
+    /// Deliberately an exhaustive `switch` with no `default:` — a `default:`
+    /// returning `nil` would let a 28th language compile and ship as a picker
+    /// entry that silently does nothing, which is exactly the bug this property
+    /// exists to fix. `TranscriptionLanguageWhisperCodeTests` pins the same
+    /// obligation from the test side.
+    var whisperCode: String? {
+        switch self {
+        // Not a language: the absence of one. Anything but nil here would turn
+        // the default setting into a forced language.
+        case .automatic: return nil
+        case .chinese: return "zh"
+        // Measured 2026-08-15 against the model `whisper/serve.py` ships
+        // (`DEFAULT_MODEL = mlx-community/whisper-small-mlx`, mlx_whisper
+        // 0.4.3), through the same `mlx_whisper.transcribe` call it makes:
+        // `language="yue"` raises `ValueError: tuple.index(x): x not in tuple`
+        // from the tokenizer, while `language="zh"` returns normally. The cause
+        // is structural, not a version fluke — `yue` is the 100th and last key
+        // of Whisper's LANGUAGES table (added with large-v3), whisper-small's
+        // checkpoint reports `n_vocab == 51865` so `num_languages == 99`, and
+        // the tokenizer truncates the table to the first 99 keys before the
+        // lookup. Since `serve.py` answers HTTP 500 on any exception, mapping
+        // 粤语 to `"yue"` would fail *every* Cantonese transcription: worse
+        // than the setting doing nothing. The mapping is static while the model
+        // is not (`OPENTYPE_WHISPER_MODEL`, and the coming model picker) — on
+        // large-v3 `yue` works, so re-measure this first if the default changes.
+        case .cantonese: return "zh"
+        case .english: return "en"
+        case .japanese: return "ja"
+        case .korean: return "ko"
+        case .german: return "de"
+        case .french: return "fr"
+        case .spanish: return "es"
+        case .italian: return "it"
+        case .portuguese: return "pt"
+        case .russian: return "ru"
+        case .arabic: return "ar"
+        case .hindi: return "hi"
+        case .indonesian: return "id"
+        case .thai: return "th"
+        case .turkish: return "tr"
+        case .vietnamese: return "vi"
+        case .ukrainian: return "uk"
+        case .czech: return "cs"
+        case .danish: return "da"
+        // Whisper's table has Tagalog and no `fil`/`ph` entry at all; note the
+        // app's `fil-PH` locale opens with the letters that spell Finnish.
+        case .filipino: return "tl"
+        case .finnish: return "fi"
+        case .icelandic: return "is"
+        case .malay: return "ms"
+        // The macrolanguage key, which is what Whisper's table uses. Bokmål
+        // (`nb`, the app's live-caption locale) is not in it.
+        case .norwegian: return "no"
+        case .polish: return "pl"
+        case .swedish: return "sv"
         }
     }
 }

@@ -4,11 +4,18 @@ import type { Route } from "../router";
 
 interface TranscribeRequestBody {
   audioBase64?: string;
+  language?: string;
 }
 
 export interface TranscribeOptions {
   /** Decoding bias built from the entity dictionary; omitted when there is none. */
   initialPrompt?: string;
+  /**
+   * The user's transcription-language setting as an ISO-639-1 code, forwarded
+   * to whichever backend serves the request. Omitted means auto-detect. The two
+   * options are independent: a language must not displace the dictionary bias.
+   */
+  language?: string;
 }
 
 export type TranscribeFn = (
@@ -121,9 +128,17 @@ async function handleTranscribe(
 
   const terms = readTerms(deps);
   const initialPrompt = buildInitialPrompt(terms);
-  // The key is omitted, not set to "", so an empty dictionary never reaches the
-  // decoder as an empty prompt.
-  const options: TranscribeOptions = initialPrompt ? { initialPrompt } : {};
+  // Keys are omitted, never set to "", so an empty dictionary never reaches the
+  // decoder as an empty prompt and an unset language never reaches it as a
+  // language named "". `automatic` is the absence of a language, not a value.
+  const language = body.language?.trim();
+  const options: TranscribeOptions = {};
+  if (initialPrompt) {
+    options.initialPrompt = initialPrompt;
+  }
+  if (language) {
+    options.language = language;
+  }
 
   try {
     const text = await transcribe(audio, options);

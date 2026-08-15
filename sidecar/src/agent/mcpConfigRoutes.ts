@@ -1,6 +1,11 @@
 import type { Route } from "../router";
 import { maskApiKey } from "../provider/maskApiKey";
-import { probeMcpServer as defaultProbeMcpServer, type McpProbeResult } from "./mcpClient";
+import {
+  probeMcpServer as defaultProbeMcpServer,
+  type McpConnectionReport,
+  type McpProbeResult,
+  type McpServerConnectionStatus,
+} from "./mcpClient";
 import {
   McpConfigError,
   McpConfigStore,
@@ -26,7 +31,29 @@ interface MaskedMcpServer {
   envMasked?: Record<string, string>;
   headersMasked?: Record<string, string>;
   enabled: boolean;
+  /**
+   * Why this server was skipped at the last start, when it was -- absent for a
+   * server that connected, is still connecting, or was never in the boot set at
+   * all. See `startupErrorFor` for how the two failure kinds are worded.
+   */
+  lastStartupError?: string;
 }
+
+/**
+ * Marker the *timeout* kind of `lastStartupError` is stamped with, so a client
+ * with one string to render can still tell the two kinds apart.
+ *
+ * `lastStartupError` is deliberately a single string rather than a string plus a
+ * state enum -- it is what a row renders, and a second field would only be read
+ * to re-derive what this prefix already says. The recorded error follows the
+ * prefix verbatim, so the numeric budget stays visible to anyone reading the raw
+ * response, and improvements to what `startMcpConnections` records reach the UI
+ * without passing through here again.
+ *
+ * Swift mirrors this constant in `Models.swift` (`McpServerSummary`); the two
+ * must move together.
+ */
+export const MCP_STARTUP_TIMEOUT_PREFIX = "Startup timed out: ";
 
 export interface McpConfigRouteDeps {
   /** Overridable so `/config/mcp/test` needs no child process or network. */
@@ -38,11 +65,25 @@ export interface McpConfigRouteDeps {
    * can never leak into a test's expectations.
    */
   envJson: string | undefined;
+  /**
+   * How the boot-time MCP connections went (`LazyMcpToolSet.status`).
+   *
+   * A **getter**, not a value, and that is the whole feature: these routes are
+   * built during boot, while every server is still `connecting`. A report
+   * captured then would say "no errors" for the rest of the process's life --
+   * the silent skip this seam exists to end, moved up one layer.
+   *
+   * Optional because an assembly may have no MCP tool set to report on (and
+   * because the ~50 route tests predate this); unwired, no row carries a
+   * `lastStartupError` rather than every row carrying an invented one.
+   */
+  connectionReport?: () => McpConnectionReport;
 }
 
 const defaultDeps: McpConfigRouteDeps = {
   probeMcpServer: defaultProbeMcpServer,
   envJson: undefined,
+  connectionReport: undefined,
 };
 
 function maskMap(
@@ -69,6 +110,54 @@ function maskServer(server: StoredMcpServer): MaskedMcpServer {
     headersMasked: maskMap(server.headers),
     enabled: server.enabled,
   };
+}
+
+/**
+ * The one sentence a row can show about why a server was skipped, or
+ * `undefined` when there is nothing to say.
+ *
+ * `connecting` is not a failure -- it is what every server looks like for the
+ * first seconds of a launch, and rendering a warning there would cry wolf on
+ * every panel opened early. `connected` obviously has nothing to report.
+ *
+ * The two failure kinds stay distinguishable because the user's fix differs: a
+ * timeout means "unreachable or too slow, we gave up on it", `spawn npx ENOENT`
+ * means "your command is wrong". The failure text is passed through untouched
+ * so the row shows the server's own words.
+ */
+function startupErrorFor(status: McpServerConnectionStatus): string | undefined {
+  if (status.state === "timedOut") {
+    return `${MCP_STARTUP_TIMEOUT_PREFIX}${status.error ?? "No response within the connect budget."}`;
+  }
+  if (status.state === "failed") {
+    return status.error ?? "Failed to connect.";
+  }
+  return undefined;
+}
+
+/**
+ * Indexes a connection report **by server name**.
+ *
+ * By name, never by position: the response lists `allServers` (disabled ones
+ * included, so a failing server stays re-enableable) while only the enabled
+ * subset is ever handed to `startMcpConnections`. The moment one server is
+ * switched off the two lists differ in length *and* order, and zipping them by
+ * index would pin a failure on a row that was never even started.
+ */
+function startupErrorsByName(
+  connectionReport: (() => McpConnectionReport) | undefined,
+): Map<string, string> {
+  const errors = new Map<string, string>();
+  if (!connectionReport) {
+    return errors;
+  }
+  for (const status of connectionReport().servers) {
+    const message = startupErrorFor(status);
+    if (message !== undefined) {
+      errors.set(status.name, message);
+    }
+  }
+  return errors;
 }
 
 /**
@@ -188,7 +277,7 @@ export function buildMcpConfigRoutes(
   store: McpConfigStore,
   deps: Partial<McpConfigRouteDeps> = {},
 ): Route[] {
-  const { probeMcpServer, envJson } = { ...defaultDeps, ...deps };
+  const { probeMcpServer, envJson, connectionReport } = { ...defaultDeps, ...deps };
 
   return [
     {
@@ -196,6 +285,8 @@ export function buildMcpConfigRoutes(
       path: "/config/mcp",
       handler: () => {
         const resolved = resolveMcpServers(store, envJson);
+        // Read here, per request -- see `connectionReport`'s doc comment.
+        const startupErrors = startupErrorsByName(connectionReport);
         return Response.json({
           // "Configured" is explicit, never ambient: env-var servers are
           // listed (a dev can see what they inherited) but never presented as
@@ -206,7 +297,17 @@ export function buildMcpConfigRoutes(
           // omits disabled ones. A disabled server the panel cannot see is a
           // disabled server the user cannot re-enable or delete, which defeats
           // the point of letting a failing server be saved at all.
-          servers: resolved.allServers.map(maskServer),
+          //
+          // `lastStartupError` is set through the map rather than inside
+          // `maskServer` because the write routes share that function and
+          // answer with the server the user just saved -- a boot-time verdict
+          // has no business in the response to a write that has not booted yet.
+          // `undefined` drops the key entirely on the way through
+          // `JSON.stringify`, so a healthy row carries no empty warning.
+          servers: resolved.allServers.map((server) => ({
+            ...maskServer(server),
+            lastStartupError: startupErrors.get(server.name),
+          })),
         });
       },
     },

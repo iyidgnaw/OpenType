@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { buildAgentRoutes } from "./agent/routes";
 import { withApproval, yoloApprovalPolicy } from "./agent/approval";
 import type { AgentChatFn } from "./agent/loop";
-import { startMcpConnections } from "./agent/mcpClient";
+import { startMcpConnections, type McpConnectionReport } from "./agent/mcpClient";
 import { McpConfigStore, resolveMcpServers } from "./agent/mcpConfigStore";
 import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
@@ -73,7 +73,15 @@ export function buildApp(
    * `main()`.
    */
   mcpConfigStore?: McpConfigStore,
-  mcpEnvJson?: string
+  mcpEnvJson?: string,
+  /**
+   * How the boot-time MCP connections went (`main()` passes `mcpTools.status`).
+   * A getter, read per request, because these routes are built while every
+   * server is still `connecting` -- see `mcpConfigRoutes.ts`. Optional so an
+   * assembly with no MCP tool set (every pre-existing test call site) answers
+   * exactly the shape it always did.
+   */
+  mcpConnectionReport?: () => McpConnectionReport
 ) {
   return createRouter([
     {
@@ -105,7 +113,10 @@ export function buildApp(
     ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),
     ...(mcpConfigStore
-      ? buildMcpConfigRoutes(mcpConfigStore, { envJson: mcpEnvJson })
+      ? buildMcpConfigRoutes(mcpConfigStore, {
+          envJson: mcpEnvJson,
+          connectionReport: mcpConnectionReport,
+        })
       : []),
   ]);
 }
@@ -294,7 +305,13 @@ async function main() {
     env.spillRoot,
     env.runLogRoot,
     mcpConfigStore,
-    process.env.OPENTYPE_MCP_SERVERS
+    process.env.OPENTYPE_MCP_SERVERS,
+    // The exit for the connection report above. Without this, the outcome of
+    // every boot connection is recorded and read by nobody, so a server skipped
+    // at startup renders in the panel exactly like one that works -- a silent
+    // skip is just a silent failure one layer along. `status` is a closure over
+    // that report rather than a method, so passing it unbound is safe.
+    mcpTools.status
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

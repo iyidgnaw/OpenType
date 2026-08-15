@@ -1735,6 +1735,21 @@ enum McpConfigSource: String, Decodable, Equatable {
     case env
 }
 
+/// Why a server was skipped when the voice service last started.
+///
+/// The two cases are kept apart because the fix is different, and the row has
+/// one line to say which: a timeout means the server is unreachable or too slow
+/// and was given up on, while a failure means the configuration itself is wrong
+/// (`spawn npx ENOENT`) and the server's own message is the useful thing to
+/// show. Collapsing them into "didn't start" would send a user with a typo off
+/// to check their network.
+enum McpStartupFailure: Equatable {
+    /// The server never finished its handshake inside the connect budget.
+    case timedOut
+    /// The connection failed outright, carrying the sidecar's recorded message.
+    case failed(String)
+}
+
 /// One MCP server as the sidecar reports it.
 ///
 /// Secrets arrive **only** as `envMasked`/`headersMasked`. There is
@@ -1755,12 +1770,40 @@ struct McpServerSummary: Decodable, Identifiable, Equatable {
     /// field existed implies, and the same default `normalizeMcpServer` applies
     /// on the other side of the wire.
     let enabled: Bool?
+    /// Why the last voice-service start skipped this server, when it did.
+    ///
+    /// `GET /config/mcp` alone carries it — it is a runtime verdict, so the
+    /// write routes (which answer with a server that has not booted yet) leave
+    /// it out, and so does a server that connected, is still connecting, or was
+    /// disabled and therefore never started. Optional in every sense: absent
+    /// means "nothing to report", never "fine".
+    let lastStartupError: String?
 
     /// The name is what `PUT`/`DELETE /config/mcp/:name` address, so it is also
     /// the row identity — there is no separate id to key on.
     var id: String { name }
 
     var isEnabled: Bool { enabled ?? true }
+
+    /// Marker the sidecar stamps on the timeout kind of `lastStartupError`
+    /// (`MCP_STARTUP_TIMEOUT_PREFIX` in `sidecar/src/agent/mcpConfigRoutes.ts`).
+    /// The field is one string on purpose — it is what a row renders — so the
+    /// kind travels inside it, and these two constants must move together.
+    private static let startupTimeoutMarker = "Startup timed out:"
+
+    /// `lastStartupError` classified into something a row can render.
+    var startupFailure: McpStartupFailure? {
+        guard
+            let text = lastStartupError?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !text.isEmpty
+        else {
+            return nil
+        }
+        if text.hasPrefix(Self.startupTimeoutMarker) {
+            return .timedOut
+        }
+        return .failed(text)
+    }
 }
 
 /// Mirrors `GET /config/mcp`.

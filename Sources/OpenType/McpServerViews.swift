@@ -14,6 +14,10 @@ private enum McpIcon {
     static let inlineGlyph: CGFloat = 15
     static let removeGlyph: CGFloat = 14
     static let sheetClose: CGFloat = 18
+    /// The triangle on a row's startup-failure line. Not a handoff value — the
+    /// mockup has no such line — so it is sized to the 11pt label it sits
+    /// beside rather than to a new icon step of its own.
+    static let statusWarning: CGFloat = 11
 }
 
 // MARK: - Built-in tools
@@ -687,13 +691,16 @@ private struct McpServerRowView: View {
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(server.isEnabled ? DS.Colour.ok : DS.Colour.ink(0.25))
+                        .fill(dotColour)
                         .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
                     Text(statusText)
                         .font(DS.Text.groupLabel())
                         .fontWeight(.regular)
                         .foregroundStyle(DS.Colour.ink(0.45))
                         .lineLimit(1)
+                }
+                if let startupFailure {
+                    McpStartupFailureLine(failure: startupFailure)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -726,16 +733,34 @@ private struct McpServerRowView: View {
         }
     }
 
+    /// Why the last start skipped this server, when it did.
+    ///
+    /// Only asked of an enabled server. A disabled one already explains itself
+    /// on the line above, and the verdict it would show is from a start where
+    /// it was still enabled — stale by construction, and pointing at a fix the
+    /// user has already made.
+    private var startupFailure: McpStartupFailure? {
+        server.isEnabled ? server.startupFailure : nil
+    }
+
+    /// Green claims "this is working", so a server the last start gave up on
+    /// must not get one — that identical-looking dot is precisely the silent
+    /// skip this row now reports.
+    private var dotColour: Color {
+        guard server.isEnabled else { return DS.Colour.ink(0.25) }
+        return startupFailure == nil ? DS.Colour.ok : DS.Colour.warningText
+    }
+
     /// What this row can honestly say.
     ///
-    /// The handoff's 「6 个工具 · 上次启动已连接」 needs runtime facts the
-    /// config API does not report: `GET /config/mcp` answers with stored
-    /// configuration, and nothing tells Swift which servers the current
-    /// sidecar actually connected to or how many tools each contributed. A
-    /// tool count is therefore shown only when this session's Test Connection
-    /// produced one, labelled as the test rather than as the connection, and
-    /// the rest of the line states the thing that is always true — that this
-    /// takes effect at the next start.
+    /// The handoff's 「6 个工具 · 上次启动已连接」 needs runtime facts the config
+    /// API only half reports: `GET /config/mcp` answers with stored
+    /// configuration plus `lastStartupError`, so Swift learns which servers the
+    /// last start *skipped* but not how many tools the ones that connected
+    /// contributed. A tool count is therefore shown only when this session's
+    /// Test Connection produced one, labelled as the test rather than as the
+    /// connection; the failures get their own line below; and the rest states
+    /// the thing that is always true — that this takes effect at the next start.
     private var statusText: String {
         guard server.isEnabled else {
             return OpenTypeL10n.text(
@@ -762,25 +787,36 @@ private struct McpEnvironmentRow: View {
     let isFirst: Bool
 
     var body: some View {
-        HStack(spacing: 11) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Text(server.name)
-                        .font(DS.Text.mono(13, weight: .semibold))
-                    McpTransportTag(transport: server.transport)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 11) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(server.name)
+                            .font(DS.Text.mono(13, weight: .semibold))
+                        McpTransportTag(transport: server.transport)
+                    }
+                    Text(endpoint)
+                        .font(DS.Text.mono())
+                        .foregroundStyle(DS.Colour.ink(0.45))
+                        .lineLimit(1)
                 }
-                Text(endpoint)
-                    .font(DS.Text.mono())
-                    .foregroundStyle(DS.Colour.ink(0.45))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            Image(systemName: "lock.fill")
-                .font(.system(size: McpIcon.inlineGlyph))
-                .foregroundStyle(DS.Colour.ink(0.28))
+                Image(systemName: "lock.fill")
+                    .font(.system(size: McpIcon.inlineGlyph))
+                    .foregroundStyle(DS.Colour.ink(0.28))
+            }
+            // The dimming says "read-only", which is true of the configuration
+            // above it and not of the warning below — an environment-supplied
+            // server is connected at boot exactly like a saved one, so it fails
+            // exactly like one, and a half-faded warning would be the quietest
+            // possible way to report that.
+            .opacity(0.62)
+
+            if let failure = server.startupFailure {
+                McpStartupFailureLine(failure: failure)
+            }
         }
-        .opacity(0.62)
         .padding(.horizontal, DS.Space.content)
         .padding(.vertical, 12)
         .overlay(alignment: .top) {
@@ -798,6 +834,52 @@ private struct McpEnvironmentRow: View {
                 .joined(separator: " ")
         case .http:
             return server.url ?? ""
+        }
+    }
+}
+
+/// The one line that says a server the user saved is not actually running.
+///
+/// Its absence was the whole failure: `startMcpConnections` has always recorded
+/// why each server was skipped, but nothing read that report, so a server that
+/// timed out at startup drew identically to one contributing tools — and the
+/// user's model of the product ("I saved it, so the agent has it") stayed wrong
+/// with nothing on screen to correct it.
+///
+/// Two wordings, because the fix differs. A timeout gets a sentence, since the
+/// recorded text ("No response within 12000ms.") says less to the reader than
+/// the fact that the server was given up on. A failure gets the server's own
+/// message verbatim behind a label that places it at startup — `spawn npx
+/// ENOENT` is the actionable half, and paraphrasing it would delete the only
+/// evidence the user has.
+private struct McpStartupFailureLine: View {
+    let failure: McpStartupFailure
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 5) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: McpIcon.statusWarning))
+                .foregroundStyle(DS.Colour.warningText)
+            Text(text)
+                .font(DS.Text.groupLabel())
+                .fontWeight(.regular)
+                .foregroundStyle(DS.Colour.warningText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var text: String {
+        switch failure {
+        case .timedOut:
+            return OpenTypeL10n.text(
+                "启动超时，已跳过",
+                english: "Timed out at startup and was skipped"
+            )
+        case .failed(let message):
+            return OpenTypeL10n.text(
+                "启动失败：\(message)",
+                english: "Failed at startup: \(message)"
+            )
         }
     }
 }

@@ -31,6 +31,19 @@ final class ContextBridge {
         NSWorkspace.shared.open(url)
     }
 
+    /// System Settings › General › Login Items.
+    ///
+    /// The jump `.requiresApproval` needs: once the user has disabled our login
+    /// item there, `SMAppService.register()` is accepted and does nothing, so
+    /// the only honest thing the app can offer is the pane where it can be
+    /// turned back on.
+    func openLoginItemsSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     func capture() -> CapturedContext {
         let application = NSWorkspace.shared.frontmostApplication
         return CapturedContext(

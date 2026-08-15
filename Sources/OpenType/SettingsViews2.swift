@@ -39,6 +39,10 @@ struct SettingsColumn: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
     @ObservedObject var agentMemory: AgentMemoryStore
+    /// Observed directly rather than read through `model`: the login item's
+    /// state is the system's, not ours, and this is the object that re-reads
+    /// it. See `LaunchAtLogin.swift`.
+    @ObservedObject var launchAtLogin: LaunchAtLoginController
 
     /// Line count of `audit-events.v1.jsonl`, for the 审计记录 row. `nil`
     /// until the first read finishes — the row prints nothing rather than a
@@ -49,6 +53,7 @@ struct SettingsColumn: View {
         self.model = model
         configuration = model.configuration
         agentMemory = model.agentMemory
+        launchAtLogin = model.launchAtLogin
     }
 
     /// Below this the five groups stack into one column. It is not the
@@ -74,6 +79,7 @@ struct SettingsColumn: View {
                     if twoColumn {
                         HStack(alignment: .top, spacing: DS.Space.group) {
                             VStack(alignment: .leading, spacing: DS.Space.group) {
+                                generalGroup
                                 shortcutGroup
                                 dictationOutputGroup
                             }
@@ -90,6 +96,7 @@ struct SettingsColumn: View {
                         .padding(.bottom, pagePadding)
                     } else {
                         VStack(alignment: .leading, spacing: DS.Space.group) {
+                            generalGroup
                             shortcutGroup
                             dictationOutputGroup
                             engineGroup
@@ -105,9 +112,85 @@ struct SettingsColumn: View {
         }
         .background(DS.Colour.canvas)
         .task {
+            // Before the awaits: the login item's state is read locally and is
+            // the one thing on this page that can have changed without the app
+            // being involved at all.
+            model.refreshLaunchAtLogin()
             auditEventCount = await auditEventCountFromDisk()
             await model.refreshWhisperConfigSummary()
             await model.refreshLLMConfigSummary()
+        }
+    }
+
+    // MARK: 通用
+
+    private var generalGroup: some View {
+        SettingsGroup(OpenTypeL10n.text("通用", english: "General")) {
+            launchAtLoginRow
+        }
+    }
+
+    /// 开机自启, in whichever of its four states the system is in.
+    ///
+    /// Three renderings rather than one switch with disabled states, because
+    /// two of the four are not 「开」 or 「关」 at all. `.requiresApproval` is a
+    /// registration macOS is holding back, and the only thing that clears it is
+    /// the Login Items pane — so that row trades the switch for the jump, the
+    /// same shape the ungranted permission rows below use. `.notSupported` is a
+    /// bundle launchd will not register from where it is running; a switch
+    /// there would be one the user can press forever with nothing to show for
+    /// it, so it gets prose instead.
+    @ViewBuilder
+    private var launchAtLoginRow: some View {
+        let title = OpenTypeL10n.text("开机时自动启动", english: "Launch at login")
+
+        switch launchAtLogin.status {
+        case .enabled, .disabled:
+            SettingsRow(
+                divided: false,
+                title: title,
+                // A refused `register()` replaces the explanation rather than
+                // sitting under it: the switch has just failed to move, and
+                // that is the only thing worth reading on the row.
+                subtitle: model.launchAtLoginError ?? OpenTypeL10n.text(
+                    "OpenType 常驻菜单栏，登录后自动开始运行，不占用程序坞",
+                    english: "OpenType lives in the menu bar — it starts with your session and never takes a Dock slot"
+                ),
+                tinted: model.launchAtLoginError != nil
+            ) {
+                SettingsSwitch(
+                    isOn: Binding(
+                        get: { launchAtLogin.isEnabled },
+                        set: { model.changeLaunchAtLogin($0) }
+                    )
+                )
+                .accessibilityLabel(title)
+            }
+
+        case .requiresApproval:
+            SettingsRow(
+                divided: false,
+                title: title,
+                subtitle: OpenTypeL10n.text(
+                    "已被系统设置拦下。在「登录项与扩展」里允许 OpenType 之后才会生效。",
+                    english: "Blocked by System Settings. Allow OpenType under Login Items & Extensions for this to take effect."
+                ),
+                tinted: true
+            ) {
+                SmallButton(OpenTypeL10n.text("打开设置", english: "Open Settings")) {
+                    model.openLoginItemsSettings()
+                }
+            }
+
+        case .notSupported:
+            SettingsRow(
+                divided: false,
+                title: title,
+                subtitle: OpenTypeL10n.text(
+                    "当前这个运行位置无法注册为登录项（例如直接从 .build/ 运行的调试版本）。打包成 .app 后可用。",
+                    english: "The app cannot be registered as a login item from where it is running (a debug build launched out of .build/, for example). It works from a packaged .app."
+                )
+            )
         }
     }
 

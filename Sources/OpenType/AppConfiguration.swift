@@ -70,6 +70,27 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(liveCaptionsEnabled, forKey: Keys.liveCaptionsEnabled) }
     }
 
+    /// What the user last chose for 开机自启, and nothing more.
+    ///
+    /// **Never read this to decide what the switch shows.** The registration
+    /// itself is the source of truth — `LaunchAtLoginController` re-reads
+    /// `SMAppService.mainApp.status` for that — because the user can turn our
+    /// login item off in System Settings without telling us, and a
+    /// UserDefaults-backed switch would go on reading 「开」 afterwards. Nothing
+    /// reconciles the two either: re-registering at launch because this says
+    /// `true` would undo the change the user just made in System Settings.
+    ///
+    /// What it is for is the other question — 「用户表过态没有」 — which a later
+    /// first-run step wants so it can ask exactly once. Note the `Bool` on its
+    /// own does not answer that one either: 「问过，选了不开」 and 「从没问过」
+    /// both read `false`, and the only thing separating them is whether the key
+    /// exists at all (`defaults.object(forKey: "launchAtLogin") == nil`). Read
+    /// it that way when the time comes, or add a flag of its own. Defaults to
+    /// `false`, which leaves an existing install's behaviour exactly as it was.
+    @Published var launchAtLogin: Bool {
+        didSet { defaults.set(launchAtLogin, forKey: Keys.launchAtLogin) }
+    }
+
     /// Set once the user explicitly chose the first-run "just local
     /// transcription, skip AI setup" path. Persisted so the choice survives
     /// relaunches — `OnboardingPolicy.needsProviderOnboarding` reads it to let a
@@ -115,6 +136,7 @@ final class AppConfiguration: ObservableObject {
         ) as? Bool ?? true
         playFeedbackSounds = defaults.object(forKey: Keys.playFeedbackSounds) as? Bool ?? true
         liveCaptionsEnabled = defaults.object(forKey: Keys.liveCaptionsEnabled) as? Bool ?? true
+        launchAtLogin = defaults.object(forKey: Keys.launchAtLogin) as? Bool ?? false
         localTranscriptionOnlyAcknowledged = defaults.object(
             forKey: Keys.localTranscriptionOnlyAcknowledged
         ) as? Bool ?? false
@@ -132,6 +154,7 @@ final class AppConfiguration: ObservableObject {
         static let automaticOwnerProfileUpdates = "automaticOwnerProfileUpdates"
         static let playFeedbackSounds = "playFeedbackSounds"
         static let liveCaptionsEnabled = "liveCaptionsEnabled"
+        static let launchAtLogin = "launchAtLogin"
         static let localTranscriptionOnlyAcknowledged = "localTranscriptionOnlyAcknowledged"
     }
 }

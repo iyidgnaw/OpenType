@@ -211,6 +211,17 @@ final class AppModel: ObservableObject {
     let configuration: AppConfiguration
     let history: HistoryStore
     let agentMemory: AgentMemoryStore
+    /// 开机自启 (§A). Not private and not republished through `AppModel`: the
+    /// Settings row observes it directly, because the switch's position *is*
+    /// `status` read off the registrar, and a copy kept here would be one more
+    /// place for it to go stale — which is the whole failure this feature is
+    /// specified to avoid.
+    let launchAtLogin = LaunchAtLoginController(item: SMAppServiceLoginItem())
+    /// The registrar's own error from the last 开机自启 toggle, or `nil` when
+    /// the last attempt succeeded. Shown on the row itself: a `register()` that
+    /// launchd refused leaves the switch reading 「关」, and without this the
+    /// user would see a switch that simply refuses to move.
+    @Published private(set) var launchAtLoginError: String?
     private let auditStore = ImmutableAuditStore()
 
     /// Central append point for the immutable audit trail. The audit log is the
@@ -1101,6 +1112,38 @@ final class AppModel: ObservableObject {
 
     func changeTranscribeVariant(_ variant: TranscribeVariant) {
         configuration.transcribeVariant = variant
+    }
+
+    /// Re-read the login item's registration. Called whenever the Settings pane
+    /// appears, which is what makes a change the user made in System Settings
+    /// while our window was closed show up on the row.
+    func refreshLaunchAtLogin() {
+        // The error describes an attempt, not a state, so it does not survive
+        // the read that replaces the state: otherwise a user who went to System
+        // Settings and turned the login item on by hand would come back to a
+        // switch reading 「开」 under a red 「launchd 拒绝了」 from ten minutes
+        // ago. Nothing re-reads between the failed press and the user seeing it
+        // — this page's `.task` and app reactivation are the only callers.
+        launchAtLoginError = nil
+        launchAtLogin.refresh()
+    }
+
+    func changeLaunchAtLogin(_ enabled: Bool) {
+        // Recorded before the attempt and regardless of how it goes: this is
+        // 「用户表过态」, and they have, whether or not launchd agreed. What it
+        // must never do is decide what the row displays — that comes back off
+        // the registrar in `apply(desired:)`.
+        configuration.launchAtLogin = enabled
+        do {
+            try launchAtLogin.apply(desired: enabled)
+            launchAtLoginError = nil
+        } catch {
+            launchAtLoginError = error.localizedDescription
+        }
+    }
+
+    func openLoginItemsSettings() {
+        contextBridge.openLoginItemsSettings()
     }
 
     func changeAutomaticOwnerProfileUpdates(_ enabled: Bool) {

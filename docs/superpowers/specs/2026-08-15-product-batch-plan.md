@@ -295,13 +295,26 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 ---
 
-## K. 麦克风设备可见（review #9）
+## K. 麦克风设备可见（review #9）—— 已完成（2026-08-15）
 
 - Settings「语音识别」组显示**当前系统默认输入设备名**（`AVCaptureDevice.default(for: .audio)`），
   设备变化时更新（`AVCaptureDevice.wasDisconnectedNotification` / 默认设备变化通知）。
 - **只显示，不做选择器**（review #9 的判断：让用户能自己诊断「今天识别特别差」，比让他猜强）。
 
 **测试**：设备名解析的纯函数（无设备 / 无权限 / 正常）。不测 AVFoundation 本身。
+
+**落地**：`Sources/OpenType/InputDevice.swift`（`InputDeviceSnapshot` / `InputDeviceName.resolve(from:)` /
+`InputDeviceMonitor`）+ `SettingsViews2.swift`「引擎」组末行「输入设备」，
+`Tests/OpenTypeTests/InputDeviceNameTests.swift` 13 例。三处与本节字面写法不同，都是有意的：
+
+- 落在**「引擎」组**而不是「语音识别」组——2026-08-14 重设计之后，「语音识别」已经是那一组里的
+  一行（推送到服务商子页），组名叫「引擎」。放在同组末行，跟两行服务商行一样用 mono，语义没变。
+- **无权限时不说「没有设备」**：两种空状态分开成两句话，因为解法不同（插设备 vs 给权限）。
+  并且**有名字时不看权限**——macOS 常常在授权之前就能报出默认输入的名字，把它藏到权限提示后面
+  等于让这一行比它替换掉的空行更没用。
+- 默认设备变化没有 AVFoundation 通知（只有 Core Audio 的属性监听），所以用
+  `NSApplication.didBecomeActiveNotification` 兜住「去系统设置改完再切回来」这条路径，
+  加上设置页 `.task` 的一次重读。全程无轮询。
 
 ---
 

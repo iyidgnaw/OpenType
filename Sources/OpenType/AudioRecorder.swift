@@ -10,16 +10,11 @@ final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         recorder?.isRecording == true
     }
 
-    var permissionStatus: PermissionStatus {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            return .granted
-        case .notDetermined:
-            return .notDetermined
-        default:
-            return .denied
-        }
-    }
+    // Recording always follows the system default input; nothing here selects a
+    // device. Settings names that device rather than choosing it, and the TCC
+    // read moved next to it (`InputDevice.swift`) so the row and the recorder
+    // cannot disagree about whether there is a microphone at all.
+    var permissionStatus: PermissionStatus { .microphone }
 
     func requestPermission() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {

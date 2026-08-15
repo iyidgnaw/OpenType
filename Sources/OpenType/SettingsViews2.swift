@@ -44,6 +44,12 @@ struct SettingsColumn: View {
     /// it. See `LaunchAtLogin.swift`.
     @ObservedObject var launchAtLogin: LaunchAtLoginController
 
+    /// Owned here rather than by `AppModel` for the same reason: the current
+    /// input device is the system's fact, nothing outside this page reads it,
+    /// and it only needs watching while this page is on screen. See
+    /// `InputDevice.swift`.
+    @StateObject private var inputDevice = InputDeviceMonitor()
+
     /// Line count of `audit-events.v1.jsonl`, for the 审计记录 row. `nil`
     /// until the first read finishes — the row prints nothing rather than a
     /// wrong `0`, the same rule the stats band uses for missing figures.
@@ -114,10 +120,11 @@ struct SettingsColumn: View {
         }
         .background(DS.Colour.canvas)
         .task {
-            // Before the awaits: the login item's state is read locally and is
-            // the one thing on this page that can have changed without the app
-            // being involved at all.
+            // Before the awaits: the login item's state and the current input
+            // device are read locally, and they are the two things on this page
+            // that can have changed without the app being involved at all.
             model.refreshLaunchAtLogin()
+            inputDevice.refresh()
             auditEventCount = await auditEventCountFromDisk()
             await model.refreshWhisperConfigSummary()
             await model.refreshLLMConfigSummary()
@@ -406,6 +413,21 @@ struct SettingsColumn: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
             }
+
+            // 输入设备 (§K). A row with no control on purpose: the device is
+            // the system's choice, and naming it is what lets the user who
+            // notices 「今天识别特别差」 see that the input moved under them —
+            // the AirPods came out and this has said 「MacBook Pro 麦克风」 ever
+            // since. Mono like the two provider rows above, because it is the
+            // same kind of value: what the machine reports, not what we wrote.
+            SettingsRow(
+                title: OpenTypeL10n.text("输入设备", english: "Input device"),
+                subtitle: OpenTypeL10n.text(
+                    "录音用的是系统默认输入；这里只显示，切换请去系统设置",
+                    english: "Recording follows the system default input; this only reports it — switch it in System Settings"
+                ),
+                mono: inputDevice.device.displayText
+            )
         }
     }
 

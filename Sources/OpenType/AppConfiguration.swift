@@ -28,6 +28,37 @@ final class AppConfiguration: ObservableObject {
         }
     }
 
+    /// The same setting, but able to say 「用户还没选过」 — `nil` when nothing
+    /// readable has ever been stored under that key.
+    ///
+    /// It exists because a per-app rule (`AppRules`) may fill an unmade choice
+    /// and may not overrule a made one, and the property above cannot tell the
+    /// two apart: it collapses an absent key to `.direct` in `init`, so every
+    /// reader sees a value and none of them can see whether anyone picked it.
+    /// Comparing against `.direct` instead would be a different rule wearing the
+    /// same clothes — it would overrule the user who deliberately chose 直接,
+    /// which is the one case where being overruled is least visible.
+    ///
+    /// Nothing extra is persisted for this. `didSet` does not fire during
+    /// `init`, so a fresh install simply never writes the key, and the first
+    /// assignment from the UI is what creates it — including an assignment of
+    /// `.direct`, which is exactly what makes 「选了直接」 representable.
+    var userSelectedTranscribeVariant: TranscribeVariant? {
+        Self.storedTranscribeVariant(in: defaults)
+    }
+
+    /// Whether the built-in per-app behaviour table is consulted at all (§J).
+    ///
+    /// On by default: the terminal rows close a reachable destructive path —
+    /// `ContextBridge.insert` is a clipboard write plus ⌘V, and a dictated
+    /// newline in a shell is a command — and a safety default nobody finds in
+    /// Settings protects nobody. Off is a *total* bypass rather than a
+    /// preference the table half-honours; `OutputDeliveryPolicy.shouldInsert`
+    /// reads it inside the decision so no call site can be the one that forgets.
+    @Published var perAppRulesEnabled: Bool {
+        didSet { defaults.set(perAppRulesEnabled, forKey: Keys.perAppRulesEnabled) }
+    }
+
     @Published var automaticallyInsert: Bool {
         didSet { defaults.set(automaticallyInsert, forKey: Keys.automaticallyInsert) }
     }
@@ -150,9 +181,12 @@ final class AppConfiguration: ObservableObject {
         transcriptionLanguage = TranscriptionLanguage(
             rawValue: defaults.string(forKey: Keys.transcriptionLanguage) ?? ""
         ) ?? .automatic
-        transcribeVariant = TranscribeVariant(
-            rawValue: defaults.string(forKey: Keys.transcribeVariant) ?? ""
-        ) ?? .direct
+        // One parse of the stored string, shared with
+        // `userSelectedTranscribeVariant`, so 「存的是什么」 and 「用户选过没有」
+        // can never be answered by two rules that disagree about the same
+        // garbage value.
+        transcribeVariant = Self.storedTranscribeVariant(in: defaults)
+            ?? AppRules.factoryTranscribeVariant
         automaticallyInsert = defaults.object(forKey: Keys.automaticallyInsert) as? Bool ?? true
         retainClipboardAfterInsert = defaults.object(
             forKey: Keys.retainClipboardAfterInsert
@@ -170,6 +204,17 @@ final class AppConfiguration: ObservableObject {
         localTranscriptionOnlyAcknowledged = defaults.object(
             forKey: Keys.localTranscriptionOnlyAcknowledged
         ) as? Bool ?? false
+        perAppRulesEnabled = defaults.object(forKey: Keys.perAppRulesEnabled) as? Bool ?? true
+    }
+
+    /// The stored variant as stored: `nil` for an absent key and `nil` for a
+    /// value no `TranscribeVariant` answers to (a setting written by an older
+    /// build, say — `polish` was a real case). Unreadable is not a choice, so
+    /// both the optional reader and `init`'s fallback treat it as one absence.
+    private static func storedTranscribeVariant(
+        in defaults: UserDefaults
+    ) -> TranscribeVariant? {
+        TranscribeVariant(rawValue: defaults.string(forKey: Keys.transcribeVariant) ?? "")
     }
 
     private enum Keys {
@@ -188,5 +233,6 @@ final class AppConfiguration: ObservableObject {
         static let updateCheckEnabled = "updateCheckEnabled"
         static let lastSeenUpdateVersion = "lastSeenUpdateVersion"
         static let localTranscriptionOnlyAcknowledged = "localTranscriptionOnlyAcknowledged"
+        static let perAppRulesEnabled = "perAppRulesEnabled"
     }
 }

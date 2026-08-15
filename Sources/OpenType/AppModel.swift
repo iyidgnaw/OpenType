@@ -2462,6 +2462,28 @@ final class AppModel: ObservableObject {
         TranscribeRequestBody(audioBase64: audioBase64, language: language.whisperCode)
     }
 
+    /// What the user is told when the per-app table, not the focus guard, is
+    /// what kept the result off the field (§J).
+    ///
+    /// It names the app, because 「某个应用不自动写入」 is not something anyone
+    /// can act on, and the whole reason the table is visible in Settings is
+    /// that a silent behaviour difference between apps reads as a bug. The
+    /// `nil` fallback is unreachable through the delivery path — a row only
+    /// matches an identifier we have — and exists so the sentence never comes
+    /// out with a hole in it.
+    nonisolated static func perAppInsertNotice(for bundleIdentifier: String?) -> String {
+        guard let name = AppRules.rule(for: bundleIdentifier)?.displayName else {
+            return OpenTypeL10n.text(
+                "该应用默认不自动写入，结果已复制到剪贴板",
+                english: "This app does not receive automatic insertion, so the result was copied to the clipboard."
+            )
+        }
+        return OpenTypeL10n.text(
+            "\(name) 默认不自动写入，结果已复制到剪贴板",
+            english: "\(name) does not receive automatic insertion, so the result was copied to the clipboard."
+        )
+    }
+
     /// Request/response bodies for the sidecar's `/oneshot/ask` endpoint,
     /// used by the `ask` mode branch below. `conversationId` continues an
     /// existing conversation when set (the Q&A tab's focused thread);
@@ -3228,6 +3250,16 @@ final class AppModel: ObservableObject {
             lastTranscript = transcript
 
             setState(.transforming)
+            // Resolved once for the whole delivery, from the app captured at
+            // recording time rather than whatever is frontmost now: the
+            // variant is a property of where the user was speaking into. The
+            // per-app row only ever fills an unmade choice — see
+            // `AppRules.transcribeVariant(for:userSelected:perAppRulesEnabled:)`.
+            let variant = AppRules.transcribeVariant(
+                for: capturedContext.bundleIdentifier,
+                userSelected: configuration.userSelectedTranscribeVariant,
+                perAppRulesEnabled: configuration.perAppRulesEnabled
+            )
             // Optional rather than `String`: the `.agent` branch below never
             // has a result at this point (it dispatches a detached run and
             // returns before anything below this switch runs) — see the
@@ -3242,8 +3274,7 @@ final class AppModel: ObservableObject {
                 // back nothing because it stages instead of delivering. No
                 // sidecar/LLM call and no voice surface in any of the three —
                 // whatever comes back *is* the result.
-                if let deliverable = configuration.transcribeVariant
-                    .deliverableText(for: transcript) {
+                if let deliverable = variant.deliverableText(for: transcript) {
                     // Note what is deliberately *not* happening here:
                     // `auditEffectiveInput` keeps the transcript as spoken.
                     // Under Tidy the delivered text differs from it, and both
@@ -3432,14 +3463,17 @@ final class AppModel: ObservableObject {
                 // users can verify the whole voice pipeline before granting
                 // system-wide insertion access.
             } else if deliveryStrategy == .automaticInsert {
-                // Only insert if focus is still on the app captured at recording
-                // time; if the user switched apps mid-transcription, downgrade to
-                // clipboard-only so the result never lands in the wrong app.
+                // Two reasons an insert can be withheld, decided in one call
+                // (§J): focus moved off the app captured at recording time, or
+                // the captured app has a built-in rule against being pasted
+                // into. Ordering is inside `shouldInsert` — a rule is only ever
+                // consulted once the focus guard has already agreed.
                 let frontmostBundleId = NSWorkspace.shared
                     .frontmostApplication?.bundleIdentifier
                 if OutputDeliveryPolicy.shouldInsert(
                     capturedBundleId: capturedContext.bundleIdentifier,
-                    frontmostBundleId: frontmostBundleId
+                    frontmostBundleId: frontmostBundleId,
+                    perAppRulesEnabled: configuration.perAppRulesEnabled
                 ) {
                     setState(.inserting)
                     do {
@@ -3449,13 +3483,24 @@ final class AppModel: ObservableObject {
                         completionState = .copied
                     }
                 } else {
-                    // Focus changed after capture: keep it on the clipboard and
-                    // let the user know why it was not pasted for them.
+                    // Keep it on the clipboard, and say which of the two
+                    // happened. The un-ruled form answers the focus question on
+                    // its own, so attributing the downgrade needs no second
+                    // delivery path — and a rule reported as 「焦点已切换」 would
+                    // be telling the user something that did not happen.
                     completionState = .copied
-                    lastDeliveryNotice = OpenTypeL10n.text(
-                        "焦点已切换，结果已复制到剪贴板",
-                        english: "Focus changed, so the result was copied to the clipboard instead of inserted."
+                    let focusHeld = OutputDeliveryPolicy.shouldInsert(
+                        capturedBundleId: capturedContext.bundleIdentifier,
+                        frontmostBundleId: frontmostBundleId
                     )
+                    lastDeliveryNotice = focusHeld
+                        ? AppModel.perAppInsertNotice(
+                            for: capturedContext.bundleIdentifier
+                        )
+                        : OpenTypeL10n.text(
+                            "焦点已切换，结果已复制到剪贴板",
+                            english: "Focus changed, so the result was copied to the clipboard instead of inserted."
+                        )
                 }
             } else if !practice {
                 completionState = .copied
@@ -3488,7 +3533,7 @@ final class AppModel: ObservableObject {
             // turns the success toast into the window's visible affordance.
             armCorrectionWindow(
                 mode: mode,
-                variant: configuration.transcribeVariant,
+                variant: variant,
                 context: capturedContext,
                 requestId: auditRequestID,
                 completedEventId: completedEventId,

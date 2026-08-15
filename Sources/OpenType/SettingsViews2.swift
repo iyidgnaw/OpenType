@@ -315,6 +315,39 @@ struct SettingsColumn: View {
             }
             .disabled(!configuration.automaticallyInsert)
 
+            // §J. Under the two delivery rows because it modifies exactly
+            // those two settings, and above 实时字幕 because everything below
+            // this point is about the recording rather than its result.
+            SettingsRow(
+                title: OpenTypeL10n.text("按应用调整行为", english: "Per-app behaviour"),
+                subtitle: OpenTypeL10n.text(
+                    "少数应用有内置的默认；你自己选过的设置不会被它改写",
+                    english: "A few apps carry a built-in default; a setting you chose yourself is never overridden"
+                )
+            ) {
+                SettingsSwitch(isOn: $configuration.perAppRulesEnabled)
+                    .accessibilityLabel(
+                        OpenTypeL10n.text("按应用调整行为", english: "Per-app behaviour")
+                    )
+            }
+
+            // The table itself, read-only this batch — per-row editing waits
+            // until it is clear the defaults need changing at all. It is here
+            // rather than behind a disclosure because a behaviour that differs
+            // by app and says so nowhere is indistinguishable from a bug: this
+            // is the whole difference between a rule and a surprise. Dimmed
+            // rather than hidden when the switch is off, for the reason the
+            // 恢复原剪贴板 row above already states.
+            ForEach(AppRuleSummary.groups) { group in
+                SettingsRow(compact: true, title: group.apps) {
+                    Text(group.effect)
+                        .font(DS.Text.size(11.5))
+                        .foregroundStyle(DS.Colour.ink(0.45))
+                        .fixedSize()
+                }
+            }
+            .opacity(configuration.perAppRulesEnabled ? 1 : 0.4)
+
             SettingsRow(
                 title: OpenTypeL10n.text("录音时显示实时字幕", english: "Live captions while recording")
             ) {
@@ -1120,6 +1153,39 @@ extension SettingsRow where Trailing == EmptyView {
             model: model,
             trailing: { EmptyView() }
         )
+    }
+}
+
+/// One line of 设置's read-only per-app table (§J): the apps that share a
+/// behaviour, and the behaviour they share.
+///
+/// Grouped by effect rather than listed one app per row because twelve rows of
+/// bundle identifier is a data dump, and the question a reader has is 「哪些应用
+/// 不一样，怎么个不一样」 — three lines answer it and twelve bury it. The names
+/// and the grouping both come out of `AppRules.defaults`, so the table on screen
+/// cannot describe a rule the app is not applying: a row added there appears
+/// here, and a row whose behaviour changes moves lines.
+private struct AppRuleSummary: Identifiable {
+    let effect: String
+    let apps: String
+
+    var id: String { effect }
+
+    static var groups: [AppRuleSummary] {
+        var order: [String] = []
+        var appsByEffect: [String: [String]] = [:]
+        for rule in AppRules.defaults {
+            let effect = rule.effectSummary
+            if appsByEffect[effect] == nil { order.append(effect) }
+            appsByEffect[effect, default: []].append(rule.displayName)
+        }
+        let separator = OpenTypeL10n.text("、", english: ", ")
+        return order.map { effect in
+            AppRuleSummary(
+                effect: effect,
+                apps: (appsByEffect[effect] ?? []).joined(separator: separator)
+            )
+        }
     }
 }
 

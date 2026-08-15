@@ -296,7 +296,7 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 ---
 
-## J. 按应用规则（review #8）
+## J. 按应用规则（review #8）—— 已完成（2026-08-15）
 
 - 新纯模块 `Sources/OpenType/AppRules.swift`：
   `struct AppRule { bundleIdentifier: String; autoInsert: Bool?; transcribeVariant: TranscribeVariant? }`
@@ -314,6 +314,34 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 **测试**：`AppRules` 查表（含未知 app 返回 nil）；`OutputDeliveryPolicy` 在规则存在/不存在时的行为；
 总开关关闭时规则完全不生效。
+
+**落地**：`Sources/OpenType/AppRules.swift`（`AppRule` / `AppRules.defaults` / `rule(for:)` /
+`transcribeVariant(for:userSelected:perAppRulesEnabled:)` + `OutputDeliveryPolicy.shouldInsert` 的
+三参数重载）+ `AppConfiguration.userSelectedTranscribeVariant`、`perAppRulesEnabled` +
+`AppModel.process` 的两处接入 + `SettingsViews2.swift`「听写输出」组的总开关与只读表，
+`Tests/OpenTypeTests/AppRulesTests.swift` 33 例。四处与本节字面写法不同，都是有意的：
+
+- **规则只减不加**。`autoInsert: true` 在类型上存在、在表里永远不出现，测试直接钉住这一条
+  （`testNoRuleEverEnablesAutoInsert`）：一条以后加进来的规则不能替一个把全局开关关掉的用户
+  把插入打开。安全护栏（焦点变了就降级到剪贴板）**先跑**，规则只对护栏已经放行的那一次生效——
+  先查表再返回 `autoInsert` 的写法能通过所有终端用例，然后往一个用户早就切走的应用里粘贴。
+- **variant 只填「没选过」，不覆盖「选过」**，而「选过」指的是用户做过选择，不是当前值不等于
+  出厂默认。这一条有真实代价：`AppConfiguration.transcribeVariant` 是非可选的，`init` 把缺键
+  折叠成 `.direct`，所以任何读它的地方都看不出有没有人选过。新增
+  `userSelectedTranscribeVariant: TranscribeVariant?`，和原来那个非可选读法共用同一次
+  `TranscribeVariant(rawValue:)` 解析——存了一个旧版本写下的 `polish`，两边必须同时当作
+  「没选过」。不持久化任何新东西：`didSet` 在 `init` 里不触发，所以全新安装根本不写这个键，
+  UI 的第一次赋值才创建它，包括赋 `.direct`——这正是「他就是选了直接模式」可表示的原因。
+- **总开关读在决策函数里面，不在调用点**，否则「关掉」会变成一个调用点遵守、另一个不遵守。
+  关掉是**完整**旁路：对任意一对 bundle id，逐字节等于两参数版本的答案，终端也不例外。
+- **降级提示按原因分两句**。规则挡下的那次沿用「焦点已切换」等于告诉用户一件没发生的事；
+  用两参数版本重问一次就能归因，不需要第二条交付路径。表里带上应用显示名也是为此——
+  「某个应用不自动写入」不是任何人能拿去做事的信息。
+
+留了一处没接：`CorrectionWindow.intent` 与 `AliasUndo.decide` 仍调用两参数版本。
+`armCorrectionWindow` 不管插入有没有落地都会武装，所以被规则降级到剪贴板的那次终端听写
+照样开着纠正窗口，而后续纠正会走同一个 `ContextBridge.insert`。补它要把开关穿进这两个调用点，
+两者都在本批另一条目的文件里，且 §J 自己的范围是交付决策——写在这里而不是留给下一个读者自己发现。
 
 ---
 

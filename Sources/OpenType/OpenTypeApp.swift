@@ -303,7 +303,19 @@ final class OpenTypeAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDeleg
                 preferredEdge: .minY
             )
         }
-        NSApp.activate(ignoringOtherApps: true)
+        // No `NSApp.activate` here (there used to be one): activating the
+        // *application* raises every one of its windows, not just the
+        // popover, which is what dragged an already-open main window to the
+        // front on every status-item click — exactly the "above all never
+        // surface the main window" rule `handleReactivation` documents two
+        // cases above, just violated from the other direction. A status-item
+        // popover doesn't need it: `NSStatusBarButton` delivers its click
+        // regardless of app-activation state, and `NSPopover` (`.transient`
+        // here) owns its own key-window and outside-click handling
+        // independently of whether the *application* is active — the same
+        // reason a normal menu extra's menu works without ever activating its
+        // app. `makeKey()` alone is enough for the popover's buttons and
+        // Escape-to-dismiss to work.
         popover.contentViewController?.view.window?.makeKey()
     }
 }
@@ -322,8 +334,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     var onWindowWillClose: (() -> Void)?
 
     init(model: AppModel) {
+        // Scaled to the screen this window is opening on, not a fixed
+        // 1120×720 — see `MainWindowSizing`. `window.center()` below then
+        // places this rect on the same screen (`NSScreen.main`) it was sized
+        // against.
+        let defaultSize = MainWindowSizing.currentDefaultContentSize()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1120, height: 720),
+            contentRect: NSRect(origin: .zero, size: defaultSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -337,10 +354,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.minSize = NSSize(width: 460, height: 480)
         window.isReleasedWhenClosed = false
-        window.center()
         window.contentViewController = NSHostingController(
             rootView: RootView(model: model)
         )
+        // Assigning `contentViewController` is what actually decides the
+        // window's size here: `NSHostingController`'s root view is
+        // `SidebarShell`'s `GeometryReader`, which has no natural size of its
+        // own to report back, so AppKit's post-assignment layout pass
+        // collapsed the window to `RootView`'s `.frame(minWidth:minHeight:)`
+        // floor — 460×480, the width `SidebarShell` calls "narrow" — instead
+        // of leaving the `defaultSize` this window was created with alone.
+        // That collapse is bug 2 itself: a freshly opened window showing only
+        // the icon rail and the list, not three columns. Reasserting the size
+        // (and only then centring, so the centring math sees the real size
+        // rather than the collapsed one) is what makes the explicit
+        // `contentRect` above actually stick.
+        window.setContentSize(defaultSize)
+        window.center()
         super.init(window: window)
         window.delegate = self
     }

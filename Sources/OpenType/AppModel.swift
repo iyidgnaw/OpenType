@@ -2604,11 +2604,10 @@ final class AppModel: ObservableObject {
     /// what kept the result off the field (§J).
     ///
     /// It names the app, because 「某个应用不自动写入」 is not something anyone
-    /// can act on, and the whole reason the table is visible in Settings is
-    /// that a silent behaviour difference between apps reads as a bug. The
-    /// `nil` fallback is unreachable through the delivery path — a row only
-    /// matches an identifier we have — and exists so the sentence never comes
-    /// out with a hole in it.
+    /// can act on, and a silent behaviour difference between apps reads as a
+    /// bug otherwise. The `nil` fallback is unreachable through the delivery
+    /// path — a row only matches an identifier we have — and exists so the
+    /// sentence never comes out with a hole in it.
     nonisolated static func perAppInsertNotice(for bundleIdentifier: String?) -> String {
         guard let name = AppRules.rule(for: bundleIdentifier)?.displayName else {
             return OpenTypeL10n.text(
@@ -3482,10 +3481,15 @@ final class AppModel: ObservableObject {
             // variant is a property of where the user was speaking into. The
             // per-app row only ever fills an unmade choice — see
             // `AppRules.transcribeVariant(for:userSelected:perAppRulesEnabled:)`.
+            // Literal `true`, not a Settings-backed flag: the product decision
+            // was "no half-configured per-app behaviour" — either real
+            // per-rule control or the table is simply how the product works —
+            // and per-rule editing isn't built yet, so this stays the seam a
+            // future per-rule control would be built on, not a switch.
             let variant = AppRules.transcribeVariant(
                 for: capturedContext.bundleIdentifier,
                 userSelected: configuration.userSelectedTranscribeVariant,
-                perAppRulesEnabled: configuration.perAppRulesEnabled
+                perAppRulesEnabled: true
             )
             // Optional rather than `String`: the `.agent` branch below never
             // has a result at this point (it dispatches a detached run and
@@ -3697,10 +3701,14 @@ final class AppModel: ObservableObject {
                 // consulted once the focus guard has already agreed.
                 let frontmostBundleId = NSWorkspace.shared
                     .frontmostApplication?.bundleIdentifier
+                // Literal `true`, not a Settings-backed flag — see the same
+                // note above `AppRules.transcribeVariant`'s call site: the
+                // parameter is retained deliberately (always `true` today)
+                // as the seam future per-rule control would be built on.
                 if OutputDeliveryPolicy.shouldInsert(
                     capturedBundleId: capturedContext.bundleIdentifier,
                     frontmostBundleId: frontmostBundleId,
-                    perAppRulesEnabled: configuration.perAppRulesEnabled
+                    perAppRulesEnabled: true
                 ) {
                     setState(.inserting)
                     do {

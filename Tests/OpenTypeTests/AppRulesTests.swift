@@ -712,25 +712,15 @@ final class AppRulesTests: XCTestCase {
         XCTAssertEqual(configuration.transcribeVariant, .direct)
     }
 
-    @MainActor
-    func testPerAppRulesAreOnByDefaultAndTheOptOutPersists() {
-        // §J's master switch — the argument every function above takes. On by
-        // default, because the terminal row closes a reachable destructive path
-        // (`ContextBridge.insert` is clipboard + ⌘V, and a dictated newline in a
-        // shell is a command) and a safety default nobody finds in Settings
-        // protects nobody. Turning it off is one switch away, and section E is
-        // what proves that off means *nothing* changes.
-        let suiteName = "AppRulesTests.MasterSwitch.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        let configuration = AppConfiguration(defaults: defaults)
-        XCTAssertTrue(configuration.perAppRulesEnabled)
-
-        configuration.perAppRulesEnabled = false
-        XCTAssertFalse(
-            AppConfiguration(defaults: defaults).perAppRulesEnabled,
-            "an opt-out that does not survive a relaunch is not an opt-out"
-        )
-    }
+    // The `AppConfiguration.perAppRulesEnabled` Settings master switch (and the
+    // test that lived here to cover its default/persistence behaviour) was
+    // removed by product decision: no half-configured per-app behaviour — the
+    // table is either under real per-rule control or it is simply how the
+    // product works, not a togglable extra. The `perAppRulesEnabled`
+    // *parameter* on `AppRules.transcribeVariant(for:userSelected:perAppRulesEnabled:)`
+    // and `OutputDeliveryPolicy.shouldInsert(capturedBundleId:frontmostBundleId:perAppRulesEnabled:)`
+    // is retained as the seam future per-rule control would be built on. Every
+    // other test in sections A–F below already exercises that seam directly
+    // with a literal `true`/`false` argument, never through `AppConfiguration`,
+    // so none of them needed to change.
 }

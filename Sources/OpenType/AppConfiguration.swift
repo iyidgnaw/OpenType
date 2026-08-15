@@ -47,18 +47,6 @@ final class AppConfiguration: ObservableObject {
         Self.storedTranscribeVariant(in: defaults)
     }
 
-    /// Whether the built-in per-app behaviour table is consulted at all (§J).
-    ///
-    /// On by default: the terminal rows close a reachable destructive path —
-    /// `ContextBridge.insert` is a clipboard write plus ⌘V, and a dictated
-    /// newline in a shell is a command — and a safety default nobody finds in
-    /// Settings protects nobody. Off is a *total* bypass rather than a
-    /// preference the table half-honours; `OutputDeliveryPolicy.shouldInsert`
-    /// reads it inside the decision so no call site can be the one that forgets.
-    @Published var perAppRulesEnabled: Bool {
-        didSet { defaults.set(perAppRulesEnabled, forKey: Keys.perAppRulesEnabled) }
-    }
-
     @Published var automaticallyInsert: Bool {
         didSet { defaults.set(automaticallyInsert, forKey: Keys.automaticallyInsert) }
     }
@@ -232,7 +220,6 @@ final class AppConfiguration: ObservableObject {
         localTranscriptionOnlyAcknowledged = defaults.object(
             forKey: Keys.localTranscriptionOnlyAcknowledged
         ) as? Bool ?? false
-        perAppRulesEnabled = defaults.object(forKey: Keys.perAppRulesEnabled) as? Bool ?? true
         interfaceLanguage = InterfaceLanguage(
             rawValue: defaults.string(forKey: Keys.interfaceLanguage) ?? ""
         ) ?? .system
@@ -271,7 +258,6 @@ final class AppConfiguration: ObservableObject {
         static let updateCheckEnabled = "updateCheckEnabled"
         static let lastSeenUpdateVersion = "lastSeenUpdateVersion"
         static let localTranscriptionOnlyAcknowledged = "localTranscriptionOnlyAcknowledged"
-        static let perAppRulesEnabled = "perAppRulesEnabled"
         static let interfaceLanguage = "interfaceLanguage"
     }
 }

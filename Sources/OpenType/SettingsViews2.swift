@@ -44,12 +44,6 @@ struct SettingsColumn: View {
     /// it. See `LaunchAtLogin.swift`.
     @ObservedObject var launchAtLogin: LaunchAtLoginController
 
-    /// Owned here rather than by `AppModel` for the same reason: the current
-    /// input device is the system's fact, nothing outside this page reads it,
-    /// and it only needs watching while this page is on screen. See
-    /// `InputDevice.swift`.
-    @StateObject private var inputDevice = InputDeviceMonitor()
-
     /// Line count of `audit-events.v1.jsonl`, for the 审计记录 row. `nil`
     /// until the first read finishes — the row prints nothing rather than a
     /// wrong `0`, the same rule the stats band uses for missing figures.
@@ -120,11 +114,10 @@ struct SettingsColumn: View {
         }
         .background(DS.Colour.canvas)
         .task {
-            // Before the awaits: the login item's state and the current input
-            // device are read locally, and they are the two things on this page
-            // that can have changed without the app being involved at all.
+            // Before the awaits: the login item's state is read locally, and
+            // it is the one thing on this page that can have changed without
+            // the app being involved at all.
             model.refreshLaunchAtLogin()
-            inputDevice.refresh()
             auditEventCount = await auditEventCountFromDisk()
             await model.refreshWhisperConfigSummary()
             await model.refreshLLMConfigSummary()
@@ -148,7 +141,7 @@ struct SettingsColumn: View {
     private var interfaceLanguageRow: some View {
         SettingsStackedRow(
             title: OpenTypeL10n.text("界面语言", english: "Interface language"),
-            note: OpenTypeL10n.text(
+            titleHint: OpenTypeL10n.text(
                 "系统自身的权限弹窗（麦克风、语音识别）跟随系统语言，不受这里影响",
                 english: "The system's own permission dialogs (microphone, speech recognition) follow the system language and are unaffected by this setting"
             )
@@ -170,9 +163,13 @@ struct SettingsColumn: View {
     /// registration macOS is holding back, and the only thing that clears it is
     /// the Login Items pane — so that row trades the switch for the jump, the
     /// same shape the ungranted permission rows below use. `.notSupported` is a
-    /// bundle launchd will not register from where it is running; a switch
-    /// there would be one the user can press forever with nothing to show for
-    /// it, so it gets prose instead.
+    /// bundle launchd will not register from where it is running — the app's
+    /// current ad-hoc, no-TeamIdentifier signing means this is the normal
+    /// state for every user of the current distribution, not a bug specific to
+    /// a debug build — and a switch there would be one the user can press
+    /// forever with nothing to show for it, so the row renders nothing at all
+    /// rather than explanatory prose. It reappears on its own once the app
+    /// ships Developer ID–signed and notarized.
     @ViewBuilder
     private var launchAtLoginRow: some View {
         let title = OpenTypeL10n.text("开机时自动启动", english: "Launch at login")
@@ -216,14 +213,12 @@ struct SettingsColumn: View {
             }
 
         case .notSupported:
-            SettingsRow(
-                divided: false,
-                title: title,
-                subtitle: OpenTypeL10n.text(
-                    "当前这个运行位置无法注册为登录项（例如直接从 .build/ 运行的调试版本）。打包成 .app 后可用。",
-                    english: "The app cannot be registered as a login item from where it is running (a debug build launched out of .build/, for example). It works from a packaged .app."
-                )
-            )
+            // No row at all — not even a shrunk one. This is the normal state
+            // for the current ad-hoc-signed distribution (no TeamIdentifier,
+            // so `SMAppService.mainApp` refuses to register), and there is no
+            // control to offer here. It comes back on its own once the app is
+            // Developer ID–signed and notarized.
+            EmptyView()
         }
     }
 
@@ -234,7 +229,7 @@ struct SettingsColumn: View {
             SettingsRow(
                 divided: false,
                 title: OpenTypeL10n.text("启动方式", english: "Trigger"),
-                subtitle: configuration.hotKeyPreset.note
+                titleHint: configuration.hotKeyPreset.note
             ) {
                 Menu {
                     ForEach(HotKeyPreset.allCases) { preset in
@@ -298,7 +293,7 @@ struct SettingsColumn: View {
             SettingsStackedRow(
                 divided: false,
                 title: OpenTypeL10n.text("松开之后", english: "On release"),
-                note: OpenTypeL10n.text(
+                titleHint: OpenTypeL10n.text(
                     "三档都不经过 AI 模型 —— 轻整理只按固定规则去口癖和标点。",
                     english: "None of the three involves an AI model — Tidy only applies fixed rules to fillers and punctuation."
                 )
@@ -338,39 +333,6 @@ struct SettingsColumn: View {
                     )
             }
             .disabled(!configuration.automaticallyInsert)
-
-            // §J. Under the two delivery rows because it modifies exactly
-            // those two settings, and above 实时字幕 because everything below
-            // this point is about the recording rather than its result.
-            SettingsRow(
-                title: OpenTypeL10n.text("按应用调整行为", english: "Per-app behaviour"),
-                subtitle: OpenTypeL10n.text(
-                    "少数应用有内置的默认；你自己选过的设置不会被它改写",
-                    english: "A few apps carry a built-in default; a setting you chose yourself is never overridden"
-                )
-            ) {
-                SettingsSwitch(isOn: $configuration.perAppRulesEnabled)
-                    .accessibilityLabel(
-                        OpenTypeL10n.text("按应用调整行为", english: "Per-app behaviour")
-                    )
-            }
-
-            // The table itself, read-only this batch — per-row editing waits
-            // until it is clear the defaults need changing at all. It is here
-            // rather than behind a disclosure because a behaviour that differs
-            // by app and says so nowhere is indistinguishable from a bug: this
-            // is the whole difference between a rule and a surprise. Dimmed
-            // rather than hidden when the switch is off, for the reason the
-            // 恢复原剪贴板 row above already states.
-            ForEach(AppRuleSummary.groups) { group in
-                SettingsRow(compact: true, title: group.apps) {
-                    Text(group.effect)
-                        .font(DS.Text.size(11.5))
-                        .foregroundStyle(DS.Colour.ink(0.45))
-                        .fixedSize()
-                }
-            }
-            .opacity(configuration.perAppRulesEnabled ? 1 : 0.4)
 
             SettingsRow(
                 title: OpenTypeL10n.text("录音时显示实时字幕", english: "Live captions while recording")
@@ -448,14 +410,11 @@ struct SettingsColumn: View {
 
             // Renamed from 「转写语言」 in the 2026-08-15 batch (§C), when the
             // setting stopped being a live-caption-only preference and started
-            // reaching Whisper. The subtitle says which recognisers it governs
-            // because the old name was true of neither one in particular.
+            // reaching Whisper — the old name was true of neither recogniser
+            // in particular. No explanatory text on the row itself (2026-08-15
+            // settings-trim pass): the picker's own value is the setting.
             SettingsRow(
-                title: OpenTypeL10n.text("语音识别语言", english: "Speech recognition language"),
-                subtitle: OpenTypeL10n.text(
-                    "同时用于最终识别与实时字幕；默认「自动识别」，中英夹杂时保持默认",
-                    english: "Applies to both the final transcript and live captions; defaults to auto-detect, which is what mixed-language speech needs"
-                )
+                title: OpenTypeL10n.text("语音识别语言", english: "Speech recognition language")
             ) {
                 Menu {
                     ForEach(TranscriptionLanguage.allCases) { language in
@@ -478,15 +437,19 @@ struct SettingsColumn: View {
             if let config = model.whisperModelConfig, !config.presets.isEmpty {
                 SettingsRow(
                     title: OpenTypeL10n.text("语音模型", english: "Speech model"),
+                    titleHint: OpenTypeL10n.text(
+                        "更大的模型更准，但下载更久、识别更慢",
+                        english: "A larger model is more accurate, but slower to download and to transcribe"
+                    ),
+                    // Only the transient "saved, not yet in effect" status
+                    // shows as a subtitle — it is real state the user just
+                    // caused, not standing prose about the tradeoff.
                     subtitle: model.whisperModelRestartPending
                         ? OpenTypeL10n.text(
                             "已保存，下次启动生效",
                             english: "Saved — takes effect on next launch"
                         )
-                        : OpenTypeL10n.text(
-                            "更大的模型更准，但下载更久、识别更慢",
-                            english: "A larger model is more accurate, but slower to download and to transcribe"
-                        )
+                        : nil
                 ) {
                     Menu {
                         ForEach(config.presets) { preset in
@@ -502,21 +465,6 @@ struct SettingsColumn: View {
                     .fixedSize()
                 }
             }
-
-            // 输入设备 (§K). A row with no control on purpose: the device is
-            // the system's choice, and naming it is what lets the user who
-            // notices 「今天识别特别差」 see that the input moved under them —
-            // the AirPods came out and this has said 「MacBook Pro 麦克风」 ever
-            // since. Mono like the two provider rows above, because it is the
-            // same kind of value: what the machine reports, not what we wrote.
-            SettingsRow(
-                title: OpenTypeL10n.text("输入设备", english: "Input device"),
-                subtitle: OpenTypeL10n.text(
-                    "录音用的是系统默认输入；这里只显示，切换请去系统设置",
-                    english: "Recording follows the system default input; this only reports it — switch it in System Settings"
-                ),
-                mono: inputDevice.device.displayText
-            )
         }
     }
 
@@ -720,7 +668,7 @@ struct SettingsColumn: View {
                         "有新版本 \(version)",
                         english: "Version \(version) is available"
                     ),
-                    subtitle: OpenTypeL10n.text(
+                    titleHint: OpenTypeL10n.text(
                         "在终端里重新跑一次安装命令就是更新；命令是幂等的，重复执行没有副作用。",
                         english: "Re-running the install command in a terminal is the update — it is idempotent, so running it again is harmless."
                     ),
@@ -733,11 +681,7 @@ struct SettingsColumn: View {
             }
 
             SettingsRow(
-                title: OpenTypeL10n.text("自动检查更新", english: "Check for updates automatically"),
-                subtitle: OpenTypeL10n.text(
-                    "启动 10 秒后查一次，之后每天一次。只问 GitHub 最新版本号，不上传任何内容；失败时不提示。",
-                    english: "Once 10 seconds after launch, then daily. It asks GitHub for the latest version number and uploads nothing; a failed check says nothing."
-                )
+                title: OpenTypeL10n.text("自动检查更新", english: "Check for updates automatically")
             ) {
                 SettingsSwitch(
                     isOn: Binding(
@@ -853,18 +797,29 @@ struct SettingsDetailColumn: View {
 
                 page(for: route)
             } else {
-                Spacer(minLength: 0)
-                Text(OpenTypeL10n.text(
-                    "从左侧选择一项设置",
-                    english: "Pick a setting on the left"
-                ))
-                .font(DS.Text.caption())
-                // .4 — 03C's quietest informational step (已授权, the header's
-                // status line). The pushed column is not in the mockup, so it
-                // borrows an alpha the mockup draws instead of `.tertiary`,
-                // which resolves to ≈ .26, lighter than anything on 03C.
-                .foregroundStyle(DS.Colour.ink(0.4))
-                Spacer(minLength: 0)
+                // Matches `SessionThreadColumn`'s own empty state (icon above
+                // a caption, both centred) rather than the bare line of text
+                // this used to be — bug 2 of the popover-and-window fix batch
+                // found that alone read as "nothing here" on first landing on
+                // 设置, since it was the one destination whose placeholder
+                // carried no icon at all.
+                VStack(spacing: 10) {
+                    Image(systemName: AppTab.settings.symbol)
+                        .font(.system(size: 22))
+                        .foregroundStyle(.quaternary)
+                    Text(OpenTypeL10n.text(
+                        "从左侧选择一项设置",
+                        english: "Pick a setting on the left"
+                    ))
+                    .font(DS.Text.caption())
+                    // .4 — 03C's quietest informational step (已授权, the
+                    // header's status line). The pushed column is not in the
+                    // mockup, so it borrows an alpha the mockup draws instead
+                    // of `.tertiary`, which resolves to ≈ .26, lighter than
+                    // anything on 03C.
+                    .foregroundStyle(DS.Colour.ink(0.4))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1097,6 +1052,22 @@ private struct SettingsGroup<Content: View>: View {
     }
 }
 
+/// A small "?" after a row title that reveals its explanation on hover via
+/// the native tooltip, for copy that earns its place without permanently
+/// occupying a subtitle line under every row.
+private struct InfoHint: View {
+    let text: String
+
+    var body: some View {
+        Image(systemName: "questionmark.circle")
+            .font(DS.Text.size(11, .regular))
+            .foregroundStyle(DS.Colour.ink(0.35))
+            .help(text)
+            .accessibilityLabel(OpenTypeL10n.text("说明", english: "Info"))
+            .accessibilityHint(text)
+    }
+}
+
 /// One row of a settings card: a title, an optional second line, and either a
 /// trailing control or a `chevron.right` that pushes a page.
 ///
@@ -1112,6 +1083,10 @@ private struct SettingsRow<Trailing: View>: View {
     /// taller than the two-row cards beside it.
     var compact = false
     let title: String
+    /// Explanation shown on hover via a small **?** next to the title, for
+    /// copy that earns its place without permanently occupying a subtitle
+    /// line under every row (see `InfoHint`).
+    var titleHint: String?
     var subtitle: String?
     /// A machine-produced second line — provider and model, a path, a count.
     var mono: String?
@@ -1152,10 +1127,15 @@ private struct SettingsRow<Trailing: View>: View {
             // sits on a smaller face with tighter leading, so the mockup buys
             // the point back to keep the optical gap equal.
             VStack(alignment: .leading, spacing: mono == nil ? 2 : 3) {
-                Text(title)
-                    .font(DS.Text.body())
-                    .foregroundStyle(destructive ? DS.Colour.error : Color.primary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 4) {
+                    Text(title)
+                        .font(DS.Text.body())
+                        .foregroundStyle(destructive ? DS.Colour.error : Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let titleHint {
+                        InfoHint(text: titleHint)
+                    }
+                }
                 if let subtitle {
                     Text(subtitle)
                         .font(DS.Text.size(11.5))
@@ -1204,6 +1184,7 @@ extension SettingsRow where Trailing == EmptyView {
         divided: Bool = true,
         compact: Bool = false,
         title: String,
+        titleHint: String? = nil,
         subtitle: String? = nil,
         mono: String? = nil,
         leadingDot: Color? = nil,
@@ -1217,6 +1198,7 @@ extension SettingsRow where Trailing == EmptyView {
             divided: divided,
             compact: compact,
             title: title,
+            titleHint: titleHint,
             subtitle: subtitle,
             mono: mono,
             leadingDot: leadingDot,
@@ -1230,51 +1212,26 @@ extension SettingsRow where Trailing == EmptyView {
     }
 }
 
-/// One line of 设置's read-only per-app table (§J): the apps that share a
-/// behaviour, and the behaviour they share.
-///
-/// Grouped by effect rather than listed one app per row because twelve rows of
-/// bundle identifier is a data dump, and the question a reader has is 「哪些应用
-/// 不一样，怎么个不一样」 — three lines answer it and twelve bury it. The names
-/// and the grouping both come out of `AppRules.defaults`, so the table on screen
-/// cannot describe a rule the app is not applying: a row added there appears
-/// here, and a row whose behaviour changes moves lines.
-private struct AppRuleSummary: Identifiable {
-    let effect: String
-    let apps: String
-
-    var id: String { effect }
-
-    static var groups: [AppRuleSummary] {
-        var order: [String] = []
-        var appsByEffect: [String: [String]] = [:]
-        for rule in AppRules.defaults {
-            let effect = rule.effectSummary
-            if appsByEffect[effect] == nil { order.append(effect) }
-            appsByEffect[effect, default: []].append(rule.displayName)
-        }
-        let separator = OpenTypeL10n.text("、", english: ", ")
-        return order.map { effect in
-            AppRuleSummary(
-                effect: effect,
-                apps: (appsByEffect[effect] ?? []).joined(separator: separator)
-            )
-        }
-    }
-}
-
 /// A row whose control sits under the title rather than beside it, for the
 /// one control too wide to be trailing.
 private struct SettingsStackedRow<Content: View>: View {
     var divided = true
     let title: String
+    /// Explanation shown on hover via a small **?** next to the title (see
+    /// `InfoHint`).
+    var titleHint: String?
     var note: String?
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(title)
-                .font(DS.Text.body())
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(DS.Text.body())
+                if let titleHint {
+                    InfoHint(text: titleHint)
+                }
+            }
             content()
             if let note {
                 Text(note)

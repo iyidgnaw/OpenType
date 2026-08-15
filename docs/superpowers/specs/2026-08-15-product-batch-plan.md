@@ -48,6 +48,15 @@ Swift 524 XCTest + 13 swift-testing 全绿，sidecar 831 pass / 0 fail。
 **测试**：`LaunchAtLoginPolicy` 的纯函数（含 `.requiresApproval` 分支）+ 一个假的
 `LoginItemRegistering` 驱动的 toggle 往返。不测 `SMAppService` 本身。
 
+**后续变更（2026-08-15 settings-trim pass）**：`.notSupported` 分支原来渲染一行说明性
+subtitle（"当前运行位置无法注册为登录项…"），现在改为渲染 `EmptyView()`，不显示任何内容——
+同一批设置精简的原则：用户没法操作的一行不该出现在设置页上，而一个谁都按不动的开关正是这种情况。
+促成这一改动的发现：已安装的 1.1.0 构建是 ad-hoc 签名、无 TeamIdentifier（`codesign -dv` 显示
+`Signature=adhoc`、`TeamIdentifier=not set`），`SMAppService.mainApp` 在这种签名下拒绝注册——
+所以 `.notSupported` 是**当前发行版下每个用户的正常状态**，不是某个 `.build/` 调试构建才有的
+bug。等应用改为 Developer ID 签名并公证后（`scripts/build-app.sh` 已经支持 `OPENTYPE_NOTARIZE=1`），
+这一行会自己重新出现。
+
 ---
 
 ## B. 更新检查（review #4）
@@ -388,9 +397,34 @@ agent 分发路径（`dispatchAgentRun`），escalate 只是给它加一个窄�
 **测试**：`AppRules` 查表（含未知 app 返回 nil）；`OutputDeliveryPolicy` 在规则存在/不存在时的行为；
 总开关关闭时规则完全不生效。
 
+**后续变更（同日）**：上面「Settings 里可见且可关（一个「按应用调整行为」总开关 + 一张只读的默认表）」
+里的总开关，在本批落地几小时后被产品决策撤销并移除了 —— 引用产品所有者原话：
+「我们不应该加这种 app specific 的配置然后让用户只能粗粒度开关。这个开关你去掉吧，但是 App
+specific 的 support 我们先保留不删代码。」反对的是"只有粗粒度总开关"这种半配置状态：要么做真正
+的按条规则控制，要么这就是产品本身的行为，用解释代替配置。按条编辑当时并未开工，于是这张表就此
+变成无条件内置行为（对用户而言）。`AppConfiguration.perAppRulesEnabled` 这个 published 属性、它的
+`UserDefaults` key 和 init 读取都已删除；`AppRules.transcribeVariant(for:userSelected:perAppRulesEnabled:)`
+和 `OutputDeliveryPolicy.shouldInsert(capturedBundleId:frontmostBundleId:perAppRulesEnabled:)` 上的
+`perAppRulesEnabled` **参数**保留不动（依然没有默认值），两处调用点改为传字面量 `true`——留作未来
+按条控制会用到的接缝，而非该删掉的残留。详见 `2026-08-09-current-system-state.md` 「按应用规则」
+一节里对应的撤销记录。
+
+**再一次后续变更（同日晚些时候）**：上面撤销总开关之后留下的只读表格，本身也从 Settings 里整个
+撤掉了，不只是开关。产品所有者原话：「app specific 这个不光是总开关去掉，那个设置页面的展示文字也
+得去掉昂。」推理和总开关撤销时一致，只是往前再走一步：半配置状态本身——"没有开关，但留一段只读文字
+解释这行为"——也被否掉了。要么用户能拿到真正的按条控制，要么这就不作为 Settings 内容展示；一个只
+解释固定行为、不给任何操作杆的页面是通知，不是设置，不该出现在设置页上。`SettingsViews2.swift` 的
+`dictationOutputGroup` 不再渲染「按应用调整行为」标题行和下面按效果分组的表格；只服务于这张表格的
+view-local 类型 `AppRuleSummary` 连同它唯一的调用点一起删除了。`Sources/OpenType/AppRules.swift`
+本身未受影响——表格和它的组合规则（只减不加、焦点护栏先跑、`perAppRulesEnabled` 恒为 `true`）依然
+照常支配真实的交付行为，只是 Settings 页面不再渲染它。留下一处死代码：`AppRule.effectSummary`——
+被删掉的表格用来按共享行为分组的那个字符串——现在树里没有任何调用点了。这次删除刻意没有动它，
+因为 `AppRules.swift` 不在这一趟改动范围内；要不要删掉它、或者给它找个新调用点，留给后续判断。
+
 **落地**：`Sources/OpenType/AppRules.swift`（`AppRule` / `AppRules.defaults` / `rule(for:)` /
 `transcribeVariant(for:userSelected:perAppRulesEnabled:)` + `OutputDeliveryPolicy.shouldInsert` 的
-三参数重载）+ `AppConfiguration.userSelectedTranscribeVariant`、`perAppRulesEnabled` +
+三参数重载）+ `AppConfiguration.userSelectedTranscribeVariant`、`perAppRulesEnabled`（后者已于上述
+撤销中移除，见上方「后续变更」）+
 `AppModel.process` 的两处接入 + `SettingsViews2.swift`「听写输出」组的总开关与只读表，
 `Tests/OpenTypeTests/AppRulesTests.swift` 33 例。四处与本节字面写法不同，都是有意的：
 

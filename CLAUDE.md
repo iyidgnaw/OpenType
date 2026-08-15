@@ -23,6 +23,13 @@ All feature implementation follows a strict TDD red/green cycle, run as an expli
 
 Dispatch each stage manually (one Agent tool call per stage) rather than via a saved Workflow script for now — revisit automating the whole pipeline once its shape feels stable.
 
+**Who runs which stage is not negotiable (owner rule, 2026-08-15):**
+
+- **All development work goes to sub-agents, and those sub-agents run on Sonnet** (`model: "sonnet"` on the Agent call). That covers writing tests, writing implementations, and the mechanical parts of a fix.
+- **The main agent stays on Opus and does not write feature code itself.** Its job is orchestration and review: decomposing the batch, deciding what each stage must prove, reading the diffs, adjudicating design questions the sub-agents surface, and committing.
+
+The reason the split is worth stating: the expensive judgement in this pipeline is deciding *what is correct* — which test would actually catch the bug, whether a green suite proves the thing it claims, whether a doc that says "not fixed" still matches the code. That judgement is the main agent's whole contribution, and it is wasted if the main agent is also burning its turn on mechanical edits. If the main agent starts implementing, it is doing the cheap half of the work with the expensive model and reviewing its own output, which is exactly the loop this project's 4-stage split exists to break.
+
 Treat this project's own documentation (`docs/`) as equally important as the code it describes: update the relevant spec/reference doc as part of finishing a piece of work, not as a follow-up. `docs/references/` is the entry point for OpenTypeless/OpenClaw research (read it before re-exploring either repo from scratch); `docs/superpowers/specs/` holds the dated design specs this rewrite produces.
 
 ## Commands

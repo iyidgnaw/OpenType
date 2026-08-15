@@ -768,8 +768,14 @@ enum TranscriptionLanguage: String, CaseIterable, Codable, Identifiable {
         // lookup. Since `serve.py` answers HTTP 500 on any exception, mapping
         // 粤语 to `"yue"` would fail *every* Cantonese transcription: worse
         // than the setting doing nothing. The mapping is static while the model
-        // is not (`OPENTYPE_WHISPER_MODEL`, and the coming model picker) — on
-        // large-v3 `yue` works, so re-measure this first if the default changes.
+        // is not (`OPENTYPE_WHISPER_MODEL`, and — since §E-4 — the Settings
+        // model picker backed by `GET/PUT /config/whisper-model`) — on
+        // large-v3 `yue` works, so whoever changes the *default* model
+        // (`sidecar/src/asr/whisperModel.ts`'s `DEFAULT_WHISPER_MODEL`, whose
+        // own preset comment cross-references this one) must re-measure this
+        // first. A user who has picked medium/large-v3 from that picker is
+        // already on the untested-but-likely-fine side of this; only the
+        // shipped default is what this measurement is actually about.
         case .cantonese: return "zh"
         case .english: return "en"
         case .japanese: return "ja"

@@ -36,6 +36,14 @@ interface ProviderConfigFile {
   llmConfigured: boolean;
   whisper?: StoredWhisperConfig;
   whisperConfigured: boolean;
+  /**
+   * Which local speech model to load, when the user has picked one. Absent for
+   * every config file written before this field existed, which is every user
+   * upgrading into this batch — so it is optional rather than defaulted, and
+   * the default lives in `resolveWhisperModel` where the env-var fallback can
+   * be weighed against it.
+   */
+  whisperModel?: string;
 }
 
 const EMPTY_FILE: ProviderConfigFile = {
@@ -112,6 +120,11 @@ export class ProviderConfigStore {
         llmConfigured: parsed.llmConfigured === true,
         whisper: parsed.whisper,
         whisperConfigured: parsed.whisperConfigured === true,
+        // Field-by-field rather than a spread, so an unknown key on disk is
+        // dropped rather than carried; absent here for every file written
+        // before the model became configurable, which is every upgrade.
+        whisperModel:
+          typeof parsed.whisperModel === "string" ? parsed.whisperModel : undefined,
       };
     } catch (err) {
       // Corrupt (non-empty, unparseable) config. Throwing here would brick
@@ -221,6 +234,24 @@ export class ProviderConfigStore {
         ? { ...config, baseUrl: this.normalizeBaseUrl(config.baseUrl) }
         : { ...config };
     this.file = { ...this.file, whisper: normalized, whisperConfigured: true };
+    this.persist();
+  }
+
+  getWhisperModel(): string | undefined {
+    return this.file.whisperModel;
+  }
+
+  /**
+   * Save which local model to load.
+   *
+   * Deliberately does **not** touch `whisperConfigured`. That flag answers
+   * 「用户选过本地还是远程了吗」 and gates the first-run onboarding wizard
+   * (`GET /config/status`'s `ready`); which size of local model to use is a
+   * different question, and conflating them would let a model choice dismiss a
+   * wizard the user never completed.
+   */
+  setWhisperModel(model: string): void {
+    this.file = { ...this.file, whisperModel: model };
     this.persist();
   }
 }

@@ -24,6 +24,29 @@ final class AppModel: ObservableObject {
     /// Extra detail for a `.failed` status (e.g. a startup error description),
     /// folded into `sidecarStatusText`. `nil` when there's nothing to add.
     @Published private(set) var sidecarErrorDetail: String?
+    /// The last reading of `GET /asr/status`, or `nil` before the first one.
+    ///
+    /// This is what turns the first launch from a blank screen into something
+    /// the user can read: until the ~460 MB speech model is down and loaded,
+    /// the popover and the recording overlay say so instead of appearing to do
+    /// nothing. `nil` is treated as ready everywhere it is read, so nothing
+    /// waits on a poll that has not happened yet.
+    @Published private(set) var whisperStatus: WhisperStatusSnapshot?
+    /// Live only while the model is coming up — `.ready` and `.failed` both end
+    /// it, so no timer outlives the question it was answering.
+    private var whisperStatusTask: Task<Void, Never>?
+    /// Which local model is in use, and the menu of ones that could be.
+    ///
+    /// Until §E this was reachable only through `OPENTYPE_WHISPER_MODEL`, an
+    /// environment variable a packaged-app user cannot set — and the default
+    /// model's accuracy on proper nouns is the whole of a new user's first
+    /// impression. `nil` until the first fetch.
+    @Published private(set) var whisperModelConfig: WhisperModelConfig?
+    /// Set after a save, because switching models only takes effect when the
+    /// whisper child next starts. Saying so is the simple reliable half of the
+    /// choice — restarting mid-flight would kill a process that may be holding
+    /// a queued transcription and re-download up to 3 GB before anything works.
+    @Published private(set) var whisperModelRestartPending = false
     @Published private(set) var shortcutKeys = HotKeyPreset.controlShiftSpace.keys
     @Published private(set) var shortcutBehavior: HotKeyBehavior = .holdToTalk
     @Published private(set) var shortcutReady = false
@@ -586,6 +609,7 @@ final class AppModel: ObservableObject {
                 try await self.sidecarClient.start()
                 self.sidecarErrorDetail = nil
                 self.sidecarStatus = .ready
+                self.startWhisperStatusPolling()
                 await self.refreshProviderConfigStatus()
                 // First-run setup wizard trigger (spec: "if the user hasn't
                 // configured Whisper or LLM yet, opening the app should
@@ -3004,6 +3028,87 @@ final class AppModel: ObservableObject {
     /// reflect the real configured provider from the moment the sidecar is
     /// ready, even in a session where the user never opens Settings or the
     /// wizard to trigger those views' own `.task` refreshes.
+    /// Watch the speech model come up, and stop watching once it has.
+    ///
+    /// The loop ends at `.ready` and at `.failed`, so this is not a resident
+    /// timer: it answers a question asked once per launch, that cannot change
+    /// again without a restart, and then goes away. A failed load is terminal
+    /// on purpose — its exits (retry, switch to remote recognition) are the
+    /// user's to take, and polling on would spin over the top of them.
+    func startWhisperStatusPolling() {
+        guard WhisperStatusPolling.shouldStart(sidecarStatus: sidecarStatus) else { return }
+        whisperStatusTask?.cancel()
+        whisperStatusTask = Task { [weak self] in
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                let outcome: WhisperPollOutcome
+                do {
+                    let snapshot: WhisperStatusSnapshot = try await self.sidecarClient.request(
+                        method: "GET",
+                        path: "/asr/status"
+                    )
+                    self.whisperStatus = snapshot
+                    // The overlay needs it too: a recording taken during the
+                    // download would otherwise sit under 「正在识别」 for
+                    // minutes, which is indistinguishable from a hang.
+                    self.overlay.updateWhisperStatus(snapshot)
+                    consecutiveFailures = 0
+                    outcome = .status(snapshot.state)
+                } catch {
+                    // Covers both a dead transport and a body this build cannot
+                    // read. An unrecognised state must land here rather than
+                    // anywhere near `.ready`, since `.ready` is what takes the
+                    // banner down.
+                    consecutiveFailures += 1
+                    outcome = .unreachable
+                }
+
+                switch WhisperStatusPolling.decide(
+                    outcome: outcome,
+                    consecutiveFailureCount: consecutiveFailures
+                ) {
+                case .stop:
+                    return
+                case .poll(let afterSeconds):
+                    try? await Task.sleep(nanoseconds: UInt64(afterSeconds * 1_000_000_000))
+                }
+            }
+        }
+    }
+
+    func refreshWhisperModelConfig() async {
+        whisperModelConfig = try? await sidecarClient.request(
+            method: "GET",
+            path: "/config/whisper-model"
+        )
+    }
+
+    func changeWhisperModel(_ model: String) async {
+        struct Body: Encodable { let model: String }
+        guard
+            let updated: WhisperModelConfig = try? await sidecarClient.request(
+                method: "PUT",
+                path: "/config/whisper-model",
+                body: Body(model: model)
+            )
+        else { return }
+        whisperModelConfig = updated
+        whisperModelRestartPending = updated.restartRequired ?? false
+    }
+
+    /// The 「重试」 on the model-failed surface: ask the sidecar again.
+    ///
+    /// Deliberately just restarts the poll rather than restarting the whisper
+    /// child. A load that failed for a transient reason (a dropped connection
+    /// mid-download) is retried by the child itself on the next launch, and a
+    /// user who cannot wait for that has the other exit — switching to remote
+    /// recognition — one button away.
+    func retryWhisperModel() {
+        whisperStatus = nil
+        startWhisperStatusPolling()
+    }
+
     func refreshProviderConfigStatus() async {
         do {
             let status: ProviderConfigStatus = try await sidecarClient.request(
@@ -3154,6 +3259,14 @@ final class AppModel: ObservableObject {
             body: AppModel.transcribeRequestBody(
                 audioBase64: audioData.base64EncodedString(),
                 language: configuration.transcriptionLanguage
+            ),
+            // While the model is still coming up the whisper server holds this
+            // request until it is ready, which only preserves the recording if
+            // we are still here when it arrives. The ordinary 300s ceiling
+            // would walk away mid-download and take words the user has already
+            // spoken with it.
+            timeoutSeconds: WhisperReadinessPolicy.transcribeTimeoutSeconds(
+                whisperStatus?.state ?? .ready
             )
         )
         let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """Persistent local MLX-Whisper transcription server.
 
-Loads the MLX-Whisper model once at startup (model loading has real latency;
-paying that cost per request would make every transcription noticeably
-slower) and then serves transcription requests over a Unix domain socket, so
-it can be spawned once by the TypeScript sidecar (see
-`sidecar/src/asr/whisperClient.ts`) and reused for the lifetime of the app.
+Serves transcription requests over a Unix domain socket, spawned once by the
+TypeScript sidecar (see `sidecar/src/asr/whisperClient.ts`) and reused for the
+lifetime of the app. The model is loaded once, in the background, because
+loading has real latency and paying it per request would make every
+transcription noticeably slower.
+
+**The socket opens before the model loads, and that ordering is the point.**
+Until §E this file warmed the model first, so during the first launch's ~460 MB
+download there was nobody listening: the app could not ask what was happening,
+and so neither could the user — install, grant, hold the hotkey, speak, release,
+and nothing, for minutes. Now the server is up immediately, the load runs on a
+background thread, and `GET /status` reports where it has got to.
 
 Endpoints:
   GET  /health      -> {"status": "ok"}
+  GET  /status      -> the model load's state; see `model_status.ModelStatus`
   POST /transcribe   -> body is the raw bytes of a WAV file; returns {"text": "..."}
                         optional query parameter `initial_prompt` (URL-encoded)
                         biases decoding toward known proper nouns; optional
                         query parameter `language` (an ISO-639-1 code) pins the
                         spoken language instead of letting Whisper detect it.
+                        **Waits** when the model is not ready yet rather than
+                        rejecting: the audio is already recorded by the time it
+                        arrives here, and refusing it throws away words the user
+                        has already spoken.
 
-Deliberately dependency-light: only the standard library plus `mlx_whisper`
-itself (`http.server` + `socketserver.UnixStreamServer` for the Unix-socket
-HTTP server, mirroring the Unix-socket-over-HTTP pattern
-`sidecar/src/server.ts` uses via `Bun.serve({unix: ...})`).
+Deliberately dependency-light: the standard library plus `mlx_whisper` (and
+`huggingface_hub`, which comes with it, for download progress). `http.server` +
+`socketserver.UnixStreamServer` mirror the Unix-socket-over-HTTP pattern
+`sidecar/src/server.ts` uses via `Bun.serve({unix: ...})`.
 """
 
 import json
@@ -30,8 +42,12 @@ import threading
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import numpy as np
 import mlx_whisper
+
+from model_status import ModelStatus
 
 # "small" is the chosen balance for interactive dictation: multilingual (not
 # a .en-only variant, since this app also transcribes Chinese), noticeably
@@ -48,15 +64,108 @@ MODEL = os.environ.get("OPENTYPE_WHISPER_MODEL", DEFAULT_MODEL)
 # against that shared, non-thread-safe model state.
 _transcribe_lock = threading.Lock()
 
+# Where the model load has got to, reported by GET /status and waited on by
+# POST /transcribe. Lives in its own stdlib-only module so it can be unit
+# tested without the MLX venv -- see `model_status.py`.
+STATUS = ModelStatus(MODEL)
+
+
+def _byte_counting_tqdm(status: ModelStatus):
+    """A tqdm subclass that reports download progress into `status`.
+
+    `huggingface_hub` drives one bar per file for the bytes plus an outer bar
+    counting files, so only the byte bars (`unit == "B"`) are counted -- adding
+    the outer one would inflate the figure with a file count.
+
+    Returns `None` if tqdm is not importable, which is not a failure worth
+    stopping for: the states matter far more than the bytes, and `totalBytes`
+    degrading to null is the documented fallback.
+    """
+    try:
+        from tqdm.auto import tqdm as _tqdm
+    except Exception:  # noqa: BLE001 - progress is optional, the download is not
+        return None
+
+    class _ByteCountingTqdm(_tqdm):  # type: ignore[misc, valid-type]
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if getattr(self, "unit", None) == "B" and self.total:
+                status.set_total_bytes((status.snapshot()["totalBytes"] or 0) + self.total)
+
+        def update(self, n=1):
+            if n and getattr(self, "unit", None) == "B":
+                status.add_downloaded_bytes(int(n))
+            return super().update(n)
+
+    return _ByteCountingTqdm
+
+
+def _download_model(status: ModelStatus) -> None:
+    """Fetch the weights, reporting bytes as they arrive.
+
+    Best-effort by design. `MODEL` may be a local directory rather than a Hub
+    repo id, `huggingface_hub` may be absent, and the download may already be
+    cached -- none of which is a problem, because `mlx_whisper` fetches whatever
+    is missing anyway when the model is loaded. All this adds is a byte count
+    for the wait, so every failure here is swallowed rather than surfaced.
+    """
+    if os.path.isdir(MODEL):
+        return
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception:  # noqa: BLE001 - see docstring
+        return
+
+    tqdm_class = _byte_counting_tqdm(status)
+    try:
+        if tqdm_class is None:
+            snapshot_download(MODEL)
+        else:
+            snapshot_download(MODEL, tqdm_class=tqdm_class)
+    except Exception:  # noqa: BLE001 - see docstring
+        return
+
 
 def _warm_up_model() -> None:
-    """Forces the model to load now (at startup) rather than on first request."""
+    """Forces the model to load now rather than on the first transcription."""
     silence = np.zeros(16_000, dtype=np.float32)  # 1s of silence at 16kHz
     mlx_whisper.transcribe(silence, path_or_hf_repo=MODEL)
 
 
-class UnixHTTPServer(socketserver.UnixStreamServer):
+def _prepare_model(status: ModelStatus) -> None:
+    """The background thread's whole job: download, load, and say so.
+
+    A failure is recorded rather than raised. The thread has nobody to raise to,
+    and the message is what the user needs -- 「No space left on device」 tells
+    them what to fix, and it reaches them through `/status` and the app's retry
+    and switch-to-remote exits.
+    """
+    try:
+        _download_model(status)
+        status.mark_loading()
+        print(f"Loading MLX-Whisper model '{MODEL}'...", file=sys.stderr, flush=True)
+        _warm_up_model()
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        status.mark_failed(str(exc))
+        print(f"Model preparation failed: {exc}", file=sys.stderr, flush=True)
+        return
+    status.mark_ready()
+    print("Model loaded.", file=sys.stderr, flush=True)
+
+
+class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """One thread per request.
+
+    `UnixStreamServer` alone handles one request at a time, which was invisible
+    while nothing called this server concurrently. It stops being invisible the
+    moment `/transcribe` blocks waiting for the model: a single-threaded server
+    could not answer `/status` while a recording was queued behind the download,
+    so the endpoint that exists to explain the wait would be unreachable exactly
+    when the user is waiting. Threading is what makes the rest of §E true.
+    """
+
     allow_reuse_address = True
+    daemon_threads = True
 
 
 class WhisperRequestHandler(BaseHTTPRequestHandler):
@@ -98,8 +207,14 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
         return values[0].strip() if values else ""
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib method name
-        if self._path_only() == "/health":
+        path = self._path_only()
+        if path == "/health":
+            # Deliberately not gated on the model: health means "this process is
+            # answering", and the sidecar polls it to decide the server is up.
+            # Whether the model is ready is what /status is for.
             self._send_json(200, {"status": "ok"})
+        elif path == "/status":
+            self._send_json(200, STATUS.snapshot())
         else:
             self._send_json(404, {"error": "not_found"})
 
@@ -121,6 +236,19 @@ class WhisperRequestHandler(BaseHTTPRequestHandler):
 
         initial_prompt = self._query_param("initial_prompt")
         language = self._query_param("language")
+
+        # Wait rather than reject. The words are already spoken and recorded by
+        # the time this arrives, so refusing would throw them away; the caller
+        # (Swift) carries the outer deadline. A load that has *failed* returns
+        # False instead of waiting forever, so the user gets the real reason and
+        # can reach the retry / switch-to-remote exits.
+        if not STATUS.wait_until_ready():
+            snapshot = STATUS.snapshot()
+            self._send_json(
+                500,
+                {"error": snapshot["error"] or "the speech model failed to load"},
+            )
+            return
 
         tmp_path = None
         try:
@@ -171,12 +299,16 @@ def main() -> None:
     if socket_dir:
         os.makedirs(socket_dir, exist_ok=True)
 
-    print(f"Loading MLX-Whisper model '{MODEL}'...", file=sys.stderr, flush=True)
-    _warm_up_model()
-    print("Model loaded.", file=sys.stderr, flush=True)
-
     server = UnixHTTPServer(socket_path, WhisperRequestHandler)
     print(f"opentype-whisper-server listening on unix:{socket_path}", file=sys.stderr, flush=True)
+
+    # After the socket exists, never before: this thread is what the first
+    # launch spends its minutes in, and until it finishes the only thing that
+    # can tell anyone so is the server constructed above.
+    threading.Thread(
+        target=_prepare_model, args=(STATUS,), name="model-loader", daemon=True
+    ).start()
+
     try:
         server.serve_forever()
     finally:

@@ -630,7 +630,8 @@ final class SidecarClient {
     func request<Response: Decodable>(
         method: String,
         path: String,
-        body: Encodable? = nil
+        body: Encodable? = nil,
+        timeoutSeconds: Int = sidecarRequestTimeoutSeconds
     ) async throws -> Response {
         let bodyData: Data?
         if let body {
@@ -642,7 +643,8 @@ final class SidecarClient {
         let rawOutput = try await runCurl(
             method: method,
             path: path,
-            bodyData: bodyData
+            bodyData: bodyData,
+            timeoutSeconds: timeoutSeconds
         )
         let (body, status) = Self.splitBodyAndStatus(fromRawOutput: rawOutput)
         return try Self.decodeResponse(fromRawOutput: body, status: status ?? 0)
@@ -686,12 +688,19 @@ final class SidecarClient {
         socketPath: String,
         method: String,
         path: String,
-        bodyData: Data?
+        bodyData: Data?,
+        /// Overridable per request, defaulted so every existing call site keeps
+        /// the shared ceiling. Transcription is the one caller that raises it:
+        /// while the speech model is still downloading the whisper server holds
+        /// the request until it is ready, and 300s would walk away from a
+        /// recording the user has already spoken — see
+        /// `WhisperReadinessPolicy.transcribeTimeoutSeconds`.
+        timeoutSeconds: Int = sidecarRequestTimeoutSeconds
     ) -> (arguments: [String], stdinBody: Data?) {
         var arguments = [
             "--unix-socket", socketPath,
             "-sS",
-            "--max-time", String(sidecarRequestTimeoutSeconds),
+            "--max-time", String(timeoutSeconds),
             "-w", "\n%{http_code}",
             "-X", method
         ]
@@ -724,13 +733,15 @@ final class SidecarClient {
     private func runCurl(
         method: String,
         path: String,
-        bodyData: Data?
+        bodyData: Data?,
+        timeoutSeconds: Int = sidecarRequestTimeoutSeconds
     ) async throws -> String {
         let invocation = Self.curlInvocation(
             socketPath: socketURL.path,
             method: method,
             path: path,
-            bodyData: bodyData
+            bodyData: bodyData,
+            timeoutSeconds: timeoutSeconds
         )
         let control = CurlProcessControl()
 

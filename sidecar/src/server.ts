@@ -10,6 +10,9 @@ import { createBuiltInTools } from "./agent/builtInTools";
 import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
 import { buildAsrRoutes, type TranscribeFn, type TranscribeOptions } from "./asr/routes";
+import { buildAsrStatusRoutes, type AsrStatusDeps, type LocalWhisperStatus } from "./asr/statusRoutes";
+import { buildWhisperModelRoutes } from "./asr/whisperModelRoutes";
+import { resolveWhisperModel } from "./asr/whisperModel";
 import { createRemoteWhisperClient } from "./asr/remoteWhisperClient";
 import { defaultWhisperClientFactories, WhisperClient } from "./asr/whisperClient";
 import { loadEnv } from "./env";
@@ -81,7 +84,20 @@ export function buildApp(
    * assembly with no MCP tool set (every pre-existing test call site) answers
    * exactly the shape it always did.
    */
-  mcpConnectionReport?: () => McpConnectionReport
+  mcpConnectionReport?: () => McpConnectionReport,
+  /**
+   * `OPENTYPE_WHISPER_MODEL`, when set -- the fallback `/config/whisper-model`
+   * reports as `source: "env"`. Passed in rather than read from `process.env`
+   * here, following `mcpEnvJson`: one explicit wiring decision, made in
+   * `main()`.
+   */
+  whisperModelEnvValue?: string,
+  /**
+   * How to answer `GET /asr/status`. Optional so an assembly with no whisper
+   * child (every pre-existing test call site) simply serves no status route
+   * rather than reporting on a process that does not exist.
+   */
+  asrStatusDeps?: AsrStatusDeps
 ) {
   return createRouter([
     {
@@ -112,6 +128,13 @@ export function buildApp(
     }),
     ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),
+    // §E-4: which local model to load, saved-beats-env exactly as MCP does it.
+    ...buildWhisperModelRoutes(providerConfigStore, {
+      envValue: whisperModelEnvValue,
+    }),
+    // §E-2: how far that model has got to loading, so the first launch is
+    // something the user can read rather than a blank screen.
+    ...(asrStatusDeps ? buildAsrStatusRoutes(asrStatusDeps) : []),
     ...(mcpConfigStore
       ? buildMcpConfigRoutes(mcpConfigStore, {
           envJson: mcpEnvJson,
@@ -216,8 +239,20 @@ async function main() {
   // per-request, inside the `/asr/transcribe` handler below, so it only
   // blocks the first transcription request (typically well after the model
   // has finished loading in the background) rather than sidecar startup.
+  // §E-4: which weights to load. Saved beats `OPENTYPE_WHISPER_MODEL` beats the
+  // default, and the resolved value is handed down as that same variable --
+  // `serve.py` reads it from there, so passing the resolved string is what
+  // makes 「保存的配置优先」 true at the only layer that decides which weights
+  // actually get downloaded.
+  const resolvedWhisperModel = resolveWhisperModel(
+    providerConfigStore.getWhisperModel(),
+    process.env.OPENTYPE_WHISPER_MODEL
+  );
   const whisperClient = new WhisperClient(
-    { socketPath: env.whisperSocketPath },
+    {
+      socketPath: env.whisperSocketPath,
+      extraEnv: { OPENTYPE_WHISPER_MODEL: resolvedWhisperModel.model },
+    },
     defaultWhisperClientFactories({
       pythonBin: env.whisperPythonBin,
       scriptPath: env.whisperScriptPath,
@@ -313,7 +348,42 @@ async function main() {
     // at startup renders in the panel exactly like one that works -- a silent
     // skip is just a silent failure one layer along. `status` is a closure over
     // that report rather than a method, so passing it unbound is safe.
-    mcpTools.status
+    mcpTools.status,
+    process.env.OPENTYPE_WHISPER_MODEL,
+    {
+      // Read per request: the user can save a remote-Whisper config at any
+      // point after boot, and a captured value would report the boot-time
+      // backend for the life of the process.
+      //
+      // Keyed off `shouldStartLocalWhisper` -- the predicate that decided
+      // whether a python child exists at all -- rather than
+      // `resolveTranscribe`'s rule, which additionally demands a baseUrl and
+      // key. A saved remote config missing its key would read as "local" under
+      // that rule and poll for a download, while there is no child in existence
+      // to ask.
+      backend: () => {
+        const current = providerConfigStore.getStatus();
+        return shouldStartLocalWhisper({
+          whisperConfigured: current.whisperConfigured,
+          mode: providerConfigStore.getWhisperConfig()?.mode,
+        })
+          ? "local"
+          : "remote";
+      },
+      localStatus: async () => {
+        const response = await globalThis.fetch("http://localhost/status", {
+          unix: env.whisperSocketPath,
+          signal: AbortSignal.timeout(2_000),
+        } as RequestInit);
+        if (!response.ok) {
+          // An older `serve.py` without /status 404s here. A child that is up
+          // but not answering this contract is, to the user, the same
+          // situation as one that is not up -- the route reports `starting`.
+          throw new Error(`whisper /status answered ${response.status}`);
+        }
+        return (await response.json()) as LocalWhisperStatus;
+      },
+    }
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

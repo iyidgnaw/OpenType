@@ -21,6 +21,9 @@ private final class OverlayPresentation: ObservableObject {
     /// long as a recording is being timed. `AppModel`'s recording tick is the
     /// only writer — the controller never reads a clock of its own.
     @Published var elapsedText: String?
+    /// The speech model's load state, so a transcription queued behind the
+    /// first-launch download can say what it is waiting for.
+    @Published var whisperStatus: WhisperStatusSnapshot?
     /// The two-minute warning's sentence, shown for a few seconds in place of
     /// the caption. Separate from the flag below because the sentence is
     /// transient and the fact that it fired is not.
@@ -661,6 +664,14 @@ final class OverlayController {
         guard presentation.state == .listening else { return }
         presentation.liveTranscript = text
         if !text.isEmpty { presentation.lastCaption = text }
+    }
+
+    /// How far the speech model has got to loading, pushed by `AppModel`'s
+    /// poll. Only ever read while transcribing: a recording taken during the
+    /// first-launch download otherwise sits under 「正在识别」 for minutes,
+    /// which is the blank screen this feature removes, relabelled.
+    func updateWhisperStatus(_ status: WhisperStatusSnapshot?) {
+        presentation.whisperStatus = status
     }
 
     /// The elapsed-time readout, pushed by `AppModel`'s recording tick (P2-10).
@@ -1477,6 +1488,41 @@ private struct OverlayView: View {
         .dsHairline(.top, color: DS.Colour.border)
     }
 
+    /// Replaces 「正在识别」 while the model is still coming up.
+    ///
+    /// The recording is already in flight and will be transcribed the moment
+    /// the model arrives — nothing is lost. What the user must not be given is
+    /// 「正在识别」 for four minutes, which looks exactly like a hang.
+    private var whisperPreparingTitle: String? {
+        guard
+            presentation.state == .transcribing,
+            let whisper = presentation.whisperStatus,
+            whisper.backend == .local,
+            WhisperReadinessPolicy.showsPreparingBanner(whisper.state)
+        else { return nil }
+        return OpenTypeL10n.text("正在准备语音模型", english: "Preparing the speech model")
+    }
+
+    private var whisperPreparingDetail: String? {
+        guard
+            whisperPreparingTitle != nil,
+            let whisper = presentation.whisperStatus
+        else { return nil }
+        // A percentage only when the total is genuinely known; otherwise the
+        // honest sentence, never a figure invented to fill the line.
+        if let fraction = whisper.fractionComplete {
+            let percent = Int((fraction * 100).rounded())
+            return OpenTypeL10n.text(
+                "首次约 460 MB · \(percent)% · 说的话会保留",
+                english: "About 460 MB the first time · \(percent)% · your words are kept"
+            )
+        }
+        return OpenTypeL10n.text(
+            "首次约 460 MB · 说的话会保留",
+            english: "About 460 MB the first time · your words are kept"
+        )
+    }
+
     private var compactContent: some View {
         HStack(spacing: 11) {
             Image(systemName: presentation.state.symbol)
@@ -1484,12 +1530,15 @@ private struct OverlayView: View {
                 .foregroundStyle(symbolColour)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(presentation.state.title)
+                Text(whisperPreparingTitle ?? presentation.state.title)
                     .font(DS.Text.body(.semibold))
-                Text(presentation.state.overlayDetail(for: presentation.mode))
-                    .font(DS.Text.caption())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                Text(
+                    whisperPreparingDetail
+                        ?? presentation.state.overlayDetail(for: presentation.mode)
+                )
+                .font(DS.Text.caption())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             }
 
             Spacer(minLength: 0)

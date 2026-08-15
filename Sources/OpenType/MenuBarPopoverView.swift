@@ -29,6 +29,9 @@ struct MenuBarPopoverView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             modeRow
+            if let whisper = model.whisperStatus, whisper.backend == .local {
+                whisperPreparingRow(whisper)
+            }
             if model.needsLLMForSelectedMode {
                 llmSetupNudge
             }
@@ -162,6 +165,109 @@ struct MenuBarPopoverView: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 10)
         .padding(.bottom, 10)
+    }
+
+    // MARK: - Speech model
+
+    /// What the first launch spends its minutes on, said out loud.
+    ///
+    /// The popover is the surface that is always one click away, which is why
+    /// this lives here rather than only in Settings: the main window is an
+    /// accessory and is usually closed, so a download reported only there is a
+    /// download nobody sees. Nothing is shown once the model is ready, and a
+    /// remote-Whisper user never gets here at all — they have no local model
+    /// and must not be shown a bar for a file they will never fetch.
+    @ViewBuilder
+    private func whisperPreparingRow(_ whisper: WhisperStatusSnapshot) -> some View {
+        if WhisperReadinessPolicy.showsPreparingBanner(whisper.state) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(OpenTypeL10n.text(
+                    "正在准备语音模型…（首次约 460 MB）",
+                    english: "Preparing the speech model… (about 460 MB the first time)"
+                ))
+                .font(DS.Text.mono())
+                .foregroundStyle(DS.Colour.ink(0.55))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+                // A determinate bar only when the total is actually known. An
+                // unknown total degrades to the indeterminate one rather than
+                // to a bar sitting at 0%, which reads as stuck — the blank
+                // screen this row exists to remove, wearing a progress
+                // indicator.
+                if let fraction = whisper.fractionComplete {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .tint(DS.Colour.accent)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .tint(DS.Colour.accent)
+                }
+
+                Text(OpenTypeL10n.text(
+                    "现在就可以按快捷键说话，说完的内容会等模型好了再转写。",
+                    english: "You can talk now — what you say is transcribed once it is ready."
+                ))
+                .font(DS.Text.mono())
+                .foregroundStyle(DS.Colour.ink(0.4))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 10)
+        } else if whisper.state == .failed {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(OpenTypeL10n.text(
+                    "语音模型没能准备好",
+                    english: "The speech model could not be prepared"
+                ))
+                .font(DS.Text.caption())
+                .fontWeight(.medium)
+                // The real message, not a generic one: 「No space left on
+                // device」 tells the user what to fix and which of the two
+                // exits below is theirs.
+                if let error = whisper.error {
+                    Text(error)
+                        .font(DS.Text.mono())
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 12) {
+                    Button {
+                        model.retryWhisperModel()
+                    } label: {
+                        Text(OpenTypeL10n.text("重试", english: "Retry"))
+                            .font(DS.Text.caption())
+                            .foregroundStyle(DS.Colour.accent)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        onOpenMainWindow()
+                        model.selectedTab = .settings
+                    } label: {
+                        Text(OpenTypeL10n.text(
+                            "改用远程识别",
+                            english: "Use remote recognition"
+                        ))
+                        .font(DS.Text.caption())
+                        .foregroundStyle(DS.Colour.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .foregroundStyle(DS.Colour.warningText)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                DS.Colour.warningFill,
+                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+            )
+            .padding(.horizontal, 10)
+            .padding(.bottom, 10)
+        }
     }
 
     // MARK: - Status

@@ -160,9 +160,23 @@ Swift 524 XCTest + 13 swift-testing 全绿，sidecar 831 pass / 0 fail。
 
 ---
 
-## E. Whisper 模型 UI + 首启下载进度（review #3）
+## E. Whisper 模型 UI + 首启下载进度（review #3）—— 已完成（2026-08-15）
 
 **目标**：消灭「装完、按热键、说完、松开、什么都没有」这一分钟。
+
+实现阶段替这份 spec 定了两件本来留白的事：
+
+- **E-4 的「改动后需要重启才生效」二选一，选的是报告而不是重启。** `PUT /config/whisper-model`
+  返回 `restartRequired: true`，但**不**杀掉/重启 whisper 子进程——沿用 MCP 面板「下次启动生效」
+  的既有惯例。理由：重启意味着杀掉一个可能正卡着某次排队转写的 python 进程，然后重新下载最多 3 GB
+  才能再工作，这是一个比这一批本身更大、需要单独评审的改动；而「说清楚下次启动生效」是这份 spec
+  留白里简单可靠的那一半。见 `sidecar/src/asr/whisperModelRoutes.ts` 头部注释。
+- **`serve.py` 的 `UnixHTTPServer` 必须是 `socketserver.ThreadingMixIn`，不是普通
+  `UnixStreamServer`。** `UnixStreamServer` 单例一次只答一个请求——这在没人并发调用它时是隐形的，
+  但 `/transcribe` 一旦卡在 `wait_until_ready()` 上等下载/加载，单线程服务器就没法再答 `/status`，
+  于是「本来是用来解释这段等待的接口」恰好在用户在等待的那一刻不可达。E-1/E-3 的整套可见性设计都
+  假设 `/status` 随时能答，这是那个假设成立的前提，不是可有可无的细节。见 `sidecar/whisper/serve.py`
+  的 `UnixHTTPServer` 类注释。
 
 ### E-1 serve.py 先起服务，后加载模型
 

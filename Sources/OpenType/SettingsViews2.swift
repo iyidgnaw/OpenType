@@ -128,6 +128,7 @@ struct SettingsColumn: View {
             auditEventCount = await auditEventCountFromDisk()
             await model.refreshWhisperConfigSummary()
             await model.refreshLLMConfigSummary()
+            await model.refreshWhisperModelConfig()
         }
     }
 
@@ -447,6 +448,38 @@ struct SettingsColumn: View {
                 .fixedSize()
             }
 
+            // 语音模型 (§E-4). Until this batch the only way to change it was an
+            // environment variable a packaged-app user cannot set — while the
+            // default model's accuracy on proper nouns is the whole of a new
+            // user's first impression.
+            if let config = model.whisperModelConfig, !config.presets.isEmpty {
+                SettingsRow(
+                    title: OpenTypeL10n.text("语音模型", english: "Speech model"),
+                    subtitle: model.whisperModelRestartPending
+                        ? OpenTypeL10n.text(
+                            "已保存，下次启动生效",
+                            english: "Saved — takes effect on next launch"
+                        )
+                        : OpenTypeL10n.text(
+                            "更大的模型更准，但下载更久、识别更慢",
+                            english: "A larger model is more accurate, but slower to download and to transcribe"
+                        )
+                ) {
+                    Menu {
+                        ForEach(config.presets) { preset in
+                            Button("\(whisperModelName(preset.id)) · \(preset.approximateSizeText)") {
+                                Task { await model.changeWhisperModel(preset.id) }
+                            }
+                        }
+                    } label: {
+                        ControlChip(text: whisperModelName(config.model))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                }
+            }
+
             // 输入设备 (§K). A row with no control on purpose: the device is
             // the system's choice, and naming it is what lets the user who
             // notices 「今天识别特别差」 see that the input moved under them —
@@ -538,6 +571,24 @@ struct SettingsColumn: View {
     }
 
     // MARK: 数据
+
+    /// Names the sizes the sidecar deliberately does not name.
+    ///
+    /// Falls back to the bare repo id, which is what a user who pointed
+    /// `OPENTYPE_WHISPER_MODEL` at a fine-tune should see: the picker is a menu,
+    /// not an allowlist, and a value it does not recognise is still theirs.
+    private func whisperModelName(_ id: String) -> String {
+        if id.contains("large") {
+            return OpenTypeL10n.text("大", english: "Large")
+        }
+        if id.contains("medium") {
+            return OpenTypeL10n.text("中", english: "Medium")
+        }
+        if id.contains("small") {
+            return OpenTypeL10n.text("小（默认）", english: "Small (default)")
+        }
+        return id
+    }
 
     private var dataGroup: some View {
         SettingsGroup(OpenTypeL10n.text("数据", english: "Data")) {

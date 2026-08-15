@@ -5,10 +5,11 @@ import SwiftUI
 /// model listing, each backed by `AppModel`'s `/config/*` wrappers
 /// (`AppModel.swift`'s "Provider configuration" section, which themselves
 /// call the sidecar's `provider/routes.ts`). Both the first-run
-/// `OnboardingWizardView` below and `SettingsView` (`Views.swift`, "语音识别"/
-/// "AI 模型" sections) embed these same two content views rather than each
-/// having their own copy — per the task's "reuse the same underlying
-/// config/test/model-list logic and UI components" requirement.
+/// `OnboardingWizardView` below and `SettingsDetailColumn`
+/// (`SettingsViews2.swift`, "语音识别"/"AI 模型" routes) embed these same two
+/// content views rather than each having their own copy — per the task's
+/// "reuse the same underlying config/test/model-list logic and UI
+/// components" requirement.
 
 // MARK: - Whisper
 
@@ -410,9 +411,9 @@ struct LLMProviderSetupContent: View {
 /// `OnboardingPolicy`, the user has neither configured Whisper nor taken the
 /// "just local transcription, skip AI setup" path yet (an LLM is deferred, not
 /// required to enter the app -- P1-19). Reuses `WhisperSetupContent`/
-/// `LLMProviderSetupContent` verbatim (same components `SettingsView` uses),
-/// so there is exactly one implementation of "configure + test + list +
-/// save", not a parallel wizard-only copy. Disappears automatically the moment
+/// `LLMProviderSetupContent` verbatim (same components `SettingsDetailColumn`
+/// uses), so there is exactly one implementation of "configure + test + list
+/// + save", not a parallel wizard-only copy. Disappears automatically the moment
 /// Whisper is saved or the local-only path is acknowledged --
 /// `AppModel.saveWhisperConfig` refreshes `providerConfigStatus` and
 /// `chooseLocalOnly` sets `localTranscriptionOnlyAcknowledged`, either of which

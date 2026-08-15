@@ -1612,9 +1612,10 @@ struct ConsolidationResultSummary: Decodable {
     let reason: String?
 }
 
-/// Transient success/failure indicator for the Settings "Memory" panel's
-/// manual "Consolidate now" button (`MemoryPanelView`) — cleared on the next
-/// trigger, not persisted; the persistent record is `memoryConsolidationRuns`.
+/// Transient success/failure indicator for the 记忆 page's manual
+/// "Consolidate now" button (`MemoryColumn` in `MemoryViews.swift`) — cleared
+/// on the next trigger, not persisted; the persistent record is
+/// `memoryConsolidationRuns`.
 enum ConsolidateNowStatus: Equatable {
     case idle
     case running
@@ -1913,9 +1914,9 @@ struct McpConfigSummary: Decodable, Equatable {
 ///
 /// A value equal to the mask the sidecar previously reported for that same
 /// server *and* the same key means "unchanged" and is resolved back to the
-/// stored secret server-side. `McpServerEditor` (`Views.swift`) relies on that
-/// round-trip, so masks are passed through verbatim here rather than being
-/// filtered out on the way.
+/// stored secret server-side. `McpServerSheet` (`McpServerViews.swift`) relies
+/// on that round-trip, so masks are passed through verbatim here rather than
+/// being filtered out on the way.
 struct McpServerRequest: Encodable, Equatable {
     let name: String
     let transport: McpTransport

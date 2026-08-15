@@ -325,7 +325,7 @@ agent 分发路径（`dispatchAgentRun`），escalate 只是给它加一个窄�
 
 ---
 
-## I. 历史：正文搜索 / 单条删除 / 导出（review #7）—— 已完成（2026-08-15），会话删除除外
+## I. 历史：正文搜索 / 单条删除 / 导出（review #7）—— 已完成（2026-08-15）
 
 - `HistoryStore`：`delete(id:)`，`entries` 上限从 100 提到 **1000**（JSON 文件，1000 条量级完全够用；
   真要再大就该换存储，那是另一件事）。
@@ -352,11 +352,20 @@ agent 分发路径（`dispatchAgentRun`），escalate 只是给它加一个窄�
   JSON 两种格式；JSON 侧原样往返，`ConversationDetail` 保持 `Decodable`-only，导出用一个
   file-private 的 encodable mirror 而不是把它拓宽成 `Codable`）+ `Sources/OpenType/
   HistoryExportPanel.swift`（薄的 `NSSavePanel` 落盘层，两个列表的 `…` 菜单都调它）。
-- **会话（对话）的单条删除没有做**，与本节字面写法「会话的 `…` 菜单」不一致：sidecar 至今没有
-  `DELETE /conversations/:id`（`sidecar/src/memory/conversationRoutes.ts` 只读），补一个既要动
-  `sidecar/`（本批其他条目正在改，越权）又要动 `AppModel.swift`（同一批的实现分工里是别的 agent
-  在用的文件），而这一半也没有被 stage-1/2 的红测试钉住。听写历史的单条删除（`HistoryStore.delete`）
-  和两个列表的导出都按原计划做了；会话删除是唯一留白的一项，留给下一批单独排期。
+- **会话（对话）的单条删除**：本批当时因越权 + 分工冲突留白（sidecar 侧 `DELETE
+  /conversations/:id` 和 Swift 侧调用点分属两个 agent 在同批改的文件），分两步补齐——sidecar 半边
+  （store 方法、路由、9 个测试，事务里一起删 `conversations`/`conversation_messages`）在 `8e8120f`
+  单独落地，但落地时 **没有任何调用点**：路由存在、没人调用，和 `docs/superpowers/
+  specs/2026-08-09-current-system-state.md` §7 记录的 `LocalMemoryRetriever` 是同一种「有端点没调用方」
+  的死接缝。调用点这半在下一批补上：`AppModel.deleteConversation(_:)`（`AppModel.swift`）调
+  `DELETE /conversations/:id`，无乐观更新，sidecar 确认删除后才更新本地状态；
+  `SessionThreadColumn`（`SessionsViews.swift`）的 `…` 菜单加「删除会话」，走和听写历史行右键删除
+  同一套确认对话框（`509d3f4` 的模式）。纯逻辑部分钉了测试：`SessionList.afterDeleting`/
+  `SessionDeletionOutcome`（`SessionList.swift`）把「从列表里摘掉这一行」和「如果删的正是当前打开的
+  会话，`focusedConversation` 归零而不是悬空指向一个已经不存在的 id」这两件事绑在一个函数里返回，
+  和 `SessionContinuation`/`VoiceFollowUp.continuation` 把 thread 和 endpoint 绑在一起是同一个理由——
+  分开算就是两处状态在删除后各说各话的地方（`Tests/OpenTypeTests/SessionListTests.swift` 的
+  `SessionDeletionTests`，7 例）。至此听写历史与会话两条列表的单条删除都做了，本节没有留白项。
 
 ---
 

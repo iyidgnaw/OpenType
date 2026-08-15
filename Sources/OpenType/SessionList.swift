@@ -113,6 +113,35 @@ struct SessionContinuation: Equatable {
     var mode: InputMode
 }
 
+/// The list and the open thread after a `DELETE /conversations/:id` succeeds.
+///
+/// Bundled into one result for the same reason `SessionContinuation` bundles
+/// thread and endpoint: resolving the list and the focus independently is how
+/// a deleted row disappears from the list while `focusedConversation` is left
+/// pointing at an id that no longer exists.
+struct SessionDeletionOutcome: Equatable {
+    var conversations: [ConversationSummary]
+    var focusedConversation: FocusedConversation?
+}
+
+extension SessionList {
+    /// `AppModel.deleteConversation(_:)` calls this once, against whichever of
+    /// `askConversations`/`agentConversations` owns the deleted id, after the
+    /// sidecar has confirmed the delete. `focusedConversation` is matched by
+    /// `id` alone, not `kind` — it is the sole join key `FocusedConversation`
+    /// exposes, and the caller already knows which array it is operating on.
+    static func afterDeleting(
+        _ id: Int,
+        from conversations: [ConversationSummary],
+        focusedConversation: FocusedConversation?
+    ) -> SessionDeletionOutcome {
+        SessionDeletionOutcome(
+            conversations: conversations.filter { $0.id != id },
+            focusedConversation: focusedConversation?.id == id ? nil : focusedConversation
+        )
+    }
+}
+
 extension VoiceFollowUp {
     /// Resolves the thread **and** the endpoint from a single winner.
     ///

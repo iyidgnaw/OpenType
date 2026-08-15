@@ -587,3 +587,131 @@ final class SessionContinuationTests: XCTestCase {
         XCTAssertEqual(SessionKind.agent.title, "Agent")
     }
 }
+
+/// §I's one remaining gap, closed: `DELETE /conversations/:id` shipped in
+/// `8e8120f` (store method, route, transactional message delete) with nothing
+/// on the Swift side calling it — a shipped endpoint with no caller, the same
+/// dead-seam shape a whole memory layer was deleted for elsewhere in this repo
+/// (`docs/superpowers/specs/2026-08-09-current-system-state.md` §7's
+/// `LocalMemoryRetriever` removal). `AppModel.deleteConversation(_:)` is the
+/// caller the `…` menu's new 删除 item dispatches to; it is not tested here
+/// because it is a network call (`SidecarClient.request`) with no mock harness
+/// in this suite, same as `deleteMemoryTerm(id:)`/`deleteMcpServer(name:)`
+/// before it.
+///
+/// What *is* pure, and what a wrong answer would show up as a dangling
+/// selection rather than a crash: after the sidecar confirms a delete, does
+/// the row leave the list `AppModel` holds (whichever of
+/// `askConversations`/`agentConversations` owned it), and if that row was the
+/// thread open in the detail column, does `focusedConversation` resolve to
+/// something valid — `nil`, the same "no thread open" state `clearFocus()`/
+/// `startNewConversation()` already use — rather than keep pointing at an id
+/// that no longer exists. Bundled into one function and one `Equatable`
+/// result, `SessionList.afterDeleting`/`SessionDeletionOutcome`, for the same
+/// reason `VoiceFollowUp.continuation` bundles thread and endpoint: resolving
+/// the list and the focus independently is exactly how one could be updated
+/// and the other forgotten.
+final class SessionDeletionTests: XCTestCase {
+
+    private let base = 1_760_000_000_000
+
+    // MARK: - The list
+
+    func testTheDeletedConversationIsGoneFromTheList() {
+        let list = [
+            conversation(id: 101, kind: "ask", updatedAt: base - 1),
+            conversation(id: 102, kind: "ask", updatedAt: base - 2),
+        ]
+
+        let outcome = SessionList.afterDeleting(101, from: list, focusedConversation: nil)
+
+        XCTAssertEqual(outcome.conversations.map(\.id), [102])
+    }
+
+    func testEverythingElseInTheListSurvivesUntouched() {
+        let others = [
+            conversation(id: 102, kind: "ask", updatedAt: base - 2, title: "别的对话"),
+            conversation(id: 103, kind: "agent", updatedAt: base - 3, title: "第三个"),
+        ]
+        let list = [conversation(id: 101, kind: "ask", updatedAt: base - 1)] + others
+
+        let outcome = SessionList.afterDeleting(101, from: list, focusedConversation: nil)
+
+        XCTAssertEqual(outcome.conversations, others)
+    }
+
+    func testDeletingAnIdNotInTheListLeavesItUnchanged() {
+        // Defensive: a double-delete race (two menu clicks) should not touch
+        // any row it does not name.
+        let list = [conversation(id: 101, kind: "ask", updatedAt: base - 1)]
+
+        let outcome = SessionList.afterDeleting(999, from: list, focusedConversation: nil)
+
+        XCTAssertEqual(outcome.conversations, list)
+    }
+
+    // MARK: - Focus resolution: no dangling selection
+
+    func testDeletingTheFocusedThreadClearsFocusRatherThanLeavingADanglingId() {
+        let list = [conversation(id: 101, kind: "ask", updatedAt: base - 1)]
+
+        let outcome = SessionList.afterDeleting(
+            101,
+            from: list,
+            focusedConversation: FocusedConversation(id: 101, kind: .ask)
+        )
+
+        XCTAssertNil(outcome.focusedConversation)
+    }
+
+    func testDeletingSomeOtherThreadLeavesTheFocusedOneAlone() {
+        let list = [
+            conversation(id: 101, kind: "ask", updatedAt: base - 1),
+            conversation(id: 102, kind: "ask", updatedAt: base - 2),
+        ]
+        let focused = FocusedConversation(id: 102, kind: .ask)
+
+        let outcome = SessionList.afterDeleting(101, from: list, focusedConversation: focused)
+
+        XCTAssertEqual(outcome.focusedConversation, focused)
+    }
+
+    func testDeletingWithNoThreadFocusedStaysUnfocused() {
+        let list = [conversation(id: 101, kind: "ask", updatedAt: base - 1)]
+
+        let outcome = SessionList.afterDeleting(101, from: list, focusedConversation: nil)
+
+        XCTAssertNil(outcome.focusedConversation)
+    }
+
+    func testAFocusedAgentThreadDeletedFromTheAskListMatchByIdNotKind() {
+        // `id` is the sole join key -- `AppModel` calls this once per array
+        // (ask/agent are stored separately), and the focus half must still
+        // resolve correctly regardless of which array the caller passed. A
+        // `kind`-aware comparison here would be a second, redundant source of
+        // truth for "which conversation is this" (`FocusedConversation`'s own
+        // doc comment names that hazard).
+        let list = [conversation(id: 101, kind: "agent", updatedAt: base - 1)]
+        let focused = FocusedConversation(id: 101, kind: .agent)
+
+        let outcome = SessionList.afterDeleting(101, from: list, focusedConversation: focused)
+
+        XCTAssertNil(outcome.focusedConversation)
+        XCTAssertTrue(outcome.conversations.isEmpty)
+    }
+
+    private func conversation(
+        id: Int,
+        kind: String,
+        updatedAt: Int,
+        title: String = "对话"
+    ) -> ConversationSummary {
+        ConversationSummary(
+            id: id,
+            kind: kind,
+            title: title,
+            createdAt: updatedAt,
+            updatedAt: updatedAt
+        )
+    }
+}

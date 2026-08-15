@@ -301,6 +301,10 @@ struct SessionThreadColumn: View {
     var onSubmit: (String, FocusedConversation) -> Void
 
     @State private var draft = ""
+    /// §I's remaining gap: same confirm-before-destroy pattern the dictation
+    /// row's delete uses (`DictationViews.swift`'s `showingDeleteConfirmation`,
+    /// `509d3f4`) rather than a second convention for the same kind of action.
+    @State private var showingDeleteConfirmation = false
 
     var body: some View {
         Group {
@@ -322,6 +326,20 @@ struct SessionThreadColumn: View {
                 loading
             }
             composer(focused)
+        }
+        // This destroys data and there is no undo — matching the dictation
+        // row's own delete confirmation rather than a second convention for
+        // the same kind of action.
+        .confirmationDialog(
+            OpenTypeL10n.text("删除这条会话？", english: "Delete this conversation?"),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                deleteConversation(focused)
+            }
+        } message: {
+            Text(OpenTypeL10n.text("删除后无法恢复。", english: "This cannot be undone."))
         }
     }
 
@@ -388,6 +406,15 @@ struct SessionThreadColumn: View {
                     Button(OpenTypeL10n.text("导出为 JSON", english: "Export as JSON")) {
                         exportConversation(focused, as: .json)
                     }
+                }
+                Divider()
+                // §I: the other half of single-entry deletion — the dictation
+                // history row already got its right-click 删除; this is the
+                // conversation side, behind the same confirmation.
+                Button(role: .destructive) {
+                    showingDeleteConfirmation = true
+                } label: {
+                    Label(OpenTypeL10n.text("删除会话", english: "Delete conversation"), systemImage: "trash")
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -626,6 +653,15 @@ struct SessionThreadColumn: View {
         model.focusedConversation = nil
         model.startNewAskConversation()
         model.startNewAgentConversation()
+    }
+
+    /// §I: deletes the conversation currently open in this column.
+    /// `AppModel.deleteConversation(_:)` also resolves `focusedConversation`
+    /// (to `nil`, since this is always the focused thread), which is what
+    /// leaves this column showing `placeholder` afterwards rather than a
+    /// detail view for a conversation that no longer exists.
+    private func deleteConversation(_ focused: FocusedConversation) {
+        Task { await model.deleteConversation(focused) }
     }
 
     /// §I: a single conversation, exported to Markdown or JSON. Placed in the

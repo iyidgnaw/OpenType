@@ -79,9 +79,10 @@ final class AppModel: ObservableObject {
     /// this surfaces a small warning in the Home / menubar status area. It stays
     /// set until something explicitly clears it (a subsequent successful append).
     @Published private(set) var auditWriteFailed = false
-    /// Backs the Settings "Memory" panel's manual "Consolidate now" button
-    /// (`MemoryPanelView`) — a brief, in-place success/failure indicator, not
-    /// a persistent log (that's what `memoryConsolidationRuns` is for).
+    /// Backs the 记忆 page's manual "Consolidate now" button
+    /// (`MemoryColumn` in `MemoryViews.swift`) — a brief, in-place
+    /// success/failure indicator, not a persistent log (that's what
+    /// `memoryConsolidationRuns` is for).
     @Published private(set) var consolidateNowStatus: ConsolidateNowStatus = .idle
     /// Bounded history of recent Agent (`/agent/run`) dispatches, most recent
     /// first — see `AgentRunTracking.swift`. Replaces the old
@@ -1403,6 +1404,12 @@ final class AppModel: ObservableObject {
     }
 
     private struct ConversationsListResponseBody: Decodable { let conversations: [ConversationSummary] }
+    private struct ConversationDeletionResponseBody: Decodable { let deleted: Bool }
+
+    /// Last failure from the 会话 list's delete action, shown in-place and
+    /// cleared by the next successful one — same contract as `memoryEditError`
+    /// / `mcpEditError`.
+    @Published private(set) var sessionDeleteError: String?
 
     private func refreshConversations(
         kind: String,
@@ -1473,6 +1480,53 @@ final class AppModel: ObservableObject {
     func startNewAgentConversation() {
         focusedAgentConversationId = nil
         agentConversationDetail = nil
+    }
+
+    /// §I's remaining gap, closed: `DELETE /conversations/:id` shipped in
+    /// `8e8120f` with nothing on this side calling it. This is that caller —
+    /// the 会话 `…` menu's 删除 item, after the user confirms.
+    ///
+    /// No optimism, same as `deleteMemoryTerm(id:)`/`deleteMcpServer(name:)`:
+    /// local state only forgets the row once the sidecar confirms it is
+    /// actually gone. `SessionList.afterDeleting` resolves the list and
+    /// `focusedConversation` together so a delete of the thread currently open
+    /// cannot remove the row from the list while leaving the detail column
+    /// pointing at an id that no longer exists — it clears to the same "no
+    /// thread open" state `clearFocus()`/`startNewConversation()` already use,
+    /// which is also what drops the now-stale `askConversationDetail`/
+    /// `agentConversationDetail`.
+    @discardableResult
+    func deleteConversation(_ focused: FocusedConversation) async -> Bool {
+        do {
+            let _: ConversationDeletionResponseBody = try await sidecarClient.request(
+                method: "DELETE",
+                path: "/conversations/\(focused.id)"
+            )
+            switch focused.kind {
+            case .ask:
+                let outcome = SessionList.afterDeleting(
+                    focused.id, from: askConversations, focusedConversation: focusedConversation
+                )
+                askConversations = outcome.conversations
+                focusedConversation = outcome.focusedConversation
+            case .agent:
+                let outcome = SessionList.afterDeleting(
+                    focused.id, from: agentConversations, focusedConversation: focusedConversation
+                )
+                agentConversations = outcome.conversations
+                focusedConversation = outcome.focusedConversation
+            }
+            if focusedConversation == nil {
+                startNewAskConversation()
+                startNewAgentConversation()
+            }
+            sessionDeleteError = nil
+            return true
+        } catch {
+            sessionDeleteError = ErrorMessagePresenter.message(for: error)
+            print("OpenType: failed to delete conversation \(focused.id) from sidecar: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// Explicit dismissal entry point for a live Ask, in addition to the
@@ -2883,10 +2937,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var mcpEditError: String?
 
     /// Hands a failure over to whichever surface is better placed to show it.
-    /// `McpServerEditor` calls this after a failed save: it renders the message
-    /// beside its own Save button (the provider panels' idiom), and the
-    /// panel-level banner would otherwise repeat the same sentence at the far
-    /// end of the section.
+    /// `McpServerSheet` (`McpServerViews.swift`) calls this after a failed save:
+    /// it renders the message beside its own Save button (the provider panels'
+    /// idiom), and the panel-level banner would otherwise repeat the same
+    /// sentence at the far end of the section.
     func clearMcpEditError() {
         mcpEditError = nil
     }

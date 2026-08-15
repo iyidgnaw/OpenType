@@ -141,11 +141,13 @@ extension OverlayHideBehavior {
 /// five panels taking turns. Everything except the result card is 420; the
 /// card is 640×520 (handoff §04).
 ///
-/// This supersedes `VoiceSurfacePanelLayout.size(for:)` (`Models.swift`),
-/// which still returns the pre-redesign table and is now referenced only by
-/// its own tests. Positioning still comes from `VoiceSurfacePanelLayout.frame`
-/// — the bottom-anchored geometry is unchanged, and that is what keeps the
-/// morph reading as growth rather than as a new window.
+/// This is the **only** table. `VoiceSurfacePanelLayout.size(for:)`
+/// (`Models.swift`) forwards to it rather than carrying its own numbers —
+/// there used to be two copies, each locally reasonable, and they drifting
+/// apart one state at a time is how the panel ended up with six widths.
+/// Positioning still comes from `VoiceSurfacePanelLayout.frame` — the
+/// bottom-anchored geometry is unchanged, and that is what keeps the morph
+/// reading as growth rather than as a new window.
 enum VoiceSurfacePanelMetrics {
     /// Every pre-result state. One size for all of them, so the panel holds
     /// still from the first word until it becomes the card.
@@ -669,13 +671,10 @@ final class OverlayController {
     /// Watches for `1`…`9` while a question is on screen, so a task started
     /// without touching the mouse can be answered without reaching for it.
     ///
-    /// Global as well as local for the same reason Esc is: the panel never
-    /// takes key focus, so the user is still in whatever app they dictated
-    /// from. The monitors are removed the instant an answer is sent or the
-    /// question leaves the screen, which bounds the one real cost — a bare
-    /// digit typed elsewhere while a question is open counts as an answer.
-    /// Modified keypresses (⌘1, ⌃2, …) are ignored, since those are somebody
-    /// else's shortcuts.
+    /// **Local only** — see the comment on the monitor itself for why a global
+    /// one is not an option here. The monitor is removed the instant an answer
+    /// is sent or the question leaves the screen. Modified keypresses (⌘1, ⌃2,
+    /// …) are ignored, since those are somebody else's shortcuts.
     private func installQuestionKeyMonitors(for detail: VoiceSurfaceState.AskingDetail) {
         removeQuestionKeyMonitors()
         guard let options = detail.question.options, !options.isEmpty else { return }
@@ -1175,13 +1174,13 @@ private struct OverlayView: View {
                         .foregroundStyle(
                             presentation.pastWarningThreshold
                                 ? DS.Colour.warningText
-                                : Color.secondary
+                                : DS.Colour.ink(0.45)
                         )
                 }
 
                 Text(OpenTypeL10n.text("松开结束", english: "Release to finish"))
                     .font(DS.Text.mono())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.3))
             }
 
             Text(captionText)
@@ -1223,24 +1222,24 @@ private struct OverlayView: View {
         HStack(spacing: 7) {
             Text(OpenTypeL10n.text("Tab 切换到", english: "Tab switches to"))
                 .font(DS.Text.mono())
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(DS.Colour.ink(0.35))
 
             ForEach(InputMode.visibleModes.filter { $0 != presentation.mode }) { mode in
                 Text(mode.title)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .font(DS.Text.size(11))
+                    .foregroundStyle(DS.Colour.ink(0.5))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(
-                        DS.Colour.inset,
-                        in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                        DS.Colour.ink(0.05),
+                        in: RoundedRectangle(cornerRadius: DS.Radius.tag, style: .continuous)
                     )
             }
 
             Spacer(minLength: 0)
         }
         .padding(.top, 9)
-        .dsHairline(.top)
+        .dsHairline(.top, color: DS.Colour.border)
     }
 
     private var compactContent: some View {
@@ -1287,7 +1286,7 @@ private struct OverlayView: View {
                 // outcome (handoff §Design Tokens).
                 Image(systemName: "checkmark")
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.55))
 
                 Text(deliveryHeadline)
                     .font(DS.Text.body(.semibold))
@@ -1298,16 +1297,16 @@ private struct OverlayView: View {
                 if presentation.state == .success {
                     Text(OpenTypeL10n.text("也已复制", english: "Copied too"))
                         .font(DS.Text.mono())
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(DS.Colour.ink(0.35))
                 }
             }
 
             if !presentation.deliveryBody.isEmpty {
                 Text(presentation.deliveryBody)
-                    .font(DS.Text.caption())
-                    // 1.55 line height at 12pt.
+                    .font(DS.Text.size(12.5))
+                    // 1.55 line height at 12.5pt.
                     .lineSpacing(4)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.55))
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1324,12 +1323,12 @@ private struct OverlayView: View {
                         .id(hint.startedAt)
                     Text(hint.text)
                         .font(DS.Text.mono())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Colour.ink(0.45))
                         .lineLimit(1)
                         .layoutPriority(1)
                 }
                 .padding(.top, 9)
-                .dsHairline(.top)
+                .dsHairline(.top, color: DS.Colour.border)
             }
         }
         .padding(.horizontal, 16)
@@ -1401,35 +1400,43 @@ private struct OverlayView: View {
 /// identity colour, the two speech modes carry the accent. It is the only
 /// place on the pill where the mode is named, so it has to be readable at a
 /// glance rather than merely present.
+/// The fill and the text are separate colours because the handoff darkens the
+/// text on the **blue** tag only: 听写/问答 is `#0A5CC8` on 12%-accent, while
+/// Agent is `#4B45E8` on 12% of itself, undarkened. One `colour` used for both
+/// roles made the blue tag's text a step too light.
 private struct ModeTag: View {
     let title: String
-    let colour: Color
+    let fill: Color
+    let tint: Color
 
     init(mode: InputMode) {
         title = mode.title
-        colour = mode == .agent ? DS.Colour.agent : DS.Colour.accent
+        fill = mode == .agent ? DS.Colour.agent : DS.Colour.accent
+        tint = mode == .agent ? DS.Colour.agent : DS.Colour.askTag
     }
 
     init(kind: AskPanelState.Kind) {
         switch kind {
         case .agent:
             title = InputMode.agent.title
-            colour = DS.Colour.agent
+            fill = DS.Colour.agent
+            tint = DS.Colour.agent
         case .ask:
             title = InputMode.ask.title
-            colour = DS.Colour.accent
+            fill = DS.Colour.accent
+            tint = DS.Colour.askTag
         }
     }
 
     var body: some View {
         Text(title)
             .font(DS.Text.groupLabel())
-            .foregroundStyle(colour)
+            .foregroundStyle(tint)
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
             .background(
-                colour.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                fill.opacity(0.12),
+                in: RoundedRectangle(cornerRadius: DS.Radius.tag, style: .continuous)
             )
     }
 }
@@ -1450,7 +1457,7 @@ private struct WindowCountdownBar: View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(DS.Colour.border)
+                    .fill(DS.Colour.ink(0.08))
                 Capsule()
                     .fill(DS.Colour.accent)
                     .frame(width: max(0, proxy.size.width * remaining))
@@ -1509,8 +1516,7 @@ private struct WorkingPill: View {
                     // not chrome.
                     Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
                         .buttonStyle(.plain)
-                        .font(DS.Text.caption())
-                        .fontWeight(.medium)
+                        .font(DS.Text.size(11.5, .medium))
                         .foregroundStyle(DS.Colour.accent)
                 }
             }
@@ -1518,7 +1524,7 @@ private struct WorkingPill: View {
             if !task.isEmpty {
                 Text(task)
                     .font(DS.Text.body())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.6))
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1535,7 +1541,7 @@ private struct WorkingPill: View {
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(DS.Colour.agent)
                     Text(toolLine.map { "\($0.tool) · \($0.summary)" } ?? fallbackLine)
-                        .font(DS.Text.mono())
+                        .font(DS.Text.mono(11.5))
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1547,7 +1553,7 @@ private struct WorkingPill: View {
             .padding(.vertical, 9)
             .background(
                 DS.Colour.inset,
-                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                in: RoundedRectangle(cornerRadius: DS.Radius.nested, style: .continuous)
             )
             .animation(.easeOut(duration: 0.16), value: toolLine)
         }
@@ -1575,7 +1581,7 @@ private struct ElapsedLabel: View {
         TimelineView(.periodic(from: startedAt, by: 1)) { context in
             Text(text(at: context.date))
                 .font(DS.Text.mono())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(DS.Colour.ink(0.45))
         }
     }
 
@@ -1707,7 +1713,7 @@ private struct IndeterminateBar: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Capsule().fill(DS.Colour.border)
+                Capsule().fill(DS.Colour.ink(0.08))
                 Capsule()
                     .fill(DS.Colour.accent)
                     .frame(width: proxy.size.width * 0.36)
@@ -1754,14 +1760,13 @@ private struct AgentQuestionCard: View {
 
                 Button(OpenTypeL10n.text("停止", english: "Stop"), action: onStop)
                     .buttonStyle(.plain)
-                    .font(DS.Text.caption())
-                    .fontWeight(.medium)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Text.size(11.5, .medium))
+                    .foregroundStyle(DS.Colour.ink(0.45))
             }
 
             Text(detail.question.question)
-                .font(DS.Text.body())
-                // 1.55 line height at 13pt.
+                .font(DS.Text.size(13.5))
+                // 1.55 line height at 13.5pt.
                 .lineSpacing(4)
                 .fixedSize(horizontal: false, vertical: true)
                 .lineLimit(2)
@@ -1773,7 +1778,7 @@ private struct AgentQuestionCard: View {
                             .overlay(alignment: .top) {
                                 if index > 0 {
                                     Rectangle()
-                                        .fill(DS.Colour.hairline)
+                                        .fill(DS.Colour.border)
                                         .frame(height: 0.75)
                                 }
                             }
@@ -1785,7 +1790,7 @@ private struct AgentQuestionCard: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
-                        .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                        .strokeBorder(DS.Colour.ink(0.09), lineWidth: 0.75)
                 )
             }
 
@@ -1820,13 +1825,13 @@ private struct AgentQuestionCard: View {
                 if let description = option.description, !description.isEmpty {
                     Text(description)
                         .font(DS.Text.mono())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Colour.ink(0.4))
                         .lineLimit(1)
                 }
 
                 Text("\(number)")
                     .font(DS.Text.mono())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.3))
             }
             .padding(.horizontal, 12)
             .frame(height: 36)
@@ -1852,7 +1857,7 @@ private struct AgentQuestionCard: View {
                 text: $custom
             )
             .textFieldStyle(.plain)
-            .font(DS.Text.caption())
+            .font(DS.Text.size(12.5))
             .onSubmit(submitCustom)
         }
         .padding(.horizontal, 11)
@@ -1989,7 +1994,7 @@ private struct VoiceSurfaceCard: View {
             header
                 .padding(.horizontal, 18)
                 .padding(.vertical, 14)
-                .dsHairline(.bottom)
+                .dsHairline(.bottom, color: DS.Colour.border)
 
             content
                 .padding(.horizontal, 18)
@@ -2000,7 +2005,7 @@ private struct VoiceSurfaceCard: View {
                 .padding(.horizontal, 18)
                 .padding(.top, 12)
                 .padding(.bottom, 16)
-                .dsHairline(.top)
+                .dsHairline(.top, color: DS.Colour.border)
         }
         .frame(
             width: VoiceSurfacePanelMetrics.card.width,
@@ -2025,7 +2030,7 @@ private struct VoiceSurfaceCard: View {
             if let summary = runSummary {
                 Text(summary)
                     .font(DS.Text.mono())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.35))
             }
 
             iconButton("arrow.up.forward.app", help: OpenTypeL10n.text(
@@ -2061,7 +2066,7 @@ private struct VoiceSurfaceCard: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(DS.Colour.ink(0.4))
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
@@ -2076,8 +2081,8 @@ private struct VoiceSurfaceCard: View {
                     HStack(spacing: 0) {
                         Spacer(minLength: 0)
                         Text(card.query)
-                            .font(DS.Text.caption())
-                            // 1.55 line height at 12pt.
+                            .font(DS.Text.size(12.5))
+                            // 1.55 line height at 12.5pt.
                             .lineSpacing(4)
                             .foregroundStyle(.white)
                             .textSelection(.enabled)
@@ -2093,7 +2098,7 @@ private struct VoiceSurfaceCard: View {
                     stepLog
                 }
 
-                AssistantMarkdownView(markdown: card.body, fontSize: 13)
+                AssistantMarkdownView(markdown: card.body, fontSize: 13.5)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.trailing, 4)
@@ -2113,7 +2118,7 @@ private struct VoiceSurfaceCard: View {
                 HStack(spacing: 8) {
                     Image(systemName: stepsExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(DS.Colour.ink(0.4))
                         .frame(width: 12)
                     Text(OpenTypeL10n.text(
                         "执行了 \(card.steps.count) 步",
@@ -2121,13 +2126,13 @@ private struct VoiceSurfaceCard: View {
                     ))
                     .font(DS.Text.caption())
                     .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.55))
 
                     Spacer(minLength: 8)
 
                     Text(toolNames)
                         .font(DS.Text.mono())
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(DS.Colour.ink(0.35))
                         .lineLimit(1)
                         .truncationMode(.head)
                 }
@@ -2173,11 +2178,11 @@ private struct VoiceSurfaceCard: View {
         // option list gets.
         .background(
             DS.Colour.card.opacity(0.5),
-            in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+            in: RoundedRectangle(cornerRadius: DS.Radius.nested, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
-                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: DS.Radius.nested, style: .continuous)
+                .strokeBorder(DS.Colour.ink(0.08), lineWidth: 0.75)
         )
     }
 
@@ -2205,12 +2210,12 @@ private struct VoiceSurfaceCard: View {
                 ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
                     Button(action.title) { perform(action) }
                         .buttonStyle(.plain)
-                        .font(DS.Text.caption())
-                        .foregroundStyle(.secondary)
+                        .font(DS.Text.size(11.5))
+                        .foregroundStyle(DS.Colour.ink(0.6))
                         .padding(.horizontal, 10)
                         .frame(height: 24)
                         .background(
-                            DS.Colour.inset,
+                            DS.Colour.ink(0.05),
                             in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
                         )
                 }
@@ -2221,12 +2226,12 @@ private struct VoiceSurfaceCard: View {
                     onCopy(card.body)
                 }
                 .buttonStyle(.plain)
-                .font(DS.Text.caption())
-                .foregroundStyle(.secondary)
+                .font(DS.Text.size(11.5))
+                .foregroundStyle(DS.Colour.ink(0.6))
                 .padding(.horizontal, 10)
                 .frame(height: 24)
                 .background(
-                    DS.Colour.inset,
+                    DS.Colour.ink(0.05),
                     in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
                 )
             }
@@ -2273,11 +2278,11 @@ private struct VoiceSurfaceCard: View {
                         .frame(width: 28, height: 28)
                         .background(
                             DS.Colour.card,
-                            in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: DS.Radius.block, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
-                                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                            RoundedRectangle(cornerRadius: DS.Radius.block, style: .continuous)
+                                .strokeBorder(DS.Colour.ink(0.09), lineWidth: 0.75)
                         )
                 )
             }
@@ -2285,14 +2290,16 @@ private struct VoiceSurfaceCard: View {
             .help(OpenTypeL10n.text("口述追问", english: "Dictate a follow-up"))
 
             Button(action: submitDraft) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        DS.Colour.accent.opacity(draft.isEmpty ? 0.35 : 1),
-                        in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
-                    )
+                DS.Shadow.accentControl(
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            DS.Colour.accent.opacity(draft.isEmpty ? 0.35 : 1),
+                            in: RoundedRectangle(cornerRadius: DS.Radius.block, style: .continuous)
+                        )
+                )
             }
             .buttonStyle(.plain)
             .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -2302,11 +2309,11 @@ private struct VoiceSurfaceCard: View {
         .padding(.vertical, 9)
         .background(
             DS.Colour.card.opacity(0.7),
-            in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+            in: RoundedRectangle(cornerRadius: DS.Radius.sheet, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
-                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+            RoundedRectangle(cornerRadius: DS.Radius.sheet, style: .continuous)
+                .strokeBorder(DS.Colour.ink(0.09), lineWidth: 0.75)
         )
     }
 
@@ -2327,7 +2334,7 @@ private struct UserBubbleShape: Shape {
     private let tail: CGFloat = 4
 
     func path(in rect: CGRect) -> Path {
-        let radius = min(DS.Radius.card, min(rect.width, rect.height) / 2)
+        let radius = min(DS.Radius.sheet, min(rect.width, rect.height) / 2)
         var path = Path()
         path.move(to: CGPoint(x: rect.minX + radius, y: rect.minY))
         path.addLine(to: CGPoint(x: rect.maxX - radius, y: rect.minY))

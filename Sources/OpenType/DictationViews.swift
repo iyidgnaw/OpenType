@@ -17,19 +17,6 @@ import SwiftUI
 /// `UsageStats.Summary` is the band. Nothing on this screen is stored for the
 /// sake of being shown.
 
-// MARK: - Missing type step
-
-/// 11pt regular, non-monospaced.
-///
-/// The one step the design uses that `DS.Text` has no token for — `DS` has
-/// 11pt only as `groupLabel()` (semibold) and as `mono()`. The design sets
-/// figure notes, source-app names and the band's disclaimer at 11pt regular in
-/// the system face, and semibold at that size reads as a heading rather than as
-/// an aside. Declared once here rather than written as a literal at each call
-/// site so there is still a single definition; it belongs in
-/// `DesignTokens.swift` the next time that file is open for editing.
-private func dsNote() -> Font { .system(size: 11) }
-
 // MARK: - The page
 
 /// The 听写 page: header, the week's stats band, then one card per day.
@@ -164,8 +151,8 @@ struct DictationColumn: View {
                 // 15pt, and regular rather than `DS.Text.section()`'s semibold:
                 // the token's weight is for headings, and a semibold glyph reads
                 // heavier than the mock's icon at the same size.
-                .font(.system(size: 15))
-                .foregroundStyle(.secondary)
+                .font(DS.Text.size(15))
+                .foregroundStyle(DS.Colour.ink(0.5))
             TextField(
                 OpenTypeL10n.text("搜索转写内容", english: "Search transcripts"),
                 text: $query
@@ -221,8 +208,8 @@ struct DictationColumn: View {
                     // 14pt: the mock's `unfold_more`. Off `DS.Text`'s scale
                     // because the scale sizes text, and this is a glyph sized
                     // against the 26pt control it sits in.
-                    .font(.system(size: 14))
-                    .foregroundStyle(.tertiary)
+                    .font(DS.Text.size(14))
+                    .foregroundStyle(DS.Colour.ink(0.35))
             }
             .padding(.horizontal, 11)
             .frame(height: 26)
@@ -339,8 +326,8 @@ private struct DictationDayGroup: View {
             Text(group.title)
                 .font(DS.Text.groupLabel())
                 .tracking(DS.Tracking.groupLabel)
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 4)
+                .foregroundStyle(DS.Colour.ink(0.42))
+                .padding(.horizontal, DS.Space.labelInset)
 
             VStack(spacing: 0) {
                 ForEach(Array(group.entries.enumerated()), id: \.element.id) { index, entry in
@@ -378,10 +365,10 @@ private struct DictationRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(DictationFormat.time.string(from: entry.createdAt))
                     .font(DS.Text.mono())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.45))
                 Text(entry.applicationName)
-                    .font(dsNote())
-                    .foregroundStyle(.tertiary)
+                    .font(DS.Text.size(11))
+                    .foregroundStyle(DS.Colour.ink(0.35))
                     .lineLimit(1)
             }
             .frame(width: 64, alignment: .leading)
@@ -443,8 +430,8 @@ private struct DictationRowAction: View {
                 // 16pt regular. `DS.Text.section()` is 15pt semibold — the wrong
                 // size and the wrong weight for a glyph, and it was reading as a
                 // heading-sized mark next to 13pt body.
-                .font(.system(size: 16))
-                .foregroundStyle(rowHovering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                .font(DS.Text.size(16))
+                .foregroundStyle(rowHovering ? DS.Colour.ink(0.55) : DS.Colour.ink(0.32))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -493,14 +480,14 @@ struct UsageStatsBand: View {
                     rather than across languages.
                     """
             ))
-            .font(dsNote())
+            .font(DS.Text.size(11))
             .lineSpacing(4)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(DS.Colour.ink(0.45))
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, narrow ? DS.Space.content : 20)
             .padding(.vertical, 9)
-            .background(DS.Colour.inset)
+            .background(DS.Colour.insetSurface)
             .dsHairline(.top)
         }
         .clipShape(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
@@ -584,16 +571,16 @@ struct UsageStatsBand: View {
                         Text(trend.label)
                             .font(DS.Text.mono())
                     }
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.42))
                 }
             }
             Text(item.label)
                 .font(DS.Text.caption().weight(.medium))
-                .foregroundStyle(item.hasData ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .foregroundStyle(item.hasData ? AnyShapeStyle(.primary) : AnyShapeStyle(DS.Colour.ink(0.5)))
                 .fixedSize(horizontal: false, vertical: true)
             Text(item.note)
-                .font(dsNote())
-                .foregroundStyle(.tertiary)
+                .font(DS.Text.size(11))
+                .foregroundStyle(DS.Colour.ink(0.42))
                 .fixedSize(horizontal: false, vertical: true)
         }
         // Natural width, not an equal share of the row. The mock packs the four
@@ -607,8 +594,11 @@ struct UsageStatsBand: View {
         VStack(alignment: .leading, spacing: 2) {
             value(item, wide: false)
             Text(item.label)
-                .font(DS.Text.caption())
-                .foregroundStyle(item.hasData ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                // 11.5 in 06B, against the wide band's 12/500. The narrow card
+                // is 394pt and the label has to survive 「每 100 字纠错」 in one
+                // line; the half point is the handoff's answer to that.
+                .font(DS.Text.size(11.5))
+                .foregroundStyle(item.hasData ? AnyShapeStyle(.primary) : AnyShapeStyle(DS.Colour.ink(0.5)))
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
         }
@@ -628,15 +618,15 @@ struct UsageStatsBand: View {
                 // Resolved against this step rather than reusing
                 // `DS.Tracking.title`, which is the same `-.02em` already
                 // resolved at 20pt and so 0.12pt short at 26.
-                .tracking(wide ? -0.02 * 26 : 0)
+                .tracking(wide ? DS.Tracking.em(-0.02, at: 26) : 0)
                 .foregroundStyle(item.valueStyle)
             if let unit = item.unit {
                 Text(unit)
                     // Medium, not `DS.Text.section()`'s semibold: the handoff
                     // draws the unit a weight lighter than the number so it
-                    // reads as prose. `.secondary` carries the same demotion.
+                    // reads as prose. The .45 ink carries the same demotion.
                     .font(wide ? DS.Text.section().weight(.medium) : DS.Text.body(.medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.45))
                     .padding(.leading, wide ? 2 : 0)
             }
         }
@@ -650,7 +640,7 @@ struct UsageStatsBand: View {
         Text(OpenTypeL10n.text("最近 7 天", english: "Last 7 days"))
             .font(DS.Text.groupLabel())
             .tracking(DS.Tracking.groupLabel)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(DS.Colour.ink(0.42))
     }
 
     private var deliveriesLabel: some View {
@@ -659,7 +649,7 @@ struct UsageStatsBand: View {
             english: "\(summary.deliveries) deliveries"
         ))
         .font(DS.Text.mono())
-        .foregroundStyle(.tertiary)
+        .foregroundStyle(DS.Colour.ink(0.4))
     }
 
     private var barStrip: some View {
@@ -708,7 +698,7 @@ struct UsageStatsBand: View {
             // whole point is that 每 100 字纠错 owns the only accent.
             Text(DictationFormat.weekday.string(from: day))
                 .font(DS.Text.mono(10))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(DS.Colour.ink(0.35))
                 .lineLimit(1)
         }
         .help(isToday
@@ -738,7 +728,10 @@ struct UsageStatsBand: View {
         var trend: Trend?
 
         var valueStyle: AnyShapeStyle {
-            if !hasData { return AnyShapeStyle(HierarchicalShapeStyle.tertiary) }
+            // 06C prints an unmeasurable figure at .3, and explicitly does not
+            // let the accent through — a dimmed 「—」 in blue would read as a
+            // value rather than as an absence.
+            if !hasData { return AnyShapeStyle(DS.Colour.ink(0.3)) }
             return accented ? AnyShapeStyle(DS.Colour.accent) : AnyShapeStyle(.primary)
         }
     }
@@ -892,20 +885,23 @@ private struct UnevenRoundedTop: Shape {
 // MARK: - Header control chrome
 
 private extension View {
-    /// The 26pt white pill the header's search field and source filter share.
+    /// The 26pt white pill the header's search field and source filter share:
+    /// r7, a `rgba(0,0,0,.09)` edge, the control lift.
     ///
-    /// `DS.Radius.control` rather than the mock's 7pt: the token table assigns
-    /// 6pt to 「控件：按钮、筛选 chip、分段控件、下拉、标签」, and both of these are
-    /// controls. Keeping the closed scale is worth more than the 1pt.
+    /// 7 and .09, not the 6 and .07 an earlier pass rounded them to. A header
+    /// control sits on `#F5F5F3` rather than inside a card, so it has almost no
+    /// value contrast to rest on — the extra point of radius and the two
+    /// hundredths of alpha are what the handoff spends on making it read as a
+    /// control at all.
     func dsHeaderControl() -> some View {
         DS.Shadow.control(
             background(
                 DS.Colour.card,
-                in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                in: RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
-                    .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
+                    .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
             )
         )
     }

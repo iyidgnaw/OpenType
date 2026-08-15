@@ -18,15 +18,27 @@ Status key:
 | ⚠ | deliberate deviation, reason given in the row |
 | ⛔ | cannot be fixed from `SessionsViews.swift` — needs a change elsewhere (listed in §12) |
 
-Counts: **208 properties checked — 150 already matched, 15 fixed here, 12 documented deviations,
-31 blocked outside this file** (of which 8 are the narrow layout being correctly implemented but
-never switched on, §12.1).
+Counts: **208 properties checked — 148 already matched, 15 fixed in pass 1 + 28 more in pass 2,
+4 documented deviations, 31 blocked outside this file** (of which 8 are the narrow layout being
+correctly implemented but never switched on, §12.1). Pass 2 is the 稿子优先 reversal below; 27 of
+its 28 rows are collapses being undone, and the 28th (the row preview, §5.3) is §12.3 landing.
+
+**Second pass, 2026-08-15 — 稿子优先.** The first pass mapped the mockup's literal values onto the
+README's closed scale: 11.5pt chips became 12, the 8pt inner block became 10, the 5pt tag became 6,
+six border alphas became one, and every `rgba(28,28,30,α)` between `.30` and `.45` became
+`.tertiary`. The owner reversed that ruling — the mockup wins unconditionally — so all eighteen
+collapses are undone here and `DesignTokens.swift` carries a named step for each. Rows that were
+marked ✅ on the strength of the README's `.secondary` / `.tertiary` mapping are now 🔧, because
+that mapping is what was overruled: `.tertiary` is ≈ .26 against a design that draws .42, which is
+40% short of the ink on every group label in the app.
 
 The app is pinned to the light appearance (`OpenTypeApp`), so every design colour below is a
-literal target, not an adaptive one. Where a row says `.secondary` / `.tertiary` matches an
-`rgba(28,28,30,.5)`-ish value, that is the README's own sanctioned mapping
-(文字 次 → `.secondary`, 文字 三级 → `.tertiary`); SwiftUI's hierarchical styles land within a few
-percent of the design alphas and are not individually re-listed as deviations.
+literal target, not an adaptive one — including the borders, which moved from
+`Color.primary.opacity(α)` to `Color.black.opacity(α)` in the same pass. `labelColor` is already
+black at 0.85, so the old expression resolved `rgba(0,0,0,.07)` to 0.0595.
+
+Ink is written `ink(α)` below, meaning `DS.Colour.ink(α)` — literal `#1C1C1E` at the handoff's own
+alpha.
 
 ---
 
@@ -39,10 +51,10 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Window | narrow reference size | 460×720 | `DS.Size.windowMinWidth` = 460 | ✅ |
 | Layout | breakpoint | 窄 ≤ 560 / 宽 ≥ 900, README recommends `< 720pt` → narrow | `DS.Size.narrowBreakpoint` = 720 | ✅ |
 | Sidebar | width | 212 | `DS.Size.sidebar` = 212 | ✅ |
-| Sidebar | right border | 0.75pt `rgba(0,0,0,.09)` | `DS.Colour.hairline` (0.06) in `SidebarShell` | ⛔ (§12.2) |
+| Sidebar | right border | 0.75pt `rgba(0,0,0,.09)` | `DS.Colour.hairline` (0.06) in `SidebarShell` | ⛔ (§12.2) — `DS.Colour.controlBorder` now exists for it |
 | List column | width | 334 | `DS.Size.list` = 334 | ✅ |
 | List column | background | `#F5F5F3` | `DS.Colour.canvas` | ✅ |
-| List column | right border | 0.75pt `rgba(0,0,0,.07)` | `DS.Colour.hairline` (0.06) in `SidebarShell` | ⛔ (§12.2) |
+| List column | right border | 0.75pt `rgba(0,0,0,.07)` | `DS.Colour.hairline` (0.06) in `SidebarShell` | ⛔ (§12.2) — should be `DS.Colour.border` |
 | Thread column | width | `flex:1; min-width:0` | `.frame(maxWidth: .infinity)` | ✅ |
 | Thread column | background | `#fff` | `DS.Colour.card` = `Color.white` | ✅ |
 | All columns | header strip height | 52 | `DS.Size.headerHeight` = 52 | ✅ |
@@ -58,14 +70,14 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Brand row | padding | `2px 12px 14px` | `.padding(.vertical, 2)`, `.horizontal 12`, `.bottom 14` | ✅ |
 | Brand row | gap | 9 | `HStack(spacing: 8)` | ⛔ (§12.2) |
 | Brand mark | size / radius | 24×24, r7 | 24×24, r7 | ✅ |
-| Brand mark | gradient | `135deg #0D73FA → #5751FA` | `.topLeading→.bottomTrailing`, accent → `DS.Colour.agent` `#4B45E8` | ⛔ (§12.2) — `#5751FA` has no token |
+| Brand mark | gradient | `135deg #0D73FA → #5751FA` | `.topLeading→.bottomTrailing`, accent → `DS.Colour.agent` `#4B45E8` | ⛔ (§12.2) — `DS.Colour.brandGradientEnd` now exists; the `SidebarShell` edit does not |
 | Brand glyph | name / size / colour | `graphic_eq`→`waveform`, 14px, white | `waveform`, 14pt `.medium`, white | ✅ |
 | Brand label | size / weight | 13 / 600 | `DS.Text.body(.semibold)` | ✅ |
 | Nav list | padding / item gap | `0 10`, gap 2 | `.horizontal 10`, `VStack(spacing: 2)` | ✅ |
 | Nav item | height / radius / padding / gap | 30, r6, `0 9`, gap 9 | 30, `DS.Radius.control` 6, 9, 9 | ✅ |
 | Nav item | icon / label size | 16 / 13 | 16 / 13 | ✅ |
 | Nav item selected | fill / text | `#0D73FA`, white, 500 | accent, white, `.medium` | ✅ |
-| Nav item unselected | icon colour | `rgba(28,28,30,.55)` | `.secondary` | ✅ |
+| Nav item unselected | icon colour | `rgba(28,28,30,.55)` | `.secondary` (≈ .50) | ⛔ (§12.2) — `ink(0.55)` now exists; the `SidebarShell` edit does not |
 | Nav badge | font | 11 mono | `DS.Text.mono()` | ✅ |
 | Nav badge selected | colour | `rgba(255,255,255,.7)` | `.white.opacity(0.85)` | ⛔ (§12.2) |
 | 记忆 attention dot | size / colour | 5pt `#E8973A` | `DS.Colour.warning` = `#E8973A`, 5pt | ✅ |
@@ -95,12 +107,12 @@ percent of the design alphas and are not individually re-listed as deviations.
 | 会话 title | letter-spacing | `-.02em` = −0.4pt | `DS.Tracking.title` = −0.4 | ✅ |
 | 会话 title | flex | `flex:1` | `.frame(maxWidth: .infinity, alignment: .leading)` | ✅ |
 | 会话 title | copy | 「会话」 | 「会话」/ "Sessions" | ✅ |
-| Search button | size / radius | 26×26, r7 | 26×26, `SessionMetrics.iconButtonRadius` 7 | ✅ |
-| Search button | fill / border | `#fff`, 0.75 `rgba(0,0,0,.09)` | `DS.Colour.card`, `DS.Colour.border` (0.07) | ⚠ token — the design tokens table declares 0.07 the single global border value; the mockup's local 0.09 is not a fifth border weight |
+| Search button | size / radius | 26×26, r7 | 26×26, `DS.Radius.iconButton` 7 | ✅ (the private constant now points at the shared token) |
+| Search button | fill / border | `#fff`, 0.75 `rgba(0,0,0,.09)` | `DS.Colour.card`, `DS.Colour.controlBorder` (0.09) | 🔧 was `DS.Colour.border` (0.07). A 26pt white square on `#F5F5F3` has almost no value contrast to sit on, which is what the extra two hundredths buy |
 | Search button | shadow | `0 1px 1.5px rgba(0,0,0,.05)` | `DS.Shadow.control` = 0.05, r0.75, y1 | ✅ |
-| Search icon | name / size / colour | `search`→`magnifyingglass`, 16px, `rgba(28,28,30,.6)` | was 14 `.medium`; now `SessionMetrics.glyph` 16, `.secondary` | 🔧 |
+| Search icon | name / size / colour | `search`→`magnifyingglass`, 16px, `rgba(28,28,30,.6)` | `SessionMetrics.glyph` 16, `ink(0.6)` | 🔧 size in pass 1, colour in pass 2 (was `.secondary`) |
 | Add button | size / radius / fill | 26×26, r7, `#0D73FA` | 26×26, 7, accent | ✅ |
-| Add button | shadow | `0 1px 2px rgba(13,115,250,.3)` | accent 0.30, r1, y1 | ✅ |
+| Add button | shadow | `0 1px 2px rgba(13,115,250,.3)` | `DS.Shadow.accentControl` = accent 0.30, r1, y1 | ✅ (the inline literal became a named token in pass 2; same value) |
 | Add icon | name / size / colour | `add`→`plus`, 16px, `#fff` | was 14 `.medium`; now 16, white | 🔧 |
 
 ---
@@ -114,11 +126,11 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Chip | height | 22 | `.frame(height: 22)` | ✅ |
 | Chip | horizontal padding | 10 | `.padding(.horizontal, 10)` | ✅ |
 | Chip | radius | 6 | `DS.Radius.control` = 6 | ✅ |
-| Chip | font size | 11.5 | `DS.Text.caption()` = 12 | ⚠ scale — 11.5 is not one of the six steps; 12 is the nearest, and the whole point of the closed scale is that it does not gain a 6.5th value per screen |
+| Chip | font size | 11.5 | `DS.Text.size(11.5)` | 🔧 was `DS.Text.caption()` = 12. A 22pt chip with a 10pt gutter is sized around this half point; rounding it up is what crowded three chips into a 334pt column |
 | Chip selected | fill | `#1C1C1E` | `Color(nsColor: .labelColor)` | ✅ — the README maps 文字主 `#1C1C1E` → `.primary`; `.labelColor` is that colour |
 | Chip selected | text / weight | `#fff` / 500 | `DS.Colour.card` white / `.medium` | ✅ |
-| Chip unselected | fill | `rgba(0,0,0,.055)` | `DS.Colour.hairline` = 0.06 | ✅ |
-| Chip unselected | text | `rgba(28,28,30,.6)` | `.secondary` | ✅ |
+| Chip unselected | fill | `rgba(0,0,0,.055)` | `DS.Colour.chipFill` = 0.055 | 🔧 was `DS.Colour.hairline` (0.06) |
+| Chip unselected | text | `rgba(28,28,30,.6)` | `ink(0.6)` | 🔧 was `.secondary` (≈ .50) |
 | Chip dot | size / gap | 5pt, gap 5 | `DS.Size.statusDot` 5, spacing 5 | ✅ |
 | Chip dot | Agent colour | `#4B45E8` | `DS.Colour.agent` | ✅ |
 | Chip dot | 问答 colour | `#0D73FA` | `DS.Colour.accent` | ✅ |
@@ -146,7 +158,7 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Pulse dot | animation | `otPulse 1.4s ease-in-out infinite`, opacity 1→.35, scale 1→.82 | `.easeInOut(1.4).repeatForever(autoreverses:)`, 1→0.35, 1→0.82 | ✅ |
 | Label | size / weight | 11 / 600 | `DS.Text.groupLabel()` | ✅ |
 | Label | letter-spacing | `.05em` = 0.55pt | `DS.Tracking.groupLabel` = 0.55 | ✅ |
-| Label | colour | `rgba(28,28,30,.42)` | `.tertiary` | ✅ |
+| Label | colour | `rgba(28,28,30,.42)` | `ink(0.42)` | 🔧 colour was `.tertiary`; same `SessionGroupLabel` as §5.3 |
 | Label | copy | 「进行中」 | 「进行中」/ "In progress" | ✅ |
 
 ### 5.2 · 进行中 card (`SessionRunningCard`)
@@ -162,20 +174,20 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Task text | size / weight | 13 / 500 | `DS.Text.body(.medium)` | ✅ |
 | Task text | line height | 1.5 | `.lineSpacing(4)` | ✅ |
 | Inner block | fill | `#F5F5F3` | `DS.Colour.canvas` | ✅ |
-| Inner block | radius | 8 | `DS.Radius.inset` = 10 | ⚠ scale — 8 is not one of the four radii; the README's own table puts 卡内嵌套块 at 9–10 |
+| Inner block | radius | 8 | `DS.Radius.block` = 8 | 🔧 was `DS.Radius.inset` (10) |
 | Inner block | padding / gap | `8 10`, gap 5 | 8/10, spacing 5 | ✅ |
 | Tool row | gap | 7 | `HStack(spacing: 7)` | ✅ |
 | Tool icon | name / size / colour | `build`→`wrench.and.screwdriver`, 13px, `#4B45E8` | same, 13pt, `DS.Colour.agent` | ✅ |
 | Tool text | font | 11 mono | `DS.Text.mono()` | ✅ |
-| Tool text | colour | `rgba(28,28,30,.7)` | `.primary` (≈0.85) | ⚠ no 0.7 token; `.primary` is the nearer of the two available steps (`.secondary` ≈ 0.5) |
+| Tool text | colour | `rgba(28,28,30,.7)` | `ink(0.7)` | 🔧 was `.primary` (≈ .85) |
 | Tool text | truncation | single line, ellipsis | `.lineLimit(1)`, `.truncationMode(.tail)` | ✅ |
 | Progress bar | height / radius | 2, r99 | `.frame(height: 2)`, `Capsule()` | ✅ |
 | Progress bar | track / fill | `rgba(0,0,0,.07)` / accent | `DS.Colour.border` / accent | ✅ |
 | Progress bar | determinacy | 58% fill | indeterminate sweep | ⚠ `/agent/run` never reports a step total, so any percentage would be invented; the sweep says "still going", which is all that is known |
 | Bottom row | left text font | 10 mono | `DS.Text.mono(10)` | ✅ |
-| Bottom row | left text colour | `rgba(28,28,30,.42)` | `.tertiary` | ✅ |
+| Bottom row | left text colour | `rgba(28,28,30,.42)` | `ink(0.42)` | 🔧 was `.tertiary` (≈ .26) |
 | Bottom row | copy | 「第 6 步 · 已用 42s」 | 「第 N 步 · 已用 …」, live `TimelineView` | ✅ |
-| 停止 | size / weight | 11 / 500 | `DS.Text.groupLabel()` = 11 / 600 | ⚠ token gap (§11.1) — no 11/medium step exists |
+| 停止 | size / weight | 11 / 500 | `DS.Text.size(11, .medium)` | 🔧 was `DS.Text.groupLabel()` (11/600). Semibold made the one action in the card the loudest thing in it |
 | 停止 | colour | `#0D73FA` | accent | ✅ |
 | 停止 | copy | 「停止」 | 「停止」/ "Stop" | ✅ |
 
@@ -185,7 +197,7 @@ percent of the design alphas and are not individually re-listed as deviations.
 |---|---|---|---|---|
 | Group | gap | 7 | `VStack(spacing: 7)` | ✅ |
 | Group label | padding | `0 4` | `.horizontal 4` | ✅ |
-| Group label | size / weight / tracking / colour | 11 / 600 / `.05em` / `rgba(28,28,30,.42)` | `DS.Text.groupLabel()`, 0.55, `.tertiary` | ✅ |
+| Group label | size / weight / tracking / colour | 11 / 600 / `.05em` / `rgba(28,28,30,.42)` | `DS.Text.groupLabel()`, 0.55, `ink(0.42)` | 🔧 colour was `.tertiary` (≈ .26). Same fix in 进行中 §5.1 |
 | Group label | copy | 「今天」「昨天」 | 今天 / 昨天 / dated, locale-aware | ✅ |
 | Card | one card holds N rows | not one card per row | `VStack(spacing: 0)` of rows, clipped, `.dsCard()` | ✅ |
 | Card | fill / border / radius | `#fff`, 0.75 `rgba(0,0,0,.07)`, 14 | `dsCard()` | ✅ |
@@ -199,9 +211,9 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Row line 1 | type dot | 5pt, Agent `#4B45E8` / 问答 `#0D73FA` | `DS.Size.statusDot`, `SessionKindStyle.dot` | ✅ |
 | Row line 1 | title size / weight | 13 / 500 | `DS.Text.body(.medium)` | ✅ |
 | Row line 1 | title truncation | single line, ellipsis | `.lineLimit(1)`, `.tail` | ✅ |
-| Row line 1 | time font / colour | 11 mono, `rgba(28,28,30,.35)` | `DS.Text.mono()`, `.tertiary` | ✅ |
+| Row line 1 | time font / colour | 11 mono, `rgba(28,28,30,.35)` | `DS.Text.mono()`, `ink(0.35)` | 🔧 colour was `.tertiary` |
 | Row line 1 | time format | `14:32` | `HH:mm` | ✅ |
-| Row line 2 | preview text | 12, `rgba(28,28,30,.5)`, lh 1.45, `padding-left:12`, ellipsis | not rendered | ⛔ (§12.3) — `GET /conversations` returns id/kind/title/createdAt/updatedAt only; there is no truthful preview to draw |
+| Row line 2 | preview text | 12, `rgba(28,28,30,.5)`, lh 1.45, `padding-left:12`, ellipsis | `DS.Text.caption()`, `ink(0.5)`, leading 12, `.lineLimit(1)` `.tail` | ✅ — §12.3 landed since pass 1: `ConversationSummary.preview` exists and the row draws it. Colour fixed from `.secondary` in pass 2 |
 
 ---
 
@@ -215,16 +227,16 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Header | gap | 10 wide / 8 narrow | was 10 both; now `narrow ? 8 : 10` | 🔧 |
 | Header | bottom border | 0.75 `rgba(0,0,0,.07)` | was `dsHairline` (0.06); now `SessionEdgeBorder` = `DS.Colour.border` | 🔧 |
 | Kind tag | padding | `2 7` | `.vertical 2`, `.horizontal 7` | ✅ |
-| Kind tag | radius | 5 | `DS.Radius.control` = 6 | ⚠ scale — the README's radius table puts 标签 at 6 |
+| Kind tag | radius | 5 | `DS.Radius.tag` = 5 | 🔧 was `DS.Radius.control` (6) |
 | Kind tag | size / weight | 11 / 600 | `DS.Text.groupLabel()` | ✅ |
-| Kind tag | Agent fill / text | `rgba(75,69,232,.11)` / `#4B45E8` | `agent.opacity(0.12)` / `agent` | ✅ (README specifies .12) |
-| Kind tag | 问答 fill / text | `rgba(13,115,250,.11)` / `#0A5CC8` | `accent.opacity(0.11)` / `rgb(0.039,0.361,0.784)` = `#0A5CC8` | ✅ |
+| Kind tag | Agent fill / text | `rgba(75,69,232,.11)` / `#4B45E8` | `agent.opacity(0.11)` / `agent` | 🔧 was .12 on the README's word; the markup says .11 for both tags |
+| Kind tag | 问答 fill / text | `rgba(13,115,250,.11)` / `#0A5CC8` | `accent.opacity(0.11)` / `DS.Colour.askTag` = `#0A5CC8` | ✅ (the private literal became a shared token in pass 2; same value) |
 | Kind tag | copy | 「Agent」「问答」 | `SessionKind.title` | ✅ |
-| Title | size / weight | 14 / 600 | `DS.Text.section()` = 15 / 600 | ⚠ scale — there is no 14 step; 15/semibold is the nearest, and per-screen exceptions are how the previous twelve-size UI happened |
+| Title | size / weight | 14 / 600 | `DS.Text.size(14, .semibold)` | 🔧 was `DS.Text.section()` (15/600) |
 | Title | flex / truncation | `flex:1`, single line, ellipsis | `.frame(maxWidth: .infinity)`, `.lineLimit(1)` | ✅ |
-| Copy button | icon / size / colour | `content_copy`→`doc.on.doc`, 17px, `rgba(28,28,30,.45)` | `doc.on.doc`, 17, `.secondary` | ✅ |
+| Copy button | icon / size / colour | `content_copy`→`doc.on.doc`, 17px, `rgba(28,28,30,.45)` | `doc.on.doc`, 17, `ink(0.45)` | 🔧 colour was `.secondary` |
 | Copy button | present in narrow | absent in 2B | was always shown; now `if !narrow` | 🔧 |
-| More button | icon / size / colour | `more_horiz`→`ellipsis`, 17px | `ellipsis`, 17, `.secondary` | ✅ |
+| More button | icon / size / colour | `more_horiz`→`ellipsis`, 17px, `rgba(28,28,30,.45)` | `ellipsis`, 17, `ink(0.45)` | 🔧 colour was `.secondary` |
 | Back chevron (narrow) | icon / size / colour | `chevron_left`→`chevron.left`, 20px, `#0D73FA` | `chevron.left`, 20, accent — correct but unreachable | ⛔ (§12.1) |
 
 ---
@@ -270,19 +282,19 @@ percent of the design alphas and are not individually re-listed as deviations.
 |---|---|---|---|---|
 | Block | gap to the answer below it | 12 | was 20 (both were LazyVStack children); now wrapped in `VStack(spacing: 12)` | 🔧 |
 | Block | border / radius | 0.75 `rgba(0,0,0,.07)`, r10 | `DS.Colour.border`, `DS.Radius.inset` 10 | ✅ |
-| Block | fill | `#FAFAF8` | `DS.Colour.inset` = `primary.opacity(0.035)` | ✅ (README sanctions either) |
+| Block | fill | `#FAFAF8` | `DS.Colour.insetSurface` = `#FAFAF8` | 🔧 was `DS.Colour.inset` (`primary.opacity(0.035)` ≈ `#F6F6F6`) — 4 levels darker and with the warm channel gone |
 | Block | clip | `overflow:hidden` | rounded background + stroke | ✅ |
 | Header | padding / gap | `8 12`, gap 8 | `.horizontal 12`, `.vertical 8`, spacing 8 | ✅ |
 | Header | bottom separator | 0.75 `rgba(0,0,0,.06)` | `DS.Colour.hairline`, only while expanded | ⚠ a collapsed block has nothing under the line to separate it from |
-| Header | chevron | `expand_more`→`chevron.down`, 14px, `rgba(28,28,30,.45)` | `chevron.down` / `chevron.right`, 14, `.tertiary` | ✅ |
-| Header | label size / weight / colour | 12 / 600 / `rgba(28,28,30,.6)` | `DS.Text.caption()` + `.semibold`, `.secondary` | ✅ |
+| Header | chevron | `expand_more`→`chevron.down`, 14px, `rgba(28,28,30,.45)` | `chevron.down` / `chevron.right`, 14, `ink(0.45)` | 🔧 colour was `.tertiary` |
+| Header | label size / weight / colour | 12 / 600 / `rgba(28,28,30,.6)` | `DS.Text.caption()` + `.semibold`, `ink(0.6)` | 🔧 colour was `.secondary` |
 | Header | label copy | 「执行了 7 步」 | 「执行了 N 步」 | ✅ |
-| Header | elapsed font / colour | 11 mono, `rgba(28,28,30,.4)` | `DS.Text.mono()`, `.tertiary` | ✅ |
+| Header | elapsed font / colour | 11 mono, `rgba(28,28,30,.4)` | `DS.Text.mono()`, `ink(0.4)` | 🔧 colour was `.tertiary` |
 | Body | padding / row gap | `9 12`, gap 6 | `.horizontal 12`, `.vertical 9`, spacing 6 | ✅ |
 | Row | baseline alignment / gap | `align-items:baseline`, gap 9 | `.firstTextBaseline`, spacing 9 | ✅ |
-| Row col 1 | font / width / colour | 10.5 mono, 16pt, `rgba(28,28,30,.3)` | `DS.Text.mono(10.5)`, `width: 16`, `.tertiary` | ✅ |
-| Row col 2 | font / width / tint | 10.5 mono, 64pt, `#4B45E8` (read-only tools `rgba(28,28,30,.45)`) | `DS.Text.mono(10.5)`, `width: 64`, `DS.Colour.agent` for side-effecting, `.secondary` otherwise | ✅ |
-| Row col 3 | font / colour / truncation | 11 mono, `rgba(28,28,30,.6)`, ellipsis | `DS.Text.mono()`, `.secondary`, `.lineLimit(1)` `.tail` | ✅ |
+| Row col 1 | font / width / colour | 10.5 mono, 16pt, `rgba(28,28,30,.3)` | `DS.Text.mono(10.5)`, `width: 16`, `ink(0.3)` | 🔧 colour was `.tertiary` |
+| Row col 2 | font / width / tint | 10.5 mono, 64pt, `#4B45E8` (read-only tools `rgba(28,28,30,.45)`) | `DS.Text.mono(10.5)`, `width: 64`, `DS.Colour.agent` for side-effecting, `ink(0.45)` otherwise | 🔧 read-only tint was `.secondary` |
+| Row col 3 | font / colour / truncation | 11 mono, `rgba(28,28,30,.6)`, ellipsis | `DS.Text.mono()`, `ink(0.6)`, `.lineLimit(1)` `.tail` | 🔧 colour was `.secondary` |
 
 ### 7.4 · Working row (2B 正在检索)
 
@@ -291,7 +303,7 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Row | gap | 7 | `HStack(spacing: 7)` | ✅ |
 | Dot | size / colour | 5pt accent | `SessionPulseDot` | ✅ |
 | Dot | animation period | 1.2s | was 1.4s (shared with 进行中); now `SessionPulseDot(period: 1.2)` | 🔧 |
-| Text | font / colour | 11 mono, `rgba(28,28,30,.4)` | `DS.Text.mono()`, `.tertiary` | ✅ |
+| Text | font / colour | 11 mono, `rgba(28,28,30,.4)` | `DS.Text.mono()`, `ink(0.4)` | 🔧 colour was `.tertiary` |
 | Text | copy | 「正在检索…」 | 「正在检索…」 | ✅ |
 
 ---
@@ -304,18 +316,18 @@ percent of the design alphas and are not individually re-listed as deviations.
 | Composer | padding narrow | `12 16 16` | top 12, horizontal 16, bottom 16 | ✅ |
 | Composer | top border | 0.75 `rgba(0,0,0,.07)` | was `dsHairline` (0.06); now `SessionEdgeBorder` = `DS.Colour.border` | 🔧 |
 | Container | fill | `#F5F5F3` | `DS.Colour.canvas` | ✅ |
-| Container | border | 0.75 `rgba(0,0,0,.08)` | `DS.Colour.border` (0.07) | ⚠ token — 0.07 is the declared single border value |
+| Container | border | 0.75 `rgba(0,0,0,.08)` | `DS.Colour.borderStrong` (0.08) | 🔧 was `DS.Colour.border` (0.07). The composer is the same colour as the page behind it, so its own edge is the only thing that says where it starts |
 | Container | radius | 14 | `DS.Radius.card` | ✅ |
 | Container | padding | `10 10 10 14` | leading 14, trailing 10, vertical 10 | ✅ |
 | Container | alignment / gap | `flex-end`, gap 10 | `HStack(alignment: .bottom, spacing: 10)` | ✅ |
-| Placeholder | size / colour | 13, `rgba(28,28,30,.35)` | `DS.Text.body()`, `.tertiary` | ✅ |
+| Placeholder | size / colour | 13, `rgba(28,28,30,.35)` | `DS.Text.body()`, `ink(0.35)` | 🔧 colour was `.tertiary` |
 | Placeholder | bottom padding | 6 | `.padding(.bottom, 6)` | ✅ |
 | Placeholder | copy | 「接着说,或按住 ⌥ 口述…」 | 「接着说，或按住 ⌥ 口述…」 | ⚠ fullwidth comma — the mockup uses ASCII `,` in every Chinese string in the file, which is an authoring artifact, not a typographic instruction |
-| Mic button | size / radius | 30×30, r9 | 30×30, `SessionMetrics.composerButtonRadius` 9 | ✅ |
-| Mic button | fill / border / shadow | `#fff`, 0.75 `rgba(0,0,0,.09)`, `0 1px 1.5px rgba(0,0,0,.05)` | `DS.Colour.card`, `DS.Colour.border`, `DS.Shadow.control` | ✅ |
+| Mic button | size / radius | 30×30, r9 | 30×30, `DS.Radius.nested` 9 | ✅ (the private constant now points at the shared token) |
+| Mic button | fill / border / shadow | `#fff`, 0.75 `rgba(0,0,0,.09)`, `0 1px 1.5px rgba(0,0,0,.05)` | `DS.Colour.card`, `DS.Colour.controlBorder` (0.09), `DS.Shadow.control` | 🔧 border was `DS.Colour.border` (0.07) |
 | Mic icon | name / size / colour | `mic` filled → `mic.fill`, 16px, accent | was 15 `.medium`; now `SessionMetrics.glyph` 16 | 🔧 |
-| Send button | size / radius / fill | 30×30, r9, `#0D73FA` | 30×30, 9, accent | ✅ |
-| Send button | shadow | `0 1px 2px rgba(13,115,250,.3)` | accent 0.30, r1, y1 | ✅ |
+| Send button | size / radius / fill | 30×30, r9, `#0D73FA` | 30×30, `DS.Radius.nested` 9, accent | ✅ |
+| Send button | shadow | `0 1px 2px rgba(13,115,250,.3)` | `DS.Shadow.accentControl` | ✅ |
 | Send icon | name / size / colour | `arrow_upward`→`arrow.up`, 16px, `#fff` | was 15 `.medium`; now 16, white | 🔧 |
 
 ---
@@ -355,7 +367,7 @@ next reviewer does not have to work out whether they were invented by accident.
 
 | Element | What it is | Metrics used |
 |---|---|---|
-| Search field | The design draws the 搜索 button but no results screen. It filters what is already rendered, exactly like the chips. | 26pt tall, r7, white + `DS.Colour.border`, 16pt gutter, `DS.Text.caption()` |
+| Search field | The design draws the 搜索 button but no results screen. It filters what is already rendered, exactly like the chips. | 3A's search box wholesale rather than a fourth header-control spec: 26pt, r7, 11pt gutter, `DS.Colour.controlBorder`, `DS.Shadow.control`, 15pt `ink(0.5)` glyph, 12pt `ink(0.4)` placeholder |
 | Empty list | A blank column reads as broken. | `DS.Text.caption()`, `.secondary`, centred |
 | Thread placeholder | The wide layout with nothing selected. | `bubble.left.and.bubble.right.fill` 22pt `.quaternary` + caption |
 | Loading thread | Between opening a row and the fetch returning. | small `ProgressView` + caption |
@@ -364,25 +376,29 @@ next reviewer does not have to work out whether they were invented by accident.
 
 ---
 
-## 11 · Token gaps
+## 11 · Token gaps — closed 2026-08-15
 
-Values the design asks for that `DesignTokens.swift` has no step for. Reported rather than
-hardcoded — a one-off literal is exactly what the closed scale exists to prevent.
+All four are gone. `DesignTokens.swift` gained a named step for each, in the 稿子优先 pass:
 
-1. **11pt / medium text.** The 停止 action (§5.2) is 11/500 in the design. The scale's only 11pt
-   step is `groupLabel` (11/600, meant for 今天 / 进行中). A small-action step —
-   `DS.Text.action()` = 11 `.medium` — would cover this and probably the equivalents on other
-   screens.
-2. **A 0.7-alpha foreground.** The running card's tool line (§5.2) is `rgba(28,28,30,.7)`, between
-   `.primary` (≈0.85) and `.secondary` (≈0.5). Only worth adding if other screens hit it too.
-3. **`#5751FA`, the brand gradient's end stop.** `DS.Colour.agent` is `#4B45E8` and is documented
-   as "type tags and tool names, nothing else", so the brand mark is currently borrowing it.
-   (Sidebar, out of scope — noted here because the token is what is missing.)
-4. **A gutter-parameterised `ColumnHeader`.** Not a token, but the same shape of problem:
-   `ColumnHeader` hardcodes 24/14, and the handoff gives different columns different gutters
-   (list 16/16, thread 20/20 and 10/14, and 听写/记忆/设置 have their own). This screen now uses a
-   private `SessionColumnHeader`; if the other screens hit the same wall, `ColumnHeader` should
-   take `leading`/`trailing` instead and the private copy should be deleted.
+1. **11pt / medium text** → `DS.Text.size(11, .medium)`. The generic `size(_:_:)` covers every
+   off-scale SF size the handoff sets, and its doc comment lists the set in use.
+2. **A 0.7-alpha foreground** → `DS.Colour.ink(0.7)`. `ink(_:)` is the whole
+   `rgba(28,28,30,α)` axis, built on literal `#1C1C1E`; the handoff uses thirteen alphas and
+   SwiftUI's hierarchical styles offer three.
+3. **`#5751FA`** → `DS.Colour.brandGradientEnd`, with a doc comment saying it is not an identity
+   colour. The sidebar still has to be changed to use it (§12.2 d) — the token was the blocker,
+   the edit is out of scope for this file.
+4. **A gutter-parameterised `ColumnHeader`.** Still open, still not a token. `SessionColumnHeader`
+   remains private to this file. 听写 hit the same wall from the other direction — its header gap
+   is 14 against `ColumnHeader`'s 8 — and worked around it by nesting an `HStack`. Two screens
+   working around one component is the signal to change the component; that is a `SidebarShell`
+   change and belongs to whoever owns it.
+
+What the pass added beyond these four, for the other screens: radii `4 / 5 / 7 / 8 / 9 / 13 / 99`,
+border alphas `.08 / .09 / .10 / .12 / .14`, fills `.045 / .05 / .055`, the `#FAFAF8 / #F7F7F5 /
+#F1F1EF / #F0F0EE / #EDEDEA` surfaces, `#0A5CC8`, the white-on-panel alphas, four more shadows
+(`accentControl` / `lifted` / `knob` / `field`), `Tracking.em(_:at:)`, `Space.rowHWide` and
+`Space.labelInset`.
 
 ---
 
@@ -411,10 +427,10 @@ is in place and correct the moment it is wired.
 
 | # | What | Design | Current |
 |---|---|---|---|
-| a | rail right border | 0.75 `rgba(0,0,0,.09)` | `DS.Colour.hairline` (0.06) |
+| a | rail right border | 0.75 `rgba(0,0,0,.09)` | `DS.Colour.hairline` (0.06) — token: `DS.Colour.controlBorder` |
 | b | list-column right border | 0.75 `rgba(0,0,0,.07)` | `DS.Colour.hairline` (0.06) — should be `DS.Colour.border` |
 | c | brand row gap | 9 | 8 |
-| d | brand gradient end stop | `#5751FA` | `DS.Colour.agent` `#4B45E8` (needs the token in §11.3) |
+| d | brand gradient end stop | `#5751FA` | `DS.Colour.agent` `#4B45E8` — token: `DS.Colour.brandGradientEnd` |
 | e | selected nav badge | `rgba(255,255,255,.7)` | `.white.opacity(0.85)` |
 | f | mode card shadow | `0 1px 2px rgba(0,0,0,.04)` | none (`DS.Shadow.card` exists) |
 | g | mode card top-row gap | 7 | 8 |
@@ -427,19 +443,11 @@ is in place and correct the moment it is wired.
 (c/e/g/h are shared with whichever agent is auditing the sidebar itself — these are reported, not
 claimed.)
 
-### 12.3 · Conversation preview line (sidecar + `Models.swift`)
+### 12.3 · Conversation preview line — **done**
 
-The design's list row is two lines; the second is a message preview. `GET /conversations`
-(`sidecar/src/memory/conversations.ts:99` — `SELECT id, kind, title, createdAt, updatedAt`) does
-not return one, and `ConversationSummary` (`Models.swift:1525`) has no field for it. To land the
-row as drawn:
-
-1. `listConversations` selects the latest message's content, truncated, as `preview`;
-2. `ConversationSummary` gains `let preview: String?`;
-3. `SessionRow` renders it at 12pt `.secondary`, `lineSpacing` for 1.45, `padding-leading: 12`,
-   single line with tail truncation.
-
-Step 3 is a five-line change in this file and is ready to make as soon as 1–2 exist.
+All three steps landed between the two passes: `listConversations` returns a truncated `preview`,
+`ConversationSummary` carries it, and `SessionRow` draws it at 12pt `ink(0.5)` with a 12pt leading
+inset and tail truncation. Kept here so the §5.3 row's history is legible.
 
 ### 12.4 · `AssistantMarkdownView.swift` (assistant body typography)
 

@@ -10,10 +10,14 @@ import SwiftUI
 /// there having been two fetches. One list, and a 5pt dot carries the
 /// distinction.
 ///
-/// Everything here is measured from the handoff. Where the mockup and
-/// `DesignTokens.swift` disagree on a value, the token wins and the deviation
-/// is commented — a closed scale that gets one exception per screen is not a
-/// scale.
+/// Everything here is measured from the handoff, and where the mockup and a
+/// token disagree the **mockup wins** — 稿子优先, the owner's ruling of
+/// 2026-08-15. An earlier pass rounded the markup's 11.5pt chips to 12, its 8pt
+/// inner block to 10, its 5pt tag to 6 and its six border alphas to one, on the
+/// theory that a closed scale is worth a point here and there. Across six
+/// screens that stopped being a rounding convention and became the
+/// implementation overruling the design, so the literals are back and
+/// `DesignTokens.swift` carries a step for each of them.
 
 // MARK: - List column
 
@@ -84,26 +88,26 @@ struct SessionsListColumn: View {
     /// rendered, exactly like the chips, rather than opening a search mode with
     /// its own state.
     private var searchField: some View {
+        // Undrawn, so it borrows 3A's search box wholesale rather than
+        // inventing a fourth header-control spec: 26pt, r7, 11pt gutter, a .09
+        // edge and the control lift.
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 12))
-                .foregroundStyle(.tertiary)
+                .font(DS.Text.size(15))
+                .foregroundStyle(DS.Colour.ink(0.5))
             TextField(
                 "",
                 text: $query,
                 prompt: Text(OpenTypeL10n.text("搜索会话标题", english: "Search titles"))
                     .font(DS.Text.caption())
+                    .foregroundColor(DS.Colour.ink(0.4))
             )
             .textFieldStyle(.plain)
             .font(DS.Text.caption())
         }
-        .padding(.horizontal, 8)
-        .frame(height: 26)
-        .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: SessionMetrics.iconButtonRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: SessionMetrics.iconButtonRadius, style: .continuous)
-                .strokeBorder(DS.Colour.border, lineWidth: 0.75)
-        )
+        .padding(.horizontal, 11)
+        .frame(height: DS.Size.headerControl)
+        .modifier(SessionHeaderControlChrome())
         .padding(.horizontal, DS.Space.content)
         .padding(.bottom, 8)
     }
@@ -169,7 +173,7 @@ struct SessionsListColumn: View {
                 SessionPulseDot()
                 SessionGroupLabel(OpenTypeL10n.text("进行中", english: "In progress"))
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, DS.Space.labelInset)
 
             ForEach(runningRuns) { run in
                 SessionRunningCard(run: run) {
@@ -182,7 +186,7 @@ struct SessionsListColumn: View {
     private func dayGroup(_ day: SessionDay) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             SessionGroupLabel(day.title)
-                .padding(.horizontal, 4)
+                .padding(.horizontal, DS.Space.labelInset)
 
             VStack(spacing: 0) {
                 ForEach(Array(day.conversations.enumerated()), id: \.element.id) { index, conversation in
@@ -310,10 +314,9 @@ struct SessionThreadColumn: View {
             SessionKindTag(kind: focused.kind)
 
             Text(detail(for: focused)?.title ?? OpenTypeL10n.text("对话", english: "Conversation"))
-                // The mockup sets 14pt here; the scale has no 14, and one
-                // exception per screen is how the old twelve-size UI
-                // happened. 15/semibold is the nearest step.
-                .font(DS.Text.section())
+                // 14/600 — a heading for one conversation, deliberately a step
+                // under the 15/600 that heads a section of a page.
+                .font(DS.Text.size(14, .semibold))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -325,8 +328,8 @@ struct SessionThreadColumn: View {
                     copyTranscript(focused)
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.secondary)
+                        .font(DS.Text.size(17))
+                        .foregroundStyle(DS.Colour.ink(0.45))
                 }
                 .buttonStyle(.plain)
                 .help(OpenTypeL10n.text("复制全文", english: "Copy transcript"))
@@ -341,8 +344,8 @@ struct SessionThreadColumn: View {
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 17))
-                    .foregroundStyle(.secondary)
+                    .font(DS.Text.size(17))
+                    .foregroundStyle(DS.Colour.ink(0.45))
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
@@ -479,7 +482,7 @@ struct SessionThreadColumn: View {
                     if draft.isEmpty {
                         Text(OpenTypeL10n.text("接着说，或按住 ⌥ 口述…", english: "Keep talking, or hold ⌥ to dictate…"))
                             .font(DS.Text.body())
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(DS.Colour.ink(0.35))
                             .allowsHitTesting(false)
                     }
                     TextField("", text: $draft, axis: .vertical)
@@ -504,8 +507,11 @@ struct SessionThreadColumn: View {
             .padding(.vertical, 10)
             .background(DS.Colour.canvas, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
             .overlay(
+                // .08, a step heavier than a card's own edge: the composer is
+                // the same colour as the page behind it, so its own edge is the
+                // only thing that says where it starts.
                 RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
-                    .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                    .strokeBorder(DS.Colour.borderStrong, lineWidth: 0.75)
             )
         }
         .padding(.horizontal, narrow ? DS.Space.content : 20)
@@ -583,17 +589,17 @@ struct StepLog: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 14, weight: .regular))
-                        .foregroundStyle(.tertiary)
+                        .font(DS.Text.size(14))
+                        .foregroundStyle(DS.Colour.ink(0.45))
                     Text(OpenTypeL10n.text("执行了 \(entries.count) 步", english: "\(entries.count) steps"))
                         .font(DS.Text.caption())
                         .fontWeight(.semibold)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Colour.ink(0.6))
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if let elapsed {
                         Text(elapsed)
                             .font(DS.Text.mono())
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(DS.Colour.ink(0.4))
                     }
                 }
                 .padding(.horizontal, 12)
@@ -609,7 +615,7 @@ struct StepLog: View {
                         HStack(alignment: .firstTextBaseline, spacing: 9) {
                             Text(String(format: "%02d", index + 1))
                                 .font(DS.Text.mono(10.5))
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(DS.Colour.ink(0.3))
                                 .frame(width: 16, alignment: .leading)
                             Text(entry.label)
                                 .font(DS.Text.mono(10.5))
@@ -618,7 +624,7 @@ struct StepLog: View {
                                 .frame(width: 64, alignment: .leading)
                             Text(entry.detail)
                                 .font(DS.Text.mono())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(DS.Colour.ink(0.6))
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -629,7 +635,7 @@ struct StepLog: View {
                 .padding(.vertical, 9)
             }
         }
-        .background(DS.Colour.inset, in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous))
+        .background(DS.Colour.insetSurface, in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
                 .strokeBorder(DS.Colour.border, lineWidth: 0.75)
@@ -670,7 +676,7 @@ private struct StepLogEntry {
             // tint on every row would stop saying which is which.
             tint = StepLogEntry.sideEffecting.contains(call.name)
                 ? DS.Colour.agent
-                : Color.secondary
+                : StepLogEntry.readOnlyTint
         case "error":
             label = OpenTypeL10n.text("错误", english: "error")
             self.detail = detail
@@ -678,15 +684,15 @@ private struct StepLogEntry {
         case "tool_result":
             label = OpenTypeL10n.text("结果", english: "result")
             self.detail = detail
-            tint = Color.secondary
+            tint = StepLogEntry.readOnlyTint
         case "done":
             label = OpenTypeL10n.text("完成", english: "done")
             self.detail = detail
-            tint = Color.secondary
+            tint = StepLogEntry.readOnlyTint
         default:
             label = type
             self.detail = detail
-            tint = Color.secondary
+            tint = StepLogEntry.readOnlyTint
         }
     }
 
@@ -694,6 +700,10 @@ private struct StepLogEntry {
     /// catalogue (`sidecar/src/agent/coreTools.ts`), named without the
     /// `opentype__` prefix the parser has already stripped.
     private static let sideEffecting: Set<String> = ["bash", "python", "open_file", "remember_fact"]
+
+    /// What a read-only step's tool column is set in — the handoff's
+    /// `rgba(28,28,30,.45)`, one step lighter than the detail beside it.
+    private static let readOnlyTint = DS.Colour.ink(0.45)
 
     /// Splits `Calling opentype__bash({"command":"…"})` into `bash` and the
     /// argument string.
@@ -755,7 +765,7 @@ private struct SessionRunningCard: View {
                         .foregroundStyle(DS.Colour.agent)
                     Text(currentTool)
                         .font(DS.Text.mono())
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(DS.Colour.ink(0.7))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -769,12 +779,15 @@ private struct SessionRunningCard: View {
                     TimelineView(.periodic(from: run.dispatchedAt, by: 1)) { context in
                         Text(stepAndElapsed(now: context.date))
                             .font(DS.Text.mono(10))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(DS.Colour.ink(0.42))
                     }
                     Spacer(minLength: 0)
                     Button(action: onStop) {
                         Text(OpenTypeL10n.text("停止", english: "Stop"))
-                            .font(DS.Text.groupLabel())
+                            // 11/500, not the 11/600 group-label step: this is
+                            // an action sitting beside a 10pt mono line, and
+                            // semibold makes it the loudest thing in the card.
+                            .font(DS.Text.size(11, .medium))
                             .foregroundStyle(DS.Colour.accent)
                     }
                     .buttonStyle(.plain)
@@ -782,7 +795,7 @@ private struct SessionRunningCard: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(DS.Colour.canvas, in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous))
+            .background(DS.Colour.canvas, in: RoundedRectangle(cornerRadius: DS.Radius.block, style: .continuous))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 13)
@@ -848,7 +861,7 @@ private struct SessionRow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Text(SessionFormat.time(millis: conversation.updatedAt))
                         .font(DS.Text.mono())
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(DS.Colour.ink(0.35))
                 }
                 // The second line: the newest message, whoever wrote it.
                 // Without it every row read as an unanswered question, which
@@ -858,7 +871,7 @@ private struct SessionRow: View {
                 if let preview = conversation.preview, !preview.isEmpty {
                     Text(preview)
                         .font(DS.Text.caption())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Colour.ink(0.5))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .padding(.leading, 12)
@@ -890,9 +903,12 @@ private struct SessionFilterChip: View {
                         .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
                 }
                 Text(filter.title)
-                    .font(DS.Text.caption())
-                    .fontWeight(selected ? .medium : .regular)
-                    .foregroundStyle(selected ? AnyShapeStyle(DS.Colour.card) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+                    // 11.5, not the 12pt caption step. A chip 22pt tall with
+                    // 10pt of gutter is sized around this half point, and
+                    // rounding it up is what made the three chips crowd the
+                    // 334pt column.
+                    .font(DS.Text.size(11.5, selected ? .medium : .regular))
+                    .foregroundStyle(selected ? DS.Colour.card : DS.Colour.ink(0.6))
             }
             .padding(.horizontal, 10)
             .frame(height: 22)
@@ -900,7 +916,7 @@ private struct SessionFilterChip: View {
                 // `labelColor` rather than a literal #1C1C1E: the selected chip
                 // has to invert in dark mode, and a fixed near-black there is
                 // white text on black in a white-on-dark window.
-                selected ? AnyShapeStyle(Color(nsColor: .labelColor)) : AnyShapeStyle(DS.Colour.hairline),
+                selected ? AnyShapeStyle(Color(nsColor: .labelColor)) : AnyShapeStyle(DS.Colour.chipFill),
                 in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
             )
             .contentShape(Rectangle())
@@ -1011,7 +1027,7 @@ private struct SessionKindTag: View {
             .padding(.vertical, 2)
             .background(
                 SessionKindStyle.tagFill(kind),
-                in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                in: RoundedRectangle(cornerRadius: DS.Radius.tag, style: .continuous)
             )
             .fixedSize()
     }
@@ -1026,7 +1042,7 @@ private struct SessionWorkingRow: View {
             SessionPulseDot(period: 1.2)
             Text(OpenTypeL10n.text("正在检索…", english: "Working…"))
                 .font(DS.Text.mono())
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(DS.Colour.ink(0.4))
         }
     }
 }
@@ -1043,7 +1059,7 @@ private struct SessionComposerButton: View {
                 .font(.system(size: SessionMetrics.glyph))
                 .foregroundStyle(filled ? AnyShapeStyle(Color.white) : AnyShapeStyle(DS.Colour.accent))
                 .frame(width: 30, height: 30)
-                .modifier(SessionButtonChrome(filled: filled, radius: SessionMetrics.composerButtonRadius))
+                .modifier(SessionButtonChrome(filled: filled, radius: DS.Radius.nested))
         }
         .buttonStyle(.plain)
         .help(help)
@@ -1064,34 +1080,57 @@ private struct SessionIconButton: View {
                 .font(.system(size: SessionMetrics.glyph))
                 .foregroundStyle(filled ? AnyShapeStyle(Color.white) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
                 .frame(width: 26, height: 26)
-                .modifier(SessionButtonChrome(filled: filled, radius: SessionMetrics.iconButtonRadius))
+                .modifier(SessionButtonChrome(filled: filled, radius: DS.Radius.smallControl))
         }
         .buttonStyle(.plain)
         .help(help)
     }
 }
 
-/// Either an accent-filled button or a white one with a hairline border, plus
-/// the small-control lift both take.
+/// Either an accent-filled button with its coloured lift, or a white one with a
+/// `.09` edge and the neutral one.
+///
+/// `.09` rather than the card edge's `.07`: a 26pt white square on a `#F5F5F3`
+/// page has almost no value contrast to sit on, so the handoff spends two
+/// hundredths of alpha on the outline instead.
 private struct SessionButtonChrome: ViewModifier {
     let filled: Bool
     let radius: CGFloat
 
     func body(content: Content) -> some View {
         if filled {
-            content
-                .background(DS.Colour.accent, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-                .shadow(color: DS.Colour.accent.opacity(0.30), radius: 1, x: 0, y: 1)
+            DS.Shadow.accentControl(
+                content
+                    .background(DS.Colour.accent, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            )
         } else {
             DS.Shadow.control(
                 content
                     .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                            .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
                     )
             )
         }
+    }
+}
+
+/// The same white pill as an unfilled `SessionButtonChrome`, for the header
+/// controls that are a field rather than a button.
+private struct SessionHeaderControlChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        DS.Shadow.control(
+            content
+                .background(
+                    DS.Colour.card,
+                    in: RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
+                        .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
+                )
+        )
     }
 }
 
@@ -1104,7 +1143,9 @@ private struct SessionGroupLabel: View {
         Text(text)
             .font(DS.Text.groupLabel())
             .tracking(DS.Tracking.groupLabel)
-            .foregroundStyle(.tertiary)
+            // .42, the α the handoff sets on every group label in the app.
+            // `.tertiary` is ≈ .26 and reads as disabled at 11pt.
+            .foregroundStyle(DS.Colour.ink(0.42))
     }
 }
 
@@ -1215,11 +1256,6 @@ private struct SessionConditionalHairline: ViewModifier {
 // MARK: - Values
 
 private enum SessionMetrics {
-    /// The handoff's radius table puts icon buttons at 7pt inside its 9–10pt
-    /// band; `SidebarShell` already uses 7 for the same role.
-    static let iconButtonRadius: CGFloat = 7
-    /// And 9 for the 30–34pt round buttons, matching `SidebarModeButton`.
-    static let composerButtonRadius: CGFloat = 9
     /// The glyph inside a 26 or 30pt button. One value because the handoff uses
     /// one (`font-size:16px` for 搜索 / 新对话 / 口述 / 发送 alike) — the button
     /// grows, the icon in it does not.
@@ -1235,9 +1271,11 @@ private enum SessionKindStyle {
         }
     }
 
+    /// Both at 11%. The README says 12 for the Agent tag; §01's markup says 11
+    /// for both, and the markup is what ships.
     static func tagFill(_ kind: SessionKind) -> Color {
         switch kind {
-        case .agent: return DS.Colour.agent.opacity(0.12)
+        case .agent: return DS.Colour.agent.opacity(0.11)
         case .ask: return DS.Colour.accent.opacity(0.11)
         }
     }
@@ -1247,7 +1285,7 @@ private enum SessionKindStyle {
     static func tagText(_ kind: SessionKind) -> Color {
         switch kind {
         case .agent: return DS.Colour.agent
-        case .ask: return Color(red: 0.039, green: 0.361, blue: 0.784)
+        case .ask: return DS.Colour.askTag
         }
     }
 }

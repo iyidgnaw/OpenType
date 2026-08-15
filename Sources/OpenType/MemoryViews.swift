@@ -92,7 +92,7 @@ struct MemoryColumn: View {
             // moments, so they take turns rather than stacking up.
             Text(statusLine)
                 .font(DS.Text.mono())
-                .foregroundStyle(statusIsFailure ? AnyShapeStyle(DS.Colour.warningText) : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
+                .foregroundStyle(statusIsFailure ? DS.Colour.warningText : DS.Colour.ink(0.4))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -111,10 +111,10 @@ struct MemoryColumn: View {
                 }
                 .padding(.horizontal, 11)
                 .frame(height: MemoryMetrics.headerControlHeight)
-                .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous))
+                .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
-                        .strokeBorder(DS.Colour.border, lineWidth: 0.75)
+                    RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
+                        .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
                 )
                 .modifier(ControlShadow())
                 .contentShape(Rectangle())
@@ -182,7 +182,7 @@ private struct MemoryDictionaryCard: View {
                     showingAddTerm = true
                 } label: {
                     Text(OpenTypeL10n.text("添加词条", english: "Add term"))
-                        .font(DS.Text.caption().weight(.medium))
+                        .font(DS.Text.size(11.5, .medium))
                         .foregroundStyle(DS.Colour.accent)
                 }
                 .buttonStyle(.plain)
@@ -255,7 +255,7 @@ private struct MemoryTermRowView: View {
                      ? OpenTypeL10n.text("无别名", english: "no aliases")
                      : term.aliases.joined(separator: " · "))
                     .font(DS.Text.mono())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.42))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -264,7 +264,7 @@ private struct MemoryTermRowView: View {
             VStack(alignment: .trailing, spacing: 4) {
                 Text(String(format: "%.0f%%", term.confidence * 100))
                     .font(DS.Text.mono(MemoryMetrics.confidenceType))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.4))
                 ConfidenceBar(value: term.confidence)
             }
             .frame(width: MemoryMetrics.confidenceColumn, alignment: .trailing)
@@ -352,6 +352,10 @@ private struct MemoryTermRowView: View {
 /// Drawn in a neutral tone rather than the accent: this is a description of
 /// what the app currently believes, not a thing that wants the user's
 /// attention. Colour on this page is reserved for the unconfirmed rows.
+///
+/// The track and the fill are two different alphas off two different bases —
+/// `rgba(0,0,0,.08)` under `rgba(28,28,30,.32)` — which is why neither is
+/// `DS.Colour.border` and neither is a hierarchical style.
 private struct ConfidenceBar: View {
     let value: Double
 
@@ -359,10 +363,10 @@ private struct ConfidenceBar: View {
         let fraction = min(max(value, 0), 1)
         ZStack(alignment: .leading) {
             Capsule()
-                .fill(DS.Colour.border)
+                .fill(DS.Colour.borderStrong)
                 .frame(width: MemoryMetrics.barWidth, height: MemoryMetrics.barHeight)
             Capsule()
-                .fill(.tertiary)
+                .fill(DS.Colour.ink(0.32))
                 .frame(width: MemoryMetrics.barWidth * fraction, height: MemoryMetrics.barHeight)
         }
         .accessibilityHidden(true)
@@ -455,7 +459,7 @@ private struct MemoryOwnerFactRowView: View {
                         Task { await model.confirmMemoryOwnerFact(id: fact.id) }
                     } label: {
                         Text(OpenTypeL10n.text("确认", english: "Confirm"))
-                            .font(DS.Text.caption().weight(.medium))
+                            .font(DS.Text.size(11.5, .medium))
                             .foregroundStyle(DS.Colour.accent)
                     }
                     .buttonStyle(.plain)
@@ -468,8 +472,8 @@ private struct MemoryOwnerFactRowView: View {
                         showingDeleteConfirmation = true
                     } label: {
                         Text(OpenTypeL10n.text("删除", english: "Delete"))
-                            .font(DS.Text.caption().weight(.medium))
-                            .foregroundStyle(.secondary)
+                            .font(DS.Text.size(11.5, .medium))
+                            .foregroundStyle(DS.Colour.ink(0.45))
                     }
                     .buttonStyle(.plain)
                 }
@@ -526,7 +530,7 @@ private struct MemoryConsolidationRunsCard: View {
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             Text(MemoryFormatters.log.string(from: MemoryColumn.date(run.ranAt)))
                                 .font(DS.Text.mono())
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(DS.Colour.ink(0.42))
                                 .frame(width: MemoryMetrics.logTimeColumn, alignment: .leading)
                             // A rolled-back run still happened, so the row
                             // stays; its summary describes changes that are no
@@ -535,10 +539,10 @@ private struct MemoryConsolidationRunsCard: View {
                             Text(run.rolledBackAt == nil
                                  ? run.summary
                                  : OpenTypeL10n.text("已回滚 · \(run.summary)", english: "Rolled back · \(run.summary)"))
-                                .font(DS.Text.caption())
+                                .font(DS.Text.size(12.5))
                                 .foregroundStyle(run.rolledBackAt == nil
                                                  ? AnyShapeStyle(HierarchicalShapeStyle.primary)
-                                                 : AnyShapeStyle(HierarchicalShapeStyle.tertiary))
+                                                 : AnyShapeStyle(DS.Colour.ink(0.45)))
                                 .lineSpacing(MemoryMetrics.logLineSpacing)
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -575,14 +579,14 @@ private struct MemoryOriginTag: View {
 
     var body: some View {
         Text(label)
-            .font(DS.Text.groupLabel())
-            .foregroundStyle(needsReview ? AnyShapeStyle(DS.Colour.warningText) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
+            .font(DS.Text.size(10.5, .semibold))
+            .foregroundStyle(needsReview ? DS.Colour.warningText : DS.Colour.ink(0.5))
             .lineLimit(1)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(
-                needsReview ? DS.Colour.warningFill : DS.Colour.inset,
-                in: RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
+                needsReview ? DS.Colour.warningFill : DS.Colour.control,
+                in: RoundedRectangle(cornerRadius: DS.Radius.tag, style: .continuous)
             )
     }
 
@@ -626,7 +630,7 @@ private struct MemorySectionLabel: View {
         Text(count.map { "\(title) · \($0)" } ?? title)
             .font(DS.Text.groupLabel())
             .tracking(DS.Tracking.groupLabel)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(DS.Colour.ink(0.42))
     }
 }
 
@@ -808,7 +812,8 @@ private enum MemoryMetrics {
     static let originColumn: CGFloat = 52
     static let actionButton: CGFloat = 22
     static let logTimeColumn: CGFloat = 76
-    /// The one type size on this page that is below `DS.Text`'s smallest step.
+    /// The mono size 03B sets on the confidence percentage. `DS.Text.mono` is
+    /// parameterised rather than stepped, so this is the page's own name for it.
     static let confidenceType: CGFloat = 10.5
 
     static let barWidth: CGFloat = 40
@@ -820,10 +825,10 @@ private enum MemoryMetrics {
     /// so the label reads as belonging to the card below it.
     static let labelInset: CGFloat = 4
 
-    /// 13pt at a 1.6 line height, and 12pt at 1.5, expressed the way SwiftUI
+    /// 13pt at a 1.6 line height, and 12.5pt at 1.5, expressed the way SwiftUI
     /// takes it — as the extra space between lines.
     static let bodyLineSpacing: CGFloat = 13 * 0.6
-    static let logLineSpacing: CGFloat = 12 * 0.5
+    static let logLineSpacing: CGFloat = 12.5 * 0.5
 
     /// The tint behind a fact still waiting to be reviewed.
     static let reviewTint: Double = 0.05

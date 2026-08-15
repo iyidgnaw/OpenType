@@ -12,18 +12,27 @@ scoped to the one view file).
 Status key — ✅ matches · ⚠️ deviates on purpose, reason given · ❌ blocked on a
 change outside this file.
 
-**Standing token collapses.** Three of these recur on almost every row, so they
-are stated once here rather than re-argued per element. The handoff's own
-README defines the closed scale the tokens implement, and §07's markup — written
-as CSS, before that scale existed — carries values between its steps.
+**Standing token collapses — all three reversed (2026-08-15).** This review
+originally collapsed three whole classes of §07's literal CSS onto the README's
+closed scale, and argued per class why the token should win. The product owner
+has ruled the other way: **稿子优先 — 无条件还原设计稿**. The mockup's literal
+values win unconditionally, and `DesignTokens.swift` carries the extra steps
+this needs, so no row below is a naked literal.
 
-| Collapse | §07 markup | Token | Why the token wins |
-|---|---|---|---|
-| Type steps | `12.5` / `11.5` / `10.5` px | `13` / `12` / `11` (`DS.Text.body`/`caption`/`groupLabel`) | README 字号 §: "六档，全部 SF … 现状有十二档字号，这次全部收进上面六档". Reintroducing 10.5/11.5/12.5 rebuilds the twelve-size mess the scale exists to end. |
-| Radii | `4` / `5` / `7` / `8` px | `6` / `10` / `14` (`DS.Radius.control`/`inset`/`card`) | README 圆角 §: "四档 … 收敛到上面四档", mapping 控件→6pt and 卡内嵌套块→9–10pt explicitly. |
-| Borders | `.045` / `.06` / `.09` / `.1` / `.12` / `.14` black | `DS.Colour.border` = `.07`, `DS.Colour.hairline` = `.06` | README 颜色 §: "边框 `rgba(0,0,0,.07)`，`0.75pt` — **全局唯一边框值**". |
+| Was collapsed | §07 markup | Now |
+|---|---|---|
+| Type steps | `12.5` / `11.5` / `10.5` px | restored as literal steps; mono sizes go through `DS.Text.mono(_ size:)`, which already took a size |
+| Radii | `4` / `5` / `7` / `8` px | `5` / `7` / `8` restored (the `4` is the code chip's, still unexpressible — see below) |
+| Borders | `.045` / `.06` / `.09` / `.1` / `.12` / `.14` black | each α restored at the element that draws it |
 
-These are recorded per element below as ⚠️ with a back-reference here.
+The three "why the token wins" arguments are recorded in git history rather than
+re-stated here — the decision they lost is not a close call to re-litigate.
+
+Two things below are still ⚠️ and are **not** collapses, so they stay: the
+`4px`-radius inline code chip (a `Text` run has no box model — a SwiftUI limit,
+not a missing token), and 重启服务并连接's `0 11px` padding (`McpButton` is one
+control shared with the two sheet footers, which the handoff itself draws at
+`0 12px`).
 
 ---
 
@@ -200,7 +209,7 @@ These are recorded per element below as ⚠️ with a back-reference here.
 | 名称 input | border | `.75px rgba(0,0,0,.14)` | `DS.Colour.border` (.07) | ⚠️ token collapse — the largest of the border deltas; a field edge at half the drawn weight |
 | 名称 input | shadow | `0 1px 1.5px rgba(0,0,0,.04)` | `DS.Shadow.control` | ✅ **fixed** — was missing |
 | 名称 input | padding | `0 9px` | `.padding(.horizontal, 9)` | ✅ |
-| 名称 input | font | `12.5px` mono | `DS.Text.mono(12)` | ⚠️ token collapse |
+| 名称 input | font | `12.5px` mono | `DS.Text.mono(12.5)` | 🔧 restored; was 12 |
 | 名称 helper | font / colour | `11px`, `lh 1.55`, `rgba(28,28,30,.45)` | `groupLabel().fontWeight(.regular)`, `.tertiary` | ✅ |
 | 名称 helper | copy | 「会成为工具名的前缀 —— `github__create_issue`。只能用字母、数字、`_` 和 `-`。」 | same sentence; `github__create_issue` chipped, `_`/`-` inline | ⚠️ the mockup chips `_` and `-` individually; two one-character chips inside a `Text` chain is more visual noise than the rule is worth |
 | 名称 helper | violation state | not drawn | swaps to the rule in `DS.Colour.warningText` while the typed name is illegal | ⚠️ addition, required by 「MCP 的关键行为」 #5 ("在输入时就校验") |

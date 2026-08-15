@@ -16,9 +16,13 @@ import SwiftUI
 // the question people actually open Settings for — *what is it using right
 // now?* — in mono on the row itself, so the common case needs no click at all.
 //
-// Every value here comes from `DS`. The handoff's own verification step is
-// "did a fifth radius or a seventh font size appear on this screen", and the
-// only way to keep answering no is to never write a literal.
+// Every value here comes from `DS`, and every one of them is the value 03C's
+// markup literally sets — 11.5pt subtitles, `rgba(28,28,30,.45)` ink,
+// `rgba(0,0,0,.09)` chip borders. An earlier pass rounded those onto the
+// README's closed scale (12pt, `.secondary`, one border token); the owner
+// reversed that on 2026-08-15 with 稿子优先, so the mockup wins wherever the
+// two disagree. The rule that survives is the one that mattered: the value
+// lives in `DS` under a name, never as a literal in this file.
 
 // MARK: - The settings list
 
@@ -158,7 +162,7 @@ struct SettingsColumn: View {
             ) {
                 Text(verbatim: "Tab")
                     .font(DS.Text.mono(12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.5))
             }
         }
     }
@@ -735,7 +739,7 @@ private struct SettingsGroup<Content: View>: View {
             Text(title)
                 .font(DS.Text.groupLabel())
                 .tracking(DS.Tracking.groupLabel)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(DS.Colour.ink(0.42))
                 .padding(.horizontal, 4)
 
             // `overflow:hidden` in the mockup, and not decorative: the
@@ -810,14 +814,14 @@ private struct SettingsRow<Trailing: View>: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
                     Text(subtitle)
-                        .font(DS.Text.caption())
-                        .foregroundStyle(.secondary)
+                        .font(DS.Text.size(11.5))
+                        .foregroundStyle(DS.Colour.ink(0.45))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if let mono {
                     Text(mono)
                         .font(DS.Text.mono())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(DS.Colour.ink(0.45))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -838,7 +842,7 @@ private struct SettingsRow<Trailing: View>: View {
                     // Material box — so 16px of box is ~13pt of symbol.
                     Image(systemName: "chevron.right")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(DS.Colour.ink(0.3))
                 }
             }
         }
@@ -897,8 +901,9 @@ private struct SettingsStackedRow<Content: View>: View {
             content()
             if let note {
                 Text(note)
-                    .font(DS.Text.caption())
-                    .foregroundStyle(.secondary)
+                    .font(DS.Text.size(11.5))
+                    .foregroundStyle(DS.Colour.ink(0.5))
+                    .lineSpacing(11.5 * 0.55)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -935,8 +940,8 @@ private struct PermissionRow: View {
         ) {
             if status == .granted {
                 Text(OpenTypeL10n.text("已授权", english: "Granted"))
-                    .font(DS.Text.caption())
-                    .foregroundStyle(.tertiary)
+                    .font(DS.Text.size(11.5))
+                    .foregroundStyle(DS.Colour.ink(0.4))
             } else {
                 SmallButton(
                     status == .denied
@@ -978,13 +983,13 @@ private struct SettingsSwitch: View {
             isOn.toggle()
         } label: {
             Capsule()
-                .fill(isOn ? DS.Colour.accent : Color.primary.opacity(0.14))
+                .fill(isOn ? DS.Colour.accent : DS.Colour.fieldBorder)
                 .frame(width: 38, height: 22)
                 .overlay(alignment: isOn ? .trailing : .leading) {
                     Circle()
                         .fill(Color.white)
                         .frame(width: 18, height: 18)
-                        .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 1)
+                        .modifier(KnobShadow())
                         .padding(2)
                 }
                 .contentShape(Capsule())
@@ -999,6 +1004,11 @@ private struct SettingsSwitch: View {
                 : OpenTypeL10n.text("关", english: "Off")
         )
     }
+}
+
+/// `DS.Shadow.knob` as a modifier, so it can sit in the switch's chain.
+private struct KnobShadow: ViewModifier {
+    func body(content: Content) -> some View { DS.Shadow.knob(content) }
 }
 
 /// The 26pt segmented control: a recessed track, a lifted white selected
@@ -1020,13 +1030,17 @@ private struct SegmentedControl<Option: Identifiable & Equatable>: View {
                     Text(title(option))
                         .font(DS.Text.caption())
                         .fontWeight(isSelected ? .medium : .regular)
-                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                        .foregroundStyle(isSelected ? Color.primary : DS.Colour.ink(0.55))
                         .frame(maxWidth: .infinity)
                         .frame(height: 22)
                         .background {
                             if isSelected {
-                                DS.Shadow.control(
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                // `0 1px 2px rgba(0,0,0,.1)`, not the `.05`
+                                // lift every other small control takes: this
+                                // chip has to read as raised off its own track
+                                // rather than off the white card.
+                                DS.Shadow.lifted(
+                                    RoundedRectangle(cornerRadius: DS.Radius.tag, style: .continuous)
                                         .fill(DS.Colour.card)
                                 )
                             }
@@ -1040,15 +1054,14 @@ private struct SegmentedControl<Option: Identifiable & Equatable>: View {
         }
         .padding(2)
         .frame(height: 26)
-        // The mockup's track is `#F0F0EE`, which is darker than
-        // `DS.Colour.inset` (the token for a recessed block inside a card) and
-        // slightly warm. 6% black over the white card lands on `#F0F0F0` —
-        // right on two channels and 2/255 off on the third. Closing that last
-        // step needs a literal colour token the scale doesn't have yet; it is
-        // reported rather than invented here.
+        // The track is a literal warm grey, not an achromatic overlay: no
+        // percentage of black over the white card can be warmer on red/green
+        // than on blue, which is exactly what `#F0F0EE` is. `opacity(0.06)`
+        // used to land on `#F0F0F0` — right on two channels, wrong on the one
+        // that carries the warmth.
         .background(
-            Color.primary.opacity(0.06),
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            DS.Colour.controlTrack,
+            in: RoundedRectangle(cornerRadius: DS.Radius.smallControl, style: .continuous)
         )
     }
 }
@@ -1075,7 +1088,7 @@ private struct ControlChip: View {
                 // maps lower than the 16px `chevron.right` above, not higher.
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.35))
             }
         }
         .padding(.horizontal, horizontalPadding)
@@ -1086,7 +1099,7 @@ private struct ControlChip: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.09), lineWidth: 0.75)
+                .strokeBorder(DS.Colour.controlBorder, lineWidth: 0.75)
         )
         .contentShape(Rectangle())
     }
@@ -1122,7 +1135,7 @@ private struct SmallButton: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous)
                         .strokeBorder(
-                            destructive ? DS.Colour.error.opacity(0.35) : Color.primary.opacity(0.12),
+                            destructive ? DS.Colour.error.opacity(0.35) : DS.Colour.buttonBorder,
                             lineWidth: 0.75
                         )
                 )

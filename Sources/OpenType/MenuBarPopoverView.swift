@@ -47,11 +47,8 @@ struct MenuBarPopoverView: View {
         .frame(width: 300)
         // The handoff's `rgba(250,250,248,.94)` — a warm off-white, not the
         // system's `.windowBackgroundColor` (#ECECEC in light mode), which is
-        // a full step greyer than every other surface in the redesign. The
-        // nearest token is `canvas` (#F5F5F3); the 5/255 difference is below
-        // what is visible against the popover's own material, and inventing a
-        // fifth neutral to close it would cost more than it buys.
-        .background(DS.Colour.canvas)
+        // a full step greyer than every other surface in the redesign.
+        .background(DS.Colour.insetSurface)
         .tint(DS.Colour.accent)
         .environment(\.locale, OpenTypeL10n.locale)
     }
@@ -83,7 +80,7 @@ struct MenuBarPopoverView: View {
             Button(action: onOpenMainWindow) {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.4))
                     .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
@@ -190,7 +187,7 @@ struct MenuBarPopoverView: View {
             } else {
                 Text(shortcutLine)
                     .font(DS.Text.mono())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DS.Colour.ink(0.45))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -202,7 +199,7 @@ struct MenuBarPopoverView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
-        .dsHairline(.top)
+        .dsHairline(.top, color: DS.Colour.border)
     }
 
     /// The gesture, named from the installed preset rather than hardcoded —
@@ -231,7 +228,7 @@ struct MenuBarPopoverView: View {
                 Text(OpenTypeL10n.text("进行中", english: "Running"))
                     .font(DS.Text.groupLabel())
                     .tracking(DS.Tracking.groupLabel)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(DS.Colour.ink(0.45))
 
                 Spacer(minLength: 4)
 
@@ -239,20 +236,20 @@ struct MenuBarPopoverView: View {
                     Text(OverlayElapsed.short(
                         max(0, context.date.timeIntervalSince(run.dispatchedAt))
                     ))
-                    .font(DS.Text.mono())
-                    .foregroundStyle(.tertiary)
+                    .font(DS.Text.mono(10.5))
+                    .foregroundStyle(DS.Colour.ink(0.4))
                 }
             }
 
             Text(run.task)
-                .font(DS.Text.body())
+                .font(DS.Text.size(12.5))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(toolLine(for: run))
-                .font(DS.Text.mono())
-                .foregroundStyle(.secondary)
+                .font(DS.Text.mono(10.5))
+                .foregroundStyle(DS.Colour.ink(0.45))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -260,7 +257,7 @@ struct MenuBarPopoverView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(DS.Colour.accent.opacity(0.05))
-        .dsHairline(.top)
+        .dsHairline(.top, color: DS.Colour.border)
     }
 
     /// The tool the run is on, parsed out of the last progress line the same
@@ -286,7 +283,7 @@ struct MenuBarPopoverView: View {
             Text(OpenTypeL10n.text("最近", english: "Recent"))
                 .font(DS.Text.groupLabel())
                 .tracking(DS.Tracking.groupLabel)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(DS.Colour.ink(0.42))
                 .padding(.horizontal, 14)
                 .padding(.bottom, 6)
 
@@ -300,14 +297,14 @@ struct MenuBarPopoverView: View {
                             .frame(width: DS.Size.statusDot, height: DS.Size.statusDot)
 
                         Text(conversation.title)
-                            .font(DS.Text.body())
+                            .font(DS.Text.size(12.5))
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
                         Text(MenuBarSessionTime.text(forMilliseconds: conversation.updatedAt))
-                            .font(DS.Text.mono())
-                            .foregroundStyle(.tertiary)
+                            .font(DS.Text.mono(10.5))
+                            .foregroundStyle(DS.Colour.ink(0.35))
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
@@ -318,7 +315,7 @@ struct MenuBarPopoverView: View {
         }
         .padding(.top, 8)
         .padding(.bottom, 4)
-        .dsHairline(.top)
+        .dsHairline(.top, color: DS.Colour.border)
     }
 
     private func dotColour(for conversation: ConversationSummary) -> Color {
@@ -340,20 +337,21 @@ struct MenuBarPopoverView: View {
         Button(action: onOpenMainWindow) {
             HStack(spacing: 8) {
                 Text(OpenTypeL10n.text("打开主窗口", english: "Open main window"))
-                    .font(DS.Text.body())
-                    .foregroundStyle(.secondary)
+                    .font(DS.Text.size(12.5))
                 Spacer(minLength: 0)
                 Text("⌘O")
                     .font(DS.Text.mono())
-                    .foregroundStyle(.tertiary)
             }
+            // The handoff puts the ink on the row, not on each run: the label
+            // and the shortcut are both `rgba(28,28,30,.5)`.
+            .foregroundStyle(DS.Colour.ink(0.5))
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .keyboardShortcut("o", modifiers: .command)
-        .dsHairline(.top)
+        .dsHairline(.top, color: DS.Colour.border)
     }
 
     /// The menu bar is the only surface that's always reachable — the app is
@@ -368,16 +366,18 @@ struct MenuBarPopoverView: View {
                 Image(systemName: "power")
                     .font(.system(size: 11, weight: .medium))
                 Text(OpenTypeL10n.text("退出 OpenType", english: "Quit OpenType"))
-                    .font(DS.Text.body())
+                    .font(DS.Text.size(12.5))
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(.secondary)
+            // Not in the handoff, so it takes the treatment of the row it sits
+            // under rather than inventing one.
+            .foregroundStyle(DS.Colour.ink(0.5))
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .dsHairline(.top)
+        .dsHairline(.top, color: DS.Colour.border)
     }
 }
 
@@ -396,12 +396,12 @@ private struct ModeCell: View {
                 Text(mode.title)
                     .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
             }
-            .foregroundStyle(isSelected ? Color.white : Color.secondary)
+            .foregroundStyle(isSelected ? Color.white : DS.Colour.ink(0.6))
             .frame(maxWidth: .infinity)
             .frame(height: 52)
             .background(
-                isSelected ? DS.Colour.accent : DS.Colour.inset,
-                in: RoundedRectangle(cornerRadius: DS.Radius.inset, style: .continuous)
+                isSelected ? DS.Colour.accent : DS.Colour.ink(0.045),
+                in: RoundedRectangle(cornerRadius: DS.Radius.nested, style: .continuous)
             )
             .contentShape(Rectangle())
         }

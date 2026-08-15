@@ -337,7 +337,11 @@ struct ColumnHeader<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        HStack(spacing: 8) {
+        // 14, not 8: §03A/§03B/§06A all draw a 14px gap between a page title
+        // and the controls beside it. One value here rather than each column
+        // overriding, since a header that sits differently per screen is the
+        // thing a shared component exists to prevent.
+        HStack(spacing: 14) {
             content()
         }
         // The design's page padding, so a header and the cards under it share

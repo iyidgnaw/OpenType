@@ -2,42 +2,42 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleLocalizations</key>
-    <array>
-        <string>en</string>
-        <string>zh-Hans</string>
-    </array>
-    <key>CFBundleDisplayName</key>
-    <string>OpenType</string>
-    <key>CFBundleExecutable</key>
-    <string>OpenType</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>ai.rain.opentype</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>OpenType</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
-    <key>CFBundleVersion</key>
-	<string>36</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>OpenType needs the microphone to turn your speech into ready-to-use text.</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>OpenType uses speech recognition to show live captions on the recording overlay; the final text is processed by the on-device speech model and is never uploaded.</string>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>OpenType needs this to write the finished text back into the app you're using.</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>OpenType</string>
+	<key>CFBundleExecutable</key>
+	<string>OpenType</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>ai.rain.opentype</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+	</array>
+	<key>CFBundleName</key>
+	<string>OpenType</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>37</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>OpenType needs this to write the finished text back into the app you're using.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>OpenType needs the microphone to turn your speech into ready-to-use text.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>OpenType uses speech recognition to show live captions on the recording overlay; the final text is processed by the on-device speech model and is never uploaded.</string>
 </dict>
 </plist>

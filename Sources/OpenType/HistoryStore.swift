@@ -9,7 +9,7 @@ final class HistoryStore: ObservableObject {
 
     init(
         fileURL: URL? = nil,
-        maximumEntries: Int = 100
+        maximumEntries: Int = 1000
     ) {
         self.maximumEntries = maximumEntries
 
@@ -36,6 +36,20 @@ final class HistoryStore: ObservableObject {
         if entries.count > maximumEntries {
             entries.removeLast(entries.count - maximumEntries)
         }
+        save()
+    }
+
+    /// Removes exactly the entry with this id, or does nothing if it is not
+    /// present — a row can be deleted from a context menu that a second window
+    /// opened before an earlier delete landed, and that is an ordinary race,
+    /// not a programmer error.
+    ///
+    /// Persists the shortened list, including when it becomes empty: writing
+    /// nothing and leaving the old file in place would give a deletion that
+    /// survives until relaunch and then resurrects.
+    func delete(id: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+        entries.remove(at: index)
         save()
     }
 

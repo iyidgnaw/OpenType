@@ -281,7 +281,7 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 ---
 
-## H. Ask 结果卡片的「交给助理去做」（review #6）
+## H. Ask 结果卡片的「交给助理去做」（review #6）—— 类型层已完成，UI 未接线（2026-08-15）
 
 - 结果卡片（`OverlayController` 的 result card）与会话详情页各加一个按钮：
   把**同一个问题**用完整工具集重跑一次，复用 `conversationId`。
@@ -291,6 +291,21 @@ Swift 侧轮询策略的纯函数（何时开始、何时停、失败退避）�
 
 **测试**：会话 `kind` 的迁移语义（ask 会话被升级后，后续轮次走哪条路）——这是唯一有歧义的地方，
 决定：**升级只影响这一轮，会话 kind 不变**，否则用户问一次工具类问题就把整个会话变成 agent 了。
+
+**落地**：`Sources/OpenType/AssistantEscalation.swift` —— `struct AssistantEscalation { task, conversation }`
++ `static let dispatchMode: InputMode = .agent` +两个 `offered` 重载（卡片一个，会话详情页一个）。
+`Tests/OpenTypeTests/AssistantEscalationTests.swift` 32 例全绿，覆盖单向性、「重跑原问题不是重跑答案」、
+「会话 kind 不变」以及会话详情页要找的是「产生这条答案的那一轮」而不是最后一轮。详见
+`docs/superpowers/specs/2026-08-09-current-system-state.md` §9 的新增小节。
+
+**没接的部分**：卡片和会话详情页上真正的按钮——把这个类型接到 `OverlayController`/`SessionsViews`
+并调用 `/agent/run`。追下去发现 `OverlayController.onFollowUp`/`onFollowUpByVoice` 这两个回调本身
+在 `AppModel.init` 里没有被赋值，是这一项之前就存在、这一项发现而非造成的缺口（`VoiceFollowUp.
+continuation` 同样没有生产调用方，`AssistantEscalationTests.swift` 的文件头注释也点明了这一点）。
+在一个死回调上面接按钮等于要么顺手把整条 follow-up 线接上（范围明显更大，且与同批修 §E 的另一个
+agent 在同一批文件里改动），要么另起一条并行的分发路径（重复 `submitTypedTurn`/`dispatchAgentRun`
+已有的逻辑）。两者都该是单独复核的一块工作，而不是顺带做掉——所以这里止步于类型层，UI 接线记在
+`docs/superpowers/specs/2026-08-09-current-system-state.md` §11 的已知缺口里。
 
 ---
 

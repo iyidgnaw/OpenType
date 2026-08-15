@@ -148,8 +148,46 @@ struct DictationColumn: View {
 
                 searchField(narrow: narrow)
                 sourceFilter
+                exportMenu
             }
         }
+    }
+
+    /// Exports whatever `filtered` currently shows — the source filter and
+    /// the search box both narrow it first, so exporting a search result
+    /// works without a second entry point (§I, pinned decision 5 in
+    /// `HistoryExportTests.swift`).
+    private var exportMenu: some View {
+        Menu {
+            Button(OpenTypeL10n.text("导出为 Markdown", english: "Export as Markdown")) {
+                export(as: .markdown)
+            }
+            Button(OpenTypeL10n.text("导出为 JSON", english: "Export as JSON")) {
+                export(as: .json)
+            }
+        } label: {
+            Image(systemName: "square.and.arrow.up")
+                .font(DS.Text.size(15))
+                .foregroundStyle(DS.Colour.ink(0.5))
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .dsHeaderControl()
+        .disabled(filtered.isEmpty)
+        .accessibilityLabel(OpenTypeL10n.text("导出", english: "Export"))
+        .help(OpenTypeL10n.text("导出当前列表为 Markdown 或 JSON", english: "Export the current list as Markdown or JSON"))
+    }
+
+    private func export(as format: HistoryExportPanel.Format) {
+        let content: String
+        switch format {
+        case .markdown: content = HistoryExport.markdown(entries: filtered, exportedAt: Date())
+        case .json: content = HistoryExport.json(entries: filtered, exportedAt: Date())
+        }
+        HistoryExportPanel.save(content, suggestedName: "OpenType-History", format: format)
     }
 
     private func searchField(narrow: Bool) -> some View {
@@ -263,18 +301,17 @@ struct DictationColumn: View {
             .sorted()
     }
 
+    /// Source filter narrows first, then `HistorySearch` matches the body —
+    /// transcript, result and application name, ANDed term by term rather
+    /// than a single-needle contains. See `HistorySearch` for why: a query
+    /// matching the body but not an auto-generated title is the entire point
+    /// of §I, and this is also what feeds the `…` menu's export, so
+    /// "export" means "export what I am looking at".
     private var filtered: [HistoryEntry] {
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return history.entries.filter { entry in
-            if let source, entry.applicationName != source { return false }
-            guard !needle.isEmpty else { return true }
-            // Both sides of the entry: a user searching for what they *said*
-            // and a user searching for what they *got* are the same user, and
-            // in transcribe mode the two strings differ by exactly the tidy-up.
-            return entry.result.localizedCaseInsensitiveContains(needle)
-                || entry.transcript.localizedCaseInsensitiveContains(needle)
-                || entry.applicationName.localizedCaseInsensitiveContains(needle)
-        }
+        let bySource = source.map { source in
+            history.entries.filter { $0.applicationName == source }
+        } ?? history.entries
+        return HistorySearch.filter(bySource, query: query)
     }
 
     private var displayedCount: Int { filtered.count }
@@ -388,6 +425,7 @@ private struct DictationRow: View {
     let entry: HistoryEntry
 
     @State private var hovering = false
+    @State private var showingDeleteConfirmation = false
 
     var body: some View {
         HStack(alignment: .top, spacing: DS.Space.content) {
@@ -434,6 +472,26 @@ private struct DictationRow: View {
         .padding(.horizontal, DS.Space.content)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        // The remedy §I adds: say one sensitive thing by accident and this is
+        // the way out, without wiping the rest of the history to get it.
+        .contextMenu {
+            Button(role: .destructive) {
+                showingDeleteConfirmation = true
+            } label: {
+                Label(OpenTypeL10n.text("删除", english: "Delete"), systemImage: "trash")
+            }
+        }
+        .confirmationDialog(
+            OpenTypeL10n.text("删除这条记录？", english: "Delete this entry?"),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
+                model.history.delete(id: entry.id)
+            }
+        } message: {
+            Text(OpenTypeL10n.text("删除后无法恢复。", english: "This cannot be undone."))
+        }
     }
 }
 

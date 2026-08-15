@@ -98,7 +98,7 @@ struct SessionsListColumn: View {
             TextField(
                 "",
                 text: $query,
-                prompt: Text(OpenTypeL10n.text("搜索会话标题", english: "Search titles"))
+                prompt: Text(OpenTypeL10n.text("搜索会话", english: "Search conversations"))
                     .font(DS.Text.caption())
                     .foregroundColor(DS.Colour.ink(0.4))
             )
@@ -154,17 +154,40 @@ struct SessionsListColumn: View {
     /// replaces each had one, and a blank column reads as broken rather than
     /// as new.
     private var empty: some View {
-        Text(
-            query.isEmpty
-                ? OpenTypeL10n.text("还没有会话。按住快捷键说一句，就有了。", english: "No sessions yet. Hold the shortcut and say something.")
-                : OpenTypeL10n.text("没有匹配的会话", english: "No matching sessions")
-        )
-        .font(DS.Text.caption())
-        .foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.top, 40)
-        .padding(.horizontal, 16)
+        Text(emptyMessage)
+            .font(DS.Text.caption())
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.top, 40)
+            .padding(.horizontal, 16)
+    }
+
+    /// §I's partial-search honesty, carried through to what the empty state
+    /// actually says. `SessionSearchOutcome` keeps "no sessions at all
+    /// (nothing to search)", "searched everything on screen, nothing
+    /// matched" and "matched nothing among what was actually loaded" as three
+    /// distinct claims — collapsing them to `visibleConversations.isEmpty`
+    /// plus `query.isEmpty` would make the third one lie about the archive
+    /// having been searched.
+    private var emptyMessage: String {
+        switch searchOutcome {
+        case .matches:
+            // Only reachable as `.matches([])` here (`empty` only renders
+            // when `visibleConversations` is empty) — a blank query over an
+            // empty (or chip-filtered-to-empty) list, not a failed search.
+            return OpenTypeL10n.text(
+                "还没有会话。按住快捷键说一句，就有了。",
+                english: "No sessions yet. Hold the shortcut and say something."
+            )
+        case .noMatches:
+            return OpenTypeL10n.text("没有匹配的会话", english: "No matching sessions")
+        case .noMatchesInLoadedSubset(let bodiesSearched, let total):
+            return OpenTypeL10n.text(
+                "没有匹配的会话（只搜索了已加载的 \(bodiesSearched)/\(total) 个会话正文）",
+                english: "No matches — only searched the body of \(bodiesSearched) of \(total) loaded conversations"
+            )
+        }
     }
 
     private var runningGroup: some View {
@@ -213,10 +236,25 @@ struct SessionsListColumn: View {
     /// Chips and search narrow what is drawn, never what was fetched — so
     /// switching either costs no refetch and can never lose a row.
     private var visibleConversations: [ConversationSummary] {
+        searchOutcome.conversations
+    }
+
+    /// The chip-filtered list, run through `SessionSearch` — see `empty`
+    /// above for why the outcome (not just its conversations) matters.
+    private var searchOutcome: SessionSearchOutcome {
         let byChip = SessionList.filtered(model.sessionConversations, by: model.sessionFilter)
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return byChip }
-        return byChip.filter { $0.title.localizedCaseInsensitiveContains(trimmed) }
+        return SessionSearch.search(byChip, query: query, loadedDetails: loadedDetails)
+    }
+
+    /// The bodies actually held in memory right now — at most the ask and
+    /// agent threads the user has opened (`AppModel.askConversationDetail` /
+    /// `agentConversationDetail`), never the full archive, which lives in the
+    /// sidecar. This is the "loaded" half of §I's partial-search honesty.
+    private var loadedDetails: [Int: ConversationDetail] {
+        var details: [Int: ConversationDetail] = [:]
+        if let ask = model.askConversationDetail { details[ask.id] = ask }
+        if let agent = model.agentConversationDetail { details[agent.id] = agent }
+        return details
     }
 
     private func open(_ conversation: ConversationSummary) {
@@ -341,6 +379,15 @@ struct SessionThreadColumn: View {
                 }
                 Button(OpenTypeL10n.text("复制全文", english: "Copy transcript")) {
                     copyTranscript(focused)
+                }
+                if detail(for: focused) != nil {
+                    Divider()
+                    Button(OpenTypeL10n.text("导出为 Markdown", english: "Export as Markdown")) {
+                        exportConversation(focused, as: .markdown)
+                    }
+                    Button(OpenTypeL10n.text("导出为 JSON", english: "Export as JSON")) {
+                        exportConversation(focused, as: .json)
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -547,6 +594,20 @@ struct SessionThreadColumn: View {
         model.focusedConversation = nil
         model.startNewAskConversation()
         model.startNewAgentConversation()
+    }
+
+    /// §I: a single conversation, exported to Markdown or JSON. Placed in the
+    /// same `…` menu as 「新对话」/「复制全文」 rather than a second entry
+    /// point, matching where the spec puts it.
+    private func exportConversation(_ focused: FocusedConversation, as format: HistoryExportPanel.Format) {
+        guard let detail = detail(for: focused) else { return }
+        let content: String
+        switch format {
+        case .markdown: content = HistoryExport.markdown(conversation: detail, exportedAt: Date())
+        case .json: content = HistoryExport.json(conversation: detail, exportedAt: Date())
+        }
+        let suggestedName = detail.title.isEmpty ? "OpenType-Conversation-\(detail.id)" : "OpenType-\(detail.title)"
+        HistoryExportPanel.save(content, suggestedName: suggestedName, format: format)
     }
 }
 

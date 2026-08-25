@@ -338,6 +338,7 @@ git commit -m "Read recent events by time, the query that never existed"
 - **注意** `sidecar/test/memory/episodicWiring.test.ts` 就是钉住「三个路由都写 episodic 事件」的那个文件（P1-7 的成果）。移除写入后它必然全红——**不要删掉它**，把它改写成钉住新契约：三个路由都**不再**写，写入只发生在 `POST /memory/events`。它从「证明三处都接上了」变成「证明三处都摘干净了」，是同一个不变量的另一面。
 - **还有三个文件钉着同一个旧契约**（本计划初稿遗漏，2026-08-25 补）：`test/asr/episodicEvent.test.ts`（10 个测试，钉 `AsrRouteDeps.recordEpisodicEvent` 的字段映射）、`test/oneshot/episodicEvent.test.ts`（7 个）、`test/agent/routes.test.ts` 第 56–91 行的两个内联测试。删掉写入点会让这 17 个测试全部失效。**删之前先读，找出其中仍然成立的规则并搬到 `POST /memory/events` 的测试里**——重构正是这类规则蒸发的地方。
 - **一条必须承接的规则**：`recordDictation` 开头的 `if (rawTranscript.trim() === "") return;`。空录音（误触快捷键）不记录，注释写明代价：五次误触就会顶开 `shouldConsolidate` 的门槛，白烧一次真实 LLM 调用。写入收敛后**这条守卫要放在端点里，不是放在调用方**——放在端点，任何未来的第二个调用方都绕不过；放在 Swift，就得靠下一个人重新想起来。
+- **`mode` 加 enum 守卫**（2026-08-25 决定）：只接受 `transcribe` / `ask` / `agent`，否则 400，形状照抄同文件里 `ENTITY_CATEGORIES` 的 `invalid_category`。理由不是「校验总是好的」，而是「只有一个可信调用方所以不用校验」正是让旧三写入点的 mode 标错与 app 占位符长期隐形的那个假设——没有任何东西逼它浮现，直到有人专门去找。守卫写反的后果比不写更糟：**误拒一个合法模式会让整整一种模式的历史静默地不再记录**，下游不会报错，查不到记录的人只会以为自己没说过那句话。所以测试要同时钉「非法模式被拒」和「三个合法模式都通过」。
 
 **Interfaces:**
 - Consumes: Task 2 的 `recordEpisodicEvent(input)`

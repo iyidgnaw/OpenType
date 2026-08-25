@@ -50,19 +50,32 @@ struct AliasReplacement: Decodable, Equatable {
 /// rather than to an optional every call site would then unwrap. This is the
 /// hottest path in the product: a decoding failure here costs the user their
 /// dictation, not a toast.
+///
+/// `rawText` (Task 4 of
+/// `docs/superpowers/plans/2026-08-25-unified-memory-and-recent-context.md`)
+/// is what Whisper actually produced, before the entity dictionary rewrote
+/// any alias — `text` is the rewritten form. The sidecar always sends both
+/// (unlike `replacements`, there is no absent-key/back-compat case for this
+/// one), so it decodes as a plain required `String`. `EpisodicEventRecorder`
+/// is what needs the two kept apart: it feeds `rawText` and `text` to
+/// `AppModel`'s episodic-event write as `rawTranscript`/`correctedTranscript`
+/// respectively, and consolidation mines that pair to find mishearings.
 struct TranscribeResponse: Decodable, Equatable {
     let text: String
+    let rawText: String
     /// In text order, left to right. Empty when nothing was rewritten.
     let replacements: [AliasReplacement]
 
     private enum CodingKeys: String, CodingKey {
         case text
+        case rawText
         case replacements
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         text = try container.decode(String.self, forKey: .text)
+        rawText = try container.decode(String.self, forKey: .rawText)
         replacements = try container.decodeIfPresent(
             [AliasReplacement].self,
             forKey: .replacements

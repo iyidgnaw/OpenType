@@ -312,6 +312,36 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// `POST /memory/events` — Swift's single write point for episodic
+    /// events (design §3.2). Call this right beside every `.completed`
+    /// `recordAuditEvent(...)`, once the answer/delivery actually exists —
+    /// never at dispatch, or the model would find the question it is
+    /// currently answering sitting in its own context on the next turn.
+    ///
+    /// Gated on `EpisodicEventRecorder.shouldRecord(for:)` rather than
+    /// trusting "only called from a success branch" as an unenforced
+    /// convention repeated at every call site: a cancelled or failed run
+    /// must record nothing, since teaching the memory layer from work the
+    /// user abandoned fills it with results nobody accepted.
+    ///
+    /// Best-effort, exactly like `recordAuditEvent`'s neighbours elsewhere in
+    /// this file (`resetHistory()`, `refreshUsageStats()`): a failed write
+    /// loses one episodic row and must never affect delivery or surface to
+    /// the user. `sidecarClient` is captured into a local before entering the
+    /// detached task so the task doesn't need to hop back through `self`.
+    private func recordEpisodicEvent(for status: AuditEventStatus, _ body: EpisodicEventBody) {
+        guard EpisodicEventRecorder.shouldRecord(for: status) else { return }
+        let client = sidecarClient
+        Task.detached(priority: .utility) {
+            struct Ack: Decodable { let eventId: Int }
+            _ = try? await client.request(
+                method: "POST",
+                path: "/memory/events",
+                body: body
+            ) as Ack
+        }
+    }
+
     /// This week's figures for the statistics panel (P2-12).
     ///
     /// Derived, never accumulated: `refreshUsageStats()` recomputes it from the
@@ -1804,13 +1834,15 @@ final class AppModel: ObservableObject {
     /// chain.
     private func beginReviewSession(
         transcript: String,
+        rawTranscript: String,
         requestID: UUID,
         recognizedEventId: UUID
     ) {
         reviewSession = ReviewSession(
             requestId: requestID,
             capturedContext: capturedContext,
-            lastEventId: recognizedEventId
+            lastEventId: recognizedEventId,
+            rawTranscript: rawTranscript
         )
         reviewPanelState = ReviewPanelState(
             sessionId: requestID,
@@ -2399,6 +2431,34 @@ final class AppModel: ObservableObject {
                 )
             )
 
+            // Single write point for episodic events (design §3.2). This is
+            // the case the design doc names by hand as unreachable any other
+            // way: the Review edit (`finalText`, possibly reshaped across
+            // zero or more voice-correction rounds since `originalTranscript`
+            // was staged) happens strictly after the sidecar has already
+            // answered, so no sidecar route could ever have written what was
+            // actually committed here. `.completed` here is this Cmd+Return
+            // commit, not a hotkey release — same "only after the answer/
+            // delivery exists" ordering rule as the other three sites, just
+            // arriving on a different gesture. `panelState.originalTranscript`
+            // is the closest available stand-in for "corrected": it already
+            // carries the entity dictionary's rewrite (and any mode-routing
+            // trim) from when the session was staged, same as `recognition
+            // .text` at the Direct/Tidy site; `session.rawTranscript` is the
+            // unrewritten ASR output from the same recording.
+            self.recordEpisodicEvent(
+                for: .completed,
+                EpisodicEventRecorder.body(
+                    mode: .transcribe,
+                    rawTranscript: session.rawTranscript,
+                    correctedTranscript: panelState.originalTranscript,
+                    deliveredText: finalText,
+                    selectedContext: session.capturedContext.selectedText,
+                    applicationName: session.capturedContext.applicationName,
+                    conversationId: nil
+                )
+            )
+
             self.playFeedbackSound(.done)
             self.setState(completionState)
             self.scheduleIdle(after: completionState)
@@ -2677,6 +2737,12 @@ final class AppModel: ObservableObject {
     /// against it, and `AliasUndo` checks exactly that before touching anything.
     struct Recognition {
         let text: String
+        /// What Whisper actually produced, before the entity dictionary
+        /// rewrote any alias (`TranscribeResponse.rawText`, Task 4 of the
+        /// 2026-08-25 unified-memory plan) — carried through so the
+        /// `.completed` episodic-event write below has the real ASR output
+        /// distinct from `text`'s dictionary-corrected form.
+        let rawText: String
         let replacements: [AliasReplacement]
     }
 
@@ -3514,7 +3580,11 @@ final class AppModel: ObservableObject {
         )
         let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw OpenTypeError.emptyRecording }
-        return Recognition(text: text, replacements: response.replacements)
+        return Recognition(
+            text: text,
+            rawText: response.rawText.trimmingCharacters(in: .whitespacesAndNewlines),
+            replacements: response.replacements
+        )
     }
 
     /// - Parameter recordingEndedAt: When the recording this audio came from
@@ -3662,6 +3732,7 @@ final class AppModel: ObservableObject {
                     // uses below.
                     beginReviewSession(
                         transcript: transcript,
+                        rawTranscript: recognition.rawText,
                         requestID: auditRequestID,
                         recognizedEventId: recognizedEventId
                     )
@@ -3903,6 +3974,25 @@ final class AppModel: ObservableObject {
                 // that distinction is what lets the statistics panel tell
                 // Review apart from Direct/Tidy in the audit trail.
                 variant: variant.rawValue
+            )
+
+            // Single write point for episodic events (design §3.2): right
+            // beside the `.completed` audit event above, now that mode, the
+            // real ASR output, the dictionary-corrected form, and the
+            // actually-delivered text (post-Tidy) are all known at once.
+            // Reachable only for `.transcribe` Direct/Tidy — same reachability
+            // note as `appendAudit(status: .completed, ...)` above.
+            recordEpisodicEvent(
+                for: .completed,
+                EpisodicEventRecorder.body(
+                    mode: mode,
+                    rawTranscript: recognition.rawText,
+                    correctedTranscript: recognition.text,
+                    deliveredText: result,
+                    selectedContext: capturedContext.selectedText,
+                    applicationName: capturedContext.applicationName,
+                    conversationId: nil
+                )
             )
 
             // P0-3: the text is delivered and the user is looking at it — for
@@ -4235,6 +4325,25 @@ final class AppModel: ObservableObject {
                     provider: sidecarTextProvider,
                     model: model,
                     error: nil
+                )
+            )
+
+            // Single write point for episodic events (design §3.2). Written
+            // only now that `result` exists — never at dispatch — so `ask`'s
+            // own next-turn "recent activity" injection can never see the
+            // question it is currently answering. `ask` has no dictionary
+            // stage, so `rawTranscript`/`correctedTranscript` are the same
+            // spoken `transcript`.
+            recordEpisodicEvent(
+                for: .completed,
+                EpisodicEventRecorder.body(
+                    mode: .ask,
+                    rawTranscript: transcript,
+                    correctedTranscript: transcript,
+                    deliveredText: result,
+                    selectedContext: context.selectedText,
+                    applicationName: context.applicationName,
+                    conversationId: response.conversationId
                 )
             )
 
@@ -4597,6 +4706,24 @@ final class AppModel: ObservableObject {
                 )
             )
 
+            // Single write point for episodic events (design §3.2). Written
+            // only now that `response.result` exists — never at dispatch —
+            // same ordering requirement as the ask site above. `agent` has
+            // no dictionary stage either, so raw and corrected are the same
+            // spoken `transcript`.
+            recordEpisodicEvent(
+                for: .completed,
+                EpisodicEventRecorder.body(
+                    mode: .agent,
+                    rawTranscript: transcript,
+                    correctedTranscript: transcript,
+                    deliveredText: response.result,
+                    selectedContext: context.selectedText,
+                    applicationName: context.applicationName,
+                    conversationId: response.conversationId
+                )
+            )
+
             lastResult = response.result
             lastApplication = context.applicationName
             lastResultWasPractice = practice
@@ -4862,6 +4989,13 @@ private struct ReviewSession {
     let requestId: UUID
     let capturedContext: CapturedContext
     var lastEventId: UUID
+    /// What Whisper actually produced for this session's original dictation,
+    /// before the entity dictionary rewrote any alias — `ReviewPanelState
+    /// .originalTranscript` only ever carries the dictionary-corrected (and
+    /// mode-routed) form, so this is the one place the true raw ASR output
+    /// survives long enough for `commitReview()`'s episodic-event write to
+    /// reach it.
+    let rawTranscript: String
 }
 
 /// An open correction window (P0-3) plus the audit bookkeeping a correction

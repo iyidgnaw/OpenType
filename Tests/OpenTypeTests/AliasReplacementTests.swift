@@ -50,6 +50,7 @@ import XCTest
 ///
 ///     struct TranscribeResponse: Decodable, Equatable {
 ///         let text: String
+///         let rawText: String                    // Task 4: unrewritten ASR output
 ///         let replacements: [AliasReplacement]   // `[]` when the key is absent
 ///     }
 ///
@@ -106,7 +107,11 @@ final class AliasReplacementTests: XCTestCase {
         // looked exactly like this. Decoding must not throw, and the absence
         // must arrive as an empty list rather than as an optional every call
         // site then has to unwrap.
-        let json = #"{"text":"今天要开会"}"#
+        //
+        // `rawText` (Task 4) is unrelated to this backward-compat case and is
+        // unconditional on the wire, so it's included here even though it
+        // predates this test.
+        let json = #"{"text":"今天要开会","rawText":"今天要开会"}"#
 
         let response = try decode(TranscribeResponse.self, from: json)
 
@@ -116,7 +121,7 @@ final class AliasReplacementTests: XCTestCase {
 
     func testReplacementsDecodeInOrderWithTheirTermIds() throws {
         let json = """
-        {"text":"先问Anthropic，再用PayPal付款","replacements":[\
+        {"text":"先问Anthropic，再用PayPal付款","rawText":"先问安思罗匹克，再用呸泡付款","replacements":[\
         {"from":"安思罗匹克","to":"Anthropic","termId":3},\
         {"from":"呸泡","to":"PayPal","termId":7}]}
         """
@@ -139,7 +144,7 @@ final class AliasReplacementTests: XCTestCase {
         // their dictation, not a toast.
         let response = try decode(
             TranscribeResponse.self,
-            from: #"{"text":"hello","replacements":[]}"#
+            from: #"{"text":"hello","rawText":"hello","replacements":[]}"#
         )
 
         XCTAssertEqual(response.replacements, [])

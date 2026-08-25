@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { openDatabase } from "../../src/memory/db";
 import { MemoryStore } from "../../src/memory/MemoryStore";
 import { buildMemoryRoutes } from "../../src/memory/routes";
@@ -735,5 +738,460 @@ describe("PATCH /memory/owner-facts/:id", () => {
     const byContent = new Map(store.allOwnerFacts().map((f) => [f.content, f.origin]));
     expect(byContent.get("Confirm me.")).toBe("owner");
     expect(byContent.get("Leave me untrusted.")).toBe("untrusted");
+  });
+});
+
+describe("POST /memory/consolidation-runs/:id/rollback", () => {
+  // `rollbackRun` (consolidator.ts) already exists and is fully implemented —
+  // this route is the only thing missing to reach it from the Memory panel's
+  // upcoming 回滚 button. The load-bearing assertion is a REAL round trip
+  // through the store via the actual `/memory/consolidate-now` route (not a
+  // hand-seeded run row): a route that only checked the response envelope
+  // would pass against an implementation that never called `rollbackRun` at
+  // all.
+  test("rolls back a real consolidation run: restores entity_terms to its pre-run state and marks the run rolledBackAt", async () => {
+    const store = makeStore();
+    seedEvents(store, 5);
+    const callLLM: CallLLM = async () =>
+      JSON.stringify({
+        candidates: [
+          {
+            canonicalTerm: "Test Org",
+            aliases: [],
+            category: "org",
+            confidence: 0.95,
+            supportingEventIds: [1],
+          },
+        ],
+      });
+    const router = createRouter(buildMemoryRoutes(store, callLLM));
+
+    expect(store.allTerms()).toHaveLength(0);
+
+    const consolidateResponse = await router(post("/memory/consolidate-now"));
+    const consolidateBody = (await consolidateResponse.json()) as {
+      result: { ranRunId: number | null };
+    };
+    const runId = consolidateBody.result.ranRunId;
+    expect(runId).not.toBeNull();
+    // The run actually changed the store -- otherwise "restores" below would
+    // trivially hold even if rollback did nothing.
+    expect(store.allTerms()).toHaveLength(1);
+
+    const response = await router(post(`/memory/consolidation-runs/${runId}/rollback`));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { run: Record<string, unknown> };
+    expect(body.run).toMatchObject({ id: runId });
+    expect(body.run.rolledBackAt).not.toBeNull();
+
+    // The store is back to its pre-run state.
+    expect(store.allTerms()).toHaveLength(0);
+
+    // The run row itself is stamped, which is what the panel's rolled-back
+    // rendering (`MemoryViews.swift`'s 「已回滚」 badge) keys off of.
+    const runRow = store.db
+      .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+      .get(runId) as { rolledBackAt: number | null };
+    expect(runRow.rolledBackAt).not.toBeNull();
+
+    // GET /memory/consolidation-runs reflects it too -- that's the actual
+    // response the panel re-renders from after the rollback button is used.
+    const listResponse = await router(get("/memory/consolidation-runs"));
+    const listBody = (await listResponse.json()) as {
+      runs: Array<{ id: number; rolledBackAt: number | null }>;
+    };
+    expect(listBody.runs.find((r) => r.id === runId)?.rolledBackAt).not.toBeNull();
+  });
+
+  test("404 on an unknown run id, not a throw or a silent success", async () => {
+    const store = makeStore();
+    seedEvents(store, 5);
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const consolidateResponse = await router(post("/memory/consolidate-now"));
+    const { result } = (await consolidateResponse.json()) as {
+      result: { ranRunId: number | null };
+    };
+    const runId = result.ranRunId as number;
+    // Roll back the real id first, so this test can only pass once the route
+    // actually exists -- a *missing* route also answers 404, same reasoning
+    // as the neighbouring 404 tests in this file.
+    expect((await router(post(`/memory/consolidation-runs/${runId}/rollback`))).status).toBe(200);
+
+    const response = await router(post(`/memory/consolidation-runs/${runId + 999}/rollback`));
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("consolidation_run_not_found");
+  });
+
+  test("400 on a non-numeric run id, not a crash", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(post("/memory/consolidation-runs/not-an-id/rollback"));
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("invalid_id");
+  });
+
+  test("rolling back an already-rolled-back run a second time is a no-op that does not touch the store or re-stamp the run", async () => {
+    // Pins `rollbackRun`'s own guard (consolidator.ts:551): once
+    // `rolledBackAt !== null` it returns immediately without repeating the
+    // DELETE-then-reinsert restore. The route must not route around that
+    // guard (e.g. by re-running the restore itself) -- a second rollback of
+    // the same run has to be inert, not merely non-throwing.
+    const store = makeStore();
+    seedEvents(store, 5);
+    const callLLM: CallLLM = async () =>
+      JSON.stringify({
+        candidates: [
+          {
+            canonicalTerm: "Test Org",
+            aliases: [],
+            category: "org",
+            confidence: 0.95,
+            supportingEventIds: [1],
+          },
+        ],
+      });
+    const router = createRouter(buildMemoryRoutes(store, callLLM));
+
+    const consolidateResponse = await router(post("/memory/consolidate-now"));
+    const { result } = (await consolidateResponse.json()) as {
+      result: { ranRunId: number | null };
+    };
+    const runId = result.ranRunId as number;
+
+    const first = await router(post(`/memory/consolidation-runs/${runId}/rollback`));
+    expect(first.status).toBe(200);
+    const firstRolledBackAt = (
+      store.db
+        .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+        .get(runId) as { rolledBackAt: number }
+    ).rolledBackAt;
+    expect(firstRolledBackAt).not.toBeNull();
+
+    // Add a term the first rollback's restored snapshot knows nothing about.
+    // If a second rollback re-ran the restore (DELETE entity_terms + reinsert
+    // the snapshot), this row would be silently wiped -- that's the
+    // corruption this test exists to catch.
+    const extraId = seedTerm(store, { canonicalTerm: "Manually Added After Rollback" });
+
+    const second = await router(post(`/memory/consolidation-runs/${runId}/rollback`));
+
+    expect(second.status).toBe(200);
+    const secondRolledBackAt = (
+      store.db
+        .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+        .get(runId) as { rolledBackAt: number }
+    ).rolledBackAt;
+    // Unchanged -- the guard's early return means the second call never
+    // re-stamps rolledBackAt with a new timestamp.
+    expect(secondRolledBackAt).toBe(firstRolledBackAt);
+    // The store is untouched by the second call.
+    expect(store.allTerms().some((t) => t.id === extraId)).toBe(true);
+  });
+});
+
+describe("POST /memory/consolidation-runs/:id/rollback -- reverse-order rule", () => {
+  // `rollbackRun` (consolidator.ts) restores a FULL-TABLE snapshot taken
+  // *before* the run being undone, not a diff. That's a sound undo *stack*
+  // and an unsound undo *of an arbitrary element*: the snapshot for an
+  // earlier run predates a later run's existence, so restoring it erases
+  // whatever the later run added -- while the later run's own row is left
+  // claiming `rolledBackAt: null`, i.e. the run log would lie. A probe
+  // against the real (untouched) `rollbackRun`/`runConsolidation` confirmed
+  // this concretely: rolling back an older run while a newer one is still
+  // active wipes the newer run's term too, silently.
+  //
+  // The fix isn't to teach the snapshot to be a diff -- it's to only ever
+  // pop the stack from the top. A run is eligible for rollback iff (1) it is
+  // not already rolled back, and (2) every run that ran after it has already
+  // been rolled back. That guard lives at the ROUTE (not inside
+  // `rollbackRun`, which stays untouched), so it holds for any caller.
+  //
+  // Real row order, confirmed against `MemoryStore.listConsolidationRuns()`
+  // (routes.ts / MemoryStore.ts): `ORDER BY ranAt DESC` -- newest run first.
+
+  test("rolls back the newest run (top of the stack): 200, only that run is stamped, the older run's term survives", async () => {
+    const store = makeStore();
+    seedEvents(store, 3);
+    let router = createRouter(
+      buildMemoryRoutes(store, async () =>
+        JSON.stringify({
+          candidates: [
+            { canonicalTerm: "Org A", aliases: [], category: "org", confidence: 0.95, supportingEventIds: [1] },
+          ],
+        })
+      )
+    );
+    const runAId = (
+      (await (await router(post("/memory/consolidate-now"))).json()) as {
+        result: { ranRunId: number | null };
+      }
+    ).result.ranRunId as number;
+
+    seedEvents(store, 3);
+    router = createRouter(
+      buildMemoryRoutes(store, async () =>
+        JSON.stringify({
+          candidates: [
+            { canonicalTerm: "Org B", aliases: [], category: "org", confidence: 0.95, supportingEventIds: [2] },
+          ],
+        })
+      )
+    );
+    const runBId = (
+      (await (await router(post("/memory/consolidate-now"))).json()) as {
+        result: { ranRunId: number | null };
+      }
+    ).result.ranRunId as number;
+
+    expect(store.allTerms().map((t) => t.canonicalTerm).sort()).toEqual(["Org A", "Org B"]);
+
+    router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const response = await router(post(`/memory/consolidation-runs/${runBId}/rollback`));
+
+    expect(response.status).toBe(200);
+    expect(store.allTerms().map((t) => t.canonicalTerm)).toEqual(["Org A"]);
+
+    const runARow = store.db
+      .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+      .get(runAId) as { rolledBackAt: number | null };
+    const runBRow = store.db
+      .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+      .get(runBId) as { rolledBackAt: number | null };
+    expect(runARow.rolledBackAt).toBeNull();
+    expect(runBRow.rolledBackAt).not.toBeNull();
+  });
+
+  test("409 rollback_out_of_order when rolling back a run while a later run is still active, and the store is completely untouched", async () => {
+    const store = makeStore();
+    seedEvents(store, 3);
+    let router = createRouter(
+      buildMemoryRoutes(store, async () =>
+        JSON.stringify({
+          candidates: [
+            { canonicalTerm: "Org A", aliases: [], category: "org", confidence: 0.95, supportingEventIds: [1] },
+          ],
+        })
+      )
+    );
+    const runAId = (
+      (await (await router(post("/memory/consolidate-now"))).json()) as {
+        result: { ranRunId: number | null };
+      }
+    ).result.ranRunId as number;
+
+    seedEvents(store, 3);
+    router = createRouter(
+      buildMemoryRoutes(store, async () =>
+        JSON.stringify({
+          candidates: [
+            { canonicalTerm: "Org B", aliases: [], category: "org", confidence: 0.95, supportingEventIds: [2] },
+          ],
+        })
+      )
+    );
+    const runBId = (
+      (await (await router(post("/memory/consolidate-now"))).json()) as {
+        result: { ranRunId: number | null };
+      }
+    ).result.ranRunId as number;
+
+    const termsBefore = store.allTerms().map((t) => t.canonicalTerm).sort();
+    expect(termsBefore).toEqual(["Org A", "Org B"]);
+
+    router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    // A is not the top of the stack -- B ran after it and is still active.
+    const response = await router(post(`/memory/consolidation-runs/${runAId}/rollback`));
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toBe("rollback_out_of_order");
+
+    // The load-bearing half: a 409 that still mutated the table would be
+    // worse than no guard at all.
+    expect(store.allTerms().map((t) => t.canonicalTerm).sort()).toEqual(termsBefore);
+    const runARow = store.db
+      .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+      .get(runAId) as { rolledBackAt: number | null };
+    const runBRow = store.db
+      .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+      .get(runBId) as { rolledBackAt: number | null };
+    expect(runARow.rolledBackAt).toBeNull();
+    expect(runBRow.rolledBackAt).toBeNull();
+  });
+
+  test("walks the stack down rather than only ever allowing the newest row: three runs rolled back C, then B, then A each succeed and stamp only themselves", async () => {
+    const store = makeStore();
+    seedEvents(store, 3);
+    let router = createRouter(
+      buildMemoryRoutes(store, async () =>
+        JSON.stringify({
+          candidates: [
+            { canonicalTerm: "Org A", aliases: [], category: "org", confidence: 0.95, supportingEventIds: [1] },
+          ],
+        })
+      )
+    );
+    const runAId = (
+      (await (await router(post("/memory/consolidate-now"))).json()) as {
+        result: { ranRunId: number | null };
+      }
+    ).result.ranRunId as number;
+
+    seedEvents(store, 3);
+    router = createRouter(
+      buildMemoryRoutes(store, async () =>
+        JSON.stringify({
+          candidates: [
+            { canonicalTerm: "Org B", aliases: [], category: "org", confidence: 0.95, supportingEventIds: [2] },
+          ],
+        })
+      )
+    );
+    const runBId = (
+      (await (await router(post("/memory/consolidate-now"))).json()) as {
+        result: { ranRunId: number | null };
+      }
+    ).result.ranRunId as number;
+
+    seedEvents(store, 3);
+    router = createRouter(
+      buildMemoryRoutes(store, async () =>
+        JSON.stringify({
+          candidates: [
+            { canonicalTerm: "Org C", aliases: [], category: "org", confidence: 0.95, supportingEventIds: [3] },
+          ],
+        })
+      )
+    );
+    const runCId = (
+      (await (await router(post("/memory/consolidate-now"))).json()) as {
+        result: { ranRunId: number | null };
+      }
+    ).result.ranRunId as number;
+
+    expect(store.allTerms().map((t) => t.canonicalTerm).sort()).toEqual(["Org A", "Org B", "Org C"]);
+
+    router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    function rolledBackAt(runId: number): number | null {
+      return (
+        store.db
+          .query("SELECT rolledBackAt FROM memory_consolidation_runs WHERE id = ?")
+          .get(runId) as { rolledBackAt: number | null }
+      ).rolledBackAt;
+    }
+
+    // Pop C -- the top of the stack. B and A are unaffected.
+    const rollbackC = await router(post(`/memory/consolidation-runs/${runCId}/rollback`));
+    expect(rollbackC.status).toBe(200);
+    expect(store.allTerms().map((t) => t.canonicalTerm).sort()).toEqual(["Org A", "Org B"]);
+    expect(rolledBackAt(runCId)).not.toBeNull();
+    expect(rolledBackAt(runBId)).toBeNull();
+    expect(rolledBackAt(runAId)).toBeNull();
+
+    // Now B is the top of the (remaining active) stack -- not because it is
+    // the physically newest ROW, but because C above it is already rolled
+    // back. This is the case the "newest row only" hard-coding would miss.
+    const rollbackB = await router(post(`/memory/consolidation-runs/${runBId}/rollback`));
+    expect(rollbackB.status).toBe(200);
+    expect(store.allTerms().map((t) => t.canonicalTerm)).toEqual(["Org A"]);
+    expect(rolledBackAt(runBId)).not.toBeNull();
+    expect(rolledBackAt(runAId)).toBeNull();
+
+    // Finally A, now that both runs after it are rolled back.
+    const rollbackA = await router(post(`/memory/consolidation-runs/${runAId}/rollback`));
+    expect(rollbackA.status).toBe(200);
+    expect(store.allTerms()).toHaveLength(0);
+    expect(rolledBackAt(runAId)).not.toBeNull();
+  });
+});
+
+// Closes docs/superpowers/specs/2026-08-09-current-system-state.md §11's
+// "context-debug.log has no governance" gap, the "not cleared by the reset
+// input history action" third. This route is the HTTP exit for
+// `contextDebugLog.ts`'s `clearContextUsageLog` (see
+// `test/oneshot/contextDebugLog.test.ts` for that primitive's own coverage).
+//
+// ASSUMPTION flagged for review: `buildMemoryRoutes` is assumed to grow a
+// third, trailing *optional* parameter -- `contextLogPath?: string` -- so
+// every pre-existing call in this file (`buildMemoryRoutes(store,
+// noOpCallLLM())`, unchanged above) keeps compiling untouched. This mirrors
+// the existing trailing-optional-parameter convention `buildApp` already
+// uses for `spillRoot?`/`runLogRoot?` in `src/server.ts`. `main()`'s real
+// wiring is expected to pass `env.contextLogPath` (see `src/env.ts`) as this
+// third argument, the same way it already passes `env.dbPath` etc.
+describe("DELETE /memory/context-log", () => {
+  test("clears the context log file and its rotated generation, returning the shared delete envelope", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opentype-context-log-route-"));
+    const path = join(dir, "context-debug.log");
+    try {
+      writeFileSync(path, "some logged input\n");
+      writeFileSync(`${path}.1`, "an older generation\n");
+      const store = makeStore();
+      const router = createRouter(buildMemoryRoutes(store, noOpCallLLM(), path));
+
+      const response = await router(del("/memory/context-log"));
+
+      expect(response.status).toBe(200);
+      // Same envelope shape as the neighbouring DELETE /memory/terms/:id and
+      // DELETE /memory/owner-facts/:id routes above.
+      expect(await response.json()).toEqual({ deleted: true });
+      expect(existsSync(path)).toBe(false);
+      expect(existsSync(`${path}.1`)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("is a 200 no-op success when there is nothing to delete, not a 404", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opentype-context-log-route-"));
+    const path = join(dir, "context-debug.log");
+    try {
+      const store = makeStore();
+      const router = createRouter(buildMemoryRoutes(store, noOpCallLLM(), path));
+
+      const response = await router(del("/memory/context-log"));
+
+      // Unlike the id-addressed term/owner-fact deletes, this route has no
+      // "unknown id" concept -- it clears a file that may or may not exist,
+      // and idempotent-clear-of-nothing is success, matching
+      // `clearContextUsageLog`'s own no-op contract.
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ deleted: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not touch entity terms or owner facts", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "opentype-context-log-route-"));
+    const path = join(dir, "context-debug.log");
+    try {
+      writeFileSync(path, "some logged input\n");
+      const store = makeStore();
+      seedTerm(store);
+      store.recordOwnerFact("Keep me.");
+      const router = createRouter(buildMemoryRoutes(store, noOpCallLLM(), path));
+
+      const response = await router(del("/memory/context-log"));
+
+      // Without pinning the status here, this test passes vacuously against
+      // a *missing* route too (a 404 fallthrough never touches the store
+      // either) -- which would defeat the point of a dedicated "does not
+      // touch" test. Asserting 200 ties these checks to a route that
+      // actually ran.
+      expect(response.status).toBe(200);
+      expect(store.allTerms()).toHaveLength(1);
+      expect(store.allOwnerFacts()).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

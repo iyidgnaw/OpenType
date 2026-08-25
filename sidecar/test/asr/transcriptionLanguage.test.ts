@@ -84,7 +84,10 @@ describe("POST /asr/transcribe language passthrough", () => {
     const response = await router(post({ audioBase64: "aGk=", language: "en" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ text: "hello world" });
+    // rawText (Task 4) is unconditional and unrelated to language passthrough;
+    // with no dictionary it equals text. See routes.test.ts's "rawText"
+    // describe block for that field's own coverage.
+    expect(await response.json()).toEqual({ text: "hello world", rawText: "hello world" });
     expect(capturedOptions?.language).toBe("en");
   });
 
@@ -177,11 +180,12 @@ describe("POST /asr/transcribe language passthrough", () => {
     const response = await router(post({ audioBase64: "aGk=", language: "zh" }));
 
     expect(response.status).toBe(200);
-    // Still the whole body, not one field of it: the rewrite report (D-1) is a
-    // key this response gained, and a language-scoped request must carry it
-    // exactly like an unscoped one.
+    // Still the whole body, not one field of it: the rewrite report (D-1) and
+    // rawText (Task 4) are keys this response gained, and a language-scoped
+    // request must carry them exactly like an unscoped one.
     expect(await response.json()).toEqual({
       text: "我用PayPal付款",
+      rawText: "我用呸泡付款",
       replacements: [{ from: "呸泡", to: "PayPal", termId: term.id }],
     });
   });

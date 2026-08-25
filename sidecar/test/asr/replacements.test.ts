@@ -214,14 +214,18 @@ describe("POST /asr/transcribe replacement rows name the term that won", () => {
 
 describe("POST /asr/transcribe stays backward compatible when nothing was rewritten", () => {
   test("omits the key entirely rather than sending an empty array", async () => {
-    // Not cosmetic: `routes.test.ts` pins this response with a strict
-    // `toEqual({ text })`, and every existing caller (including any older build
-    // of the Swift app talking to a newer sidecar) reads a two-key object as a
-    // shape it does not recognise. An absent key is the only form of "nothing
-    // happened" that costs nothing downstream.
+    // Not cosmetic: every existing caller (including any older build of the
+    // Swift app talking to a newer sidecar) reads a `replacements` array it
+    // does not recognise as an unfamiliar shape, and an empty one would let
+    // the UI announce 「自动修正 0 处」. An absent key is the only form of
+    // "nothing was rewritten" that costs nothing downstream. This is
+    // specifically about `replacements`, not the whole response: `rawText`
+    // (Task 4) is unconditional and present below regardless of whether a
+    // rewrite happened -- see the "rawText" describe block in
+    // `routes.test.ts` for that field's own coverage.
     const body = await transcribeWith("hello world", [makeTerm("PayPal", ["呸泡"])]);
 
-    expect(body).toEqual({ text: "hello world" });
+    expect(body).toEqual({ text: "hello world", rawText: "hello world" });
     expect("replacements" in body).toBe(false);
   });
 
@@ -231,7 +235,7 @@ describe("POST /asr/transcribe stays backward compatible when nothing was rewrit
     const response = await router(post({ audioBase64: "aGk=" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ text: "hello world" });
+    expect(await response.json()).toEqual({ text: "hello world", rawText: "hello world" });
   });
 
   test("omits the key when reading the dictionary throws", async () => {
@@ -250,7 +254,10 @@ describe("POST /asr/transcribe stays backward compatible when nothing was rewrit
     const response = await router(post({ audioBase64: "aGk=" }));
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ text: "我用呸泡付款" });
+    expect(await response.json()).toEqual({
+      text: "我用呸泡付款",
+      rawText: "我用呸泡付款",
+    });
   });
 
   test("the error responses are untouched", async () => {

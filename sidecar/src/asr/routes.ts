@@ -144,10 +144,17 @@ async function handleTranscribe(
     // D-1 looked exactly like the line below, `routes.test.ts` pins it with a
     // strict `toEqual({ text })`, and an empty list downstream would let the UI
     // announce 「自动修正 0 处」 on the hottest path in the product.
+    //
+    // rawText carries what Whisper actually produced, before
+    // applyAliasCorrections rewrote it. Swift now writes the episodic event
+    // itself (design §3.2) and needs both halves of the transcript: the
+    // raw-versus-corrected pair is what consolidation mines to discover what
+    // the recognizer misheard. Sending `corrected.text` for both fields would
+    // look correct while permanently destroying that signal.
     if (replacements.length === 0) {
-      return Response.json({ text: corrected.text });
+      return Response.json({ text: corrected.text, rawText: text });
     }
-    return Response.json({ text: corrected.text, replacements });
+    return Response.json({ text: corrected.text, rawText: text, replacements });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return Response.json({ error: message }, { status: 502 });

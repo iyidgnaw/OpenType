@@ -1296,6 +1296,13 @@ git commit -m "Give the agent a way to open what it was shown"
 
 **Interfaces:** 无代码接口。
 
+- [ ] **Step 0: 两处因 Task 3 而失效的代码注释**
+
+- `sidecar/src/agent/routes.ts` 第 206–211 行 catch 块的注释说取消路径「**刻意**不写 episodic 事件」。
+  这条注释描述的是一个该路由已经不再做的决定——它现在无论成功还是取消都不写。
+  留着会让下一个读者以为这里有一处特殊处理。
+- `sidecar/src/server.ts` 里 `buildAsrRoutes` 那段注释已由 Task 3 改写，核对一遍即可。
+
 - [ ] **Step 1: 改 `MemoryStore.ts` 的 `CONSOLIDATION_EXCLUDED_MODES` 注释**
 
 现注释说「plain dictation never reaches an LLM」并列举 README / USER_GUIDE §13 / CLAUDE.md。

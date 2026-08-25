@@ -177,6 +177,51 @@ describe("runAgentLoop", () => {
     const systemMessage = capturedMessages.find((m) => m.role === "system");
     expect(systemMessage?.content).toBeTruthy();
   });
+
+  // Task 10 (design §3.5): `recentActivity` is rendered by
+  // `memory/recentActivity.ts` and handed to the loop verbatim. It must land
+  // in the same place `knownTerms`/`runtimeContext` do -- the final user
+  // message -- and never in the system message. Content that changes on
+  // every request (this block changes every time the episodic store gains a
+  // new row) invalidates the whole KV-cache prefix if it lands in the system
+  // prompt (`docs/model-context-inventory.md` §5), so this is a correctness
+  // property, not a style preference.
+  test("recentActivity is appended to the final user message, never to the system message", async () => {
+    let capturedMessages: AgentChatMessage[] = [];
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "ok" };
+    };
+    const recentActivity =
+      'Recent activity, oldest first.\n{"eventId":43,"mode":"ask","input":"明天那边天气怎么样"}';
+
+    await runAgentLoop(
+      { task: "做事", recentActivity },
+      { chat, tools: noTools() }
+    );
+
+    expect(capturedMessages[0]?.role).toBe("system");
+    expect(capturedMessages[0]?.content).not.toContain("Recent activity");
+    expect(capturedMessages[0]?.content).not.toContain("明天那边天气怎么样");
+
+    const lastMessage = capturedMessages[capturedMessages.length - 1];
+    expect(lastMessage?.role).toBe("user");
+    expect(lastMessage?.content).toContain("Recent activity, oldest first.");
+    expect(lastMessage?.content).toContain("明天那边天气怎么样");
+  });
+
+  test("omitting recentActivity produces no stray header or trace of it in the user message", async () => {
+    let capturedMessages: AgentChatMessage[] = [];
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "ok" };
+    };
+
+    await runAgentLoop({ task: "做事" }, { chat, tools: noTools() });
+
+    const userMessage = capturedMessages.find((m) => m.role === "user");
+    expect(userMessage?.content).not.toContain("Recent activity");
+  });
 });
 
 /**

@@ -8,6 +8,11 @@ import type { Route } from "../router";
 import { ApiError } from "../router";
 import type { OneShotChatFn, OneShotChatMessage } from "./client";
 import { buildKnownTermsContext, findKnownTerms } from "./memoryContext";
+import {
+  buildRecentActivityContext,
+  RECENT_ACTIVITY_EXCLUDED_MODES,
+  RECENT_ACTIVITY_LIMIT,
+} from "../memory/recentActivity";
 import { ASK_SYSTEM_PROMPT } from "./prompts";
 import { logContextUsage, type ContextUsageLogWriter } from "./contextDebugLog";
 
@@ -87,6 +92,17 @@ async function handleAsk(
     contextLogWriter
   );
   const knownTerms = buildKnownTermsContext(store, question);
+  // Last RECENT_ACTIVITY_LIMIT episodic events across all three modes (Task
+  // 10, spec §3.5) -- `RECENT_ACTIVITY_EXCLUDED_MODES` is empty on purpose,
+  // so a plain dictation shows up here too. `includeIds: false` because ask
+  // has no `opentype__read_history` tool (web-only toolset, see
+  // `ASK_TOOL_NAMES` above); showing it an eventId it cannot act on would
+  // only be noise. Agent gets `includeIds: true` for the same reason in
+  // reverse -- see `agent/routes.ts`.
+  const recentActivity = buildRecentActivityContext(
+    store.recentEvents(RECENT_ACTIVITY_LIMIT, { excludeModes: RECENT_ACTIVITY_EXCLUDED_MODES }),
+    { includeIds: false }
+  );
 
   const { conversationId, priorMessages } = resolveConversation(
     conversations,
@@ -114,6 +130,7 @@ async function handleAsk(
       task: question,
       knownTerms,
       runtimeContext: buildTimeContext(),
+      recentActivity,
       systemPrompt: ASK_SYSTEM_PROMPT,
       priorMessages,
       maxIterations: ASK_MAX_ITERATIONS,

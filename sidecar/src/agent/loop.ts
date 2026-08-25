@@ -61,6 +61,20 @@ export interface RunAgentLoopInput {
    * `docs/model-context-inventory.md`.
    */
   runtimeContext?: string;
+  /**
+   * Last few episodic events spanning all three modes, rendered by
+   * `memory/recentActivity.ts`'s `buildRecentActivityContext` (T9/T10, spec
+   * §3.5).
+   *
+   * Appended to the FINAL USER MESSAGE, in the same place and for the same
+   * reason as `knownTerms`/`runtimeContext` above: it changes on every
+   * request (a new episodic row invalidates it), and content that changes
+   * per-request must never land in the system message -- doing so would
+   * invalidate the whole KV-cache prefix on every call
+   * (`docs/model-context-inventory.md` §5). This field is exactly that kind
+   * of content, so it follows the same rule, not a style choice.
+   */
+  recentActivity?: string;
   /** System message content; defaults to `AGENT_SYSTEM_PROMPT`. */
   systemPrompt?: string;
   /**
@@ -176,6 +190,9 @@ function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   }
   if (input.runtimeContext) {
     userContentParts.push("", input.runtimeContext);
+  }
+  if (input.recentActivity) {
+    userContentParts.push("", input.recentActivity);
   }
 
   return [

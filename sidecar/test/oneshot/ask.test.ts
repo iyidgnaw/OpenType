@@ -44,6 +44,7 @@ import { buildOneShotRoutes } from "../../src/oneshot/routes";
 import { createRouter } from "../../src/router";
 import type { ContextUsageLogWriter } from "../../src/oneshot/contextDebugLog";
 import type { ToolSet } from "../../src/agent/toolSets";
+import { RECENT_ACTIVITY_LIMIT } from "../../src/memory/recentActivity";
 
 function makeStore(): MemoryStore {
   return new MemoryStore(openDatabase(":memory:"));
@@ -450,6 +451,190 @@ describe("POST /oneshot/ask", () => {
       expect(chatCalls).toBe(6);
       expect(invocations).toHaveLength(6);
       expect(typeof body.result).toBe("string");
+    });
+  });
+
+  /**
+   * Task 10 (design §3.5): the last `RECENT_ACTIVITY_LIMIT` episodic events,
+   * across ALL THREE modes (transcribe/ask/agent -- no excluded mode,
+   * `RECENT_ACTIVITY_EXCLUDED_MODES` is empty on purpose, spec §六), rendered
+   * by `buildRecentActivityContext` and injected into the loop's final user
+   * message. Ask gets `includeIds: false` -- it has no
+   * `opentype__read_history` tool (that whitelist lives in
+   * `agent/coreTools.ts`, and `ASK_TOOL_NAMES` narrows to web-only), so an id
+   * it cannot act on would only be noise.
+   */
+  describe("recent activity injection (Task 10, design §3.5)", () => {
+    test("injects recent activity spanning all three modes into the user message, with no ids", async () => {
+      const store = makeStore();
+      store.recordEpisodicEvent({
+        mode: "transcribe",
+        rawTranscript: "明天去深圳",
+        correctedTranscript: "明天去深圳",
+        effectiveInput: null,
+        selectedContext: null,
+        result: null,
+        applicationName: "WeChat",
+      });
+      store.recordEpisodicEvent({
+        mode: "ask",
+        rawTranscript: "上个月去了哪里",
+        correctedTranscript: "上个月去了哪里出差",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "上个月去了上海出差",
+        applicationName: "OpenType",
+      });
+      store.recordEpisodicEvent({
+        mode: "agent",
+        rawTranscript: "整理待办",
+        correctedTranscript: "把纪要整理成待办",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "已生成 5 条待办并复制到剪贴板",
+        applicationName: "Terminal",
+      });
+
+      let capturedMessages: OneShotChatMessage[] | undefined;
+      const chat: OneShotChatFn = async (messages) => {
+        capturedMessages = messages;
+        return { content: "answer" };
+      };
+      const router = createRouter(
+        buildOneShotRoutes(store, makeConversations(), chat, captureContextLog().writer)
+      );
+
+      await router(post({ question: "那边天气怎么样" }));
+
+      const userMessage = capturedMessages!.find((m) => m.role === "user");
+      expect(userMessage?.content).toContain("明天去深圳");
+      expect(userMessage?.content).toContain("上个月去了哪里出差");
+      expect(userMessage?.content).toContain("把纪要整理成待办");
+      expect(userMessage?.content).not.toContain("eventId");
+    });
+
+    // The product decision this whole batch exists for (spec §六): a plain
+    // dictation, which never itself reached a model, still shows up in the
+    // context of a LATER ask/agent turn. Pinned as its own test, isolated
+    // from the multi-mode test above, because this is exactly the assertion
+    // someone would quietly weaken later (e.g. by re-adding "transcribe" to
+    // `RECENT_ACTIVITY_EXCLUDED_MODES`).
+    test("a dictation-only (transcribe) event reaches ask's injected context", async () => {
+      const store = makeStore();
+      store.recordEpisodicEvent({
+        mode: "transcribe",
+        rawTranscript: "帮我记一下会议纪要",
+        correctedTranscript: "帮我记一下会议纪要",
+        effectiveInput: null,
+        selectedContext: null,
+        result: null,
+        applicationName: "Notes",
+      });
+
+      let capturedMessages: OneShotChatMessage[] | undefined;
+      const chat: OneShotChatFn = async (messages) => {
+        capturedMessages = messages;
+        return { content: "answer" };
+      };
+      const router = createRouter(
+        buildOneShotRoutes(store, makeConversations(), chat, captureContextLog().writer)
+      );
+
+      await router(post({ question: "刚才记的是什么" }));
+
+      const userMessage = capturedMessages!.find((m) => m.role === "user");
+      expect(userMessage?.content).toContain("帮我记一下会议纪要");
+    });
+
+    test("an empty store injects nothing -- no stray header, no empty block", async () => {
+      const store = makeStore();
+      let capturedMessages: OneShotChatMessage[] | undefined;
+      const chat: OneShotChatFn = async (messages) => {
+        capturedMessages = messages;
+        return { content: "answer" };
+      };
+      const router = createRouter(
+        buildOneShotRoutes(store, makeConversations(), chat, captureContextLog().writer)
+      );
+
+      await router(post({ question: "what time is it" }));
+
+      const userMessage = capturedMessages!.find((m) => m.role === "user");
+      expect(userMessage?.content).not.toContain("Recent activity");
+    });
+
+    // Since plan Task 3, the sidecar routes write no episodic event at all
+    // (writing moved to Swift's single write point, POST /memory/events,
+    // fired only after delivery). So the current turn's own question
+    // structurally cannot appear in `recentEvents()` -- it isn't in the
+    // store yet when this handler reads it. That invariant's real
+    // enforcement now lives on the Swift side (plan Task 5: Swift must POST
+    // the event only after it has the answer). This test is cheap insurance
+    // here: it catches anyone who later re-adds a write at this route's
+    // entry point before the recentEvents read.
+    test("the current turn's own question is not present in its own injected context", async () => {
+      const store = makeStore();
+      let capturedMessages: OneShotChatMessage[] | undefined;
+      const chat: OneShotChatFn = async (messages) => {
+        capturedMessages = messages;
+        return { content: "answer" };
+      };
+      const router = createRouter(
+        buildOneShotRoutes(store, makeConversations(), chat, captureContextLog().writer)
+      );
+
+      await router(post({ question: "这是当前这一轮不应该出现在自己的上下文里" }));
+
+      const userMessage = capturedMessages!.find((m) => m.role === "user");
+      expect(userMessage?.content).not.toContain("Recent activity");
+      expect(store.recentEvents(10)).toHaveLength(0);
+    });
+
+    // Nothing else in this describe block proves the route actually passes
+    // `RECENT_ACTIVITY_LIMIT` to `store.recentEvents` -- every fixture above
+    // plants at most 3 events, so a route that called `recentEvents(5, ...)`
+    // or `recentEvents(20, ...)` would pass those tests too. Plant more than
+    // the limit and assert the oldest are dropped, the newest kept.
+    test(`only the most recent ${RECENT_ACTIVITY_LIMIT} events are injected -- older ones are dropped`, async () => {
+      const store = makeStore();
+      const overflow = RECENT_ACTIVITY_LIMIT + 3;
+      // Zero-padded so no marker is a substring of another (e.g. unpadded
+      // "事件标记-1" would be a substring of "事件标记-10"/"-11"/"-12", making
+      // the "dropped" assertion below unsatisfiable regardless of whether the
+      // limit is actually honoured).
+      const marker = (i: number) => `事件标记-${String(i).padStart(2, "0")}`;
+      for (let i = 0; i < overflow; i++) {
+        store.recordEpisodicEvent({
+          mode: "transcribe",
+          rawTranscript: marker(i),
+          correctedTranscript: marker(i),
+          effectiveInput: null,
+          selectedContext: null,
+          result: null,
+          applicationName: "Notes",
+        });
+      }
+
+      let capturedMessages: OneShotChatMessage[] | undefined;
+      const chat: OneShotChatFn = async (messages) => {
+        capturedMessages = messages;
+        return { content: "answer" };
+      };
+      const router = createRouter(
+        buildOneShotRoutes(store, makeConversations(), chat, captureContextLog().writer)
+      );
+
+      await router(post({ question: "最近都记了什么" }));
+
+      const userMessage = capturedMessages!.find((m) => m.role === "user");
+      // Oldest 3 (planted first, dropped by the limit) must be absent.
+      for (let i = 0; i < overflow - RECENT_ACTIVITY_LIMIT; i++) {
+        expect(userMessage?.content).not.toContain(marker(i));
+      }
+      // Newest `RECENT_ACTIVITY_LIMIT` (planted last) must all be present.
+      for (let i = overflow - RECENT_ACTIVITY_LIMIT; i < overflow; i++) {
+        expect(userMessage?.content).toContain(marker(i));
+      }
     });
   });
 });

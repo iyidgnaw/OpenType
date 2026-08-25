@@ -9,6 +9,11 @@ import type { AgentProgressRegistry } from "./progressRegistry";
 import { createAgentProgressRegistry } from "./progressRegistry";
 import { buildKnownTermsContext, findKnownTerms } from "../oneshot/memoryContext";
 import { buildTimeContext } from "../context/timeContext";
+import {
+  buildRecentActivityContext,
+  RECENT_ACTIVITY_EXCLUDED_MODES,
+  RECENT_ACTIVITY_LIMIT,
+} from "../memory/recentActivity";
 import { saveSpill } from "./spill";
 import { createRepeatGuard } from "./repeatGuard";
 import { createRunLog, type RunLog } from "./runLog";
@@ -126,6 +131,16 @@ async function handleAgentRun(
     contextLogWriter
   );
   const knownTerms = buildKnownTermsContext(store, relevantText);
+  // Last RECENT_ACTIVITY_LIMIT episodic events across all three modes (Task
+  // 10, spec §3.5) -- `RECENT_ACTIVITY_EXCLUDED_MODES` is empty on purpose,
+  // so a plain dictation shows up here too. `includeIds: true` because agent
+  // does carry `opentype__read_history` (registered in `coreTools.ts`), so
+  // it can expand any `eventId`/`conversationId` it sees here -- the mirror
+  // image of ask's `includeIds: false` in `oneshot/routes.ts`.
+  const recentActivity = buildRecentActivityContext(
+    store.recentEvents(RECENT_ACTIVITY_LIMIT, { excludeModes: RECENT_ACTIVITY_EXCLUDED_MODES }),
+    { includeIds: true }
+  );
 
   const { conversationId, priorMessages } = resolveConversation(
     conversations,
@@ -154,7 +169,13 @@ async function handleAgentRun(
   let loopResult;
   try {
     loopResult = await runAgentLoop(
-      { task, context: combinedContext, knownTerms, runtimeContext: buildTimeContext() },
+      {
+        task,
+        context: combinedContext,
+        knownTerms,
+        runtimeContext: buildTimeContext(),
+        recentActivity,
+      },
       {
         chat,
         // ask_user is built per run because it must address THIS run's

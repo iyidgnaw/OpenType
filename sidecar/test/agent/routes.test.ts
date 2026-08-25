@@ -459,3 +459,127 @@ describe("agent progress (runId + GET /agent/progress/:runId)", () => {
     expect((await response.json()) as ProgressBody).toEqual({ status: "unknown", events: [] });
   });
 });
+
+/**
+ * Task 10 (design §3.5): the last `RECENT_ACTIVITY_LIMIT` episodic events,
+ * across ALL THREE modes (no excluded mode --
+ * `RECENT_ACTIVITY_EXCLUDED_MODES` is empty on purpose, spec §六), rendered
+ * by `buildRecentActivityContext` and injected into the loop's final user
+ * message. Agent gets `includeIds: true` -- unlike ask, it carries
+ * `opentype__read_history` (registered in `agent/coreTools.ts`), so it can
+ * expand any `eventId`/`conversationId` it sees here.
+ */
+describe("recent activity injection (Task 10, design §3.5)", () => {
+  test("injects recent activity into the user message, with eventId present", async () => {
+    const store = makeStore();
+    store.recordEpisodicEvent({
+      mode: "transcribe",
+      rawTranscript: "明天去深圳",
+      correctedTranscript: "明天去深圳",
+      effectiveInput: null,
+      selectedContext: null,
+      result: null,
+      applicationName: "WeChat",
+    });
+    store.recordEpisodicEvent({
+      mode: "ask",
+      rawTranscript: "上个月去了哪里",
+      correctedTranscript: "上个月去了哪里出差",
+      effectiveInput: null,
+      selectedContext: null,
+      result: "上个月去了上海出差",
+      applicationName: "OpenType",
+    });
+
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const router = createRouter(
+      buildAgentRoutes(store, makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    await router(post({ task: "帮我订票" }));
+
+    const userMessage = capturedMessages!.find((m) => m.role === "user");
+    expect(userMessage?.content).toContain("明天去深圳");
+    expect(userMessage?.content).toContain("eventId");
+  });
+
+  // The product decision this whole batch exists for (spec §六): a plain
+  // dictation, which never itself reached a model, still shows up in the
+  // context of a LATER ask/agent turn. Pinned as its own test, isolated from
+  // the multi-mode test above, because this is exactly the assertion someone
+  // would quietly weaken later (e.g. by re-adding "transcribe" to
+  // `RECENT_ACTIVITY_EXCLUDED_MODES`).
+  test("a dictation-only (transcribe) event reaches agent's injected context", async () => {
+    const store = makeStore();
+    store.recordEpisodicEvent({
+      mode: "transcribe",
+      rawTranscript: "帮我记一下会议纪要",
+      correctedTranscript: "帮我记一下会议纪要",
+      effectiveInput: null,
+      selectedContext: null,
+      result: null,
+      applicationName: "Notes",
+    });
+
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const router = createRouter(
+      buildAgentRoutes(store, makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    await router(post({ task: "刚才记的纪要整理成待办" }));
+
+    const userMessage = capturedMessages!.find((m) => m.role === "user");
+    expect(userMessage?.content).toContain("帮我记一下会议纪要");
+  });
+
+  test("an empty store injects nothing -- no stray header, no empty block", async () => {
+    const store = makeStore();
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const router = createRouter(
+      buildAgentRoutes(store, makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    await router(post({ task: "just a task" }));
+
+    const userMessage = capturedMessages!.find((m) => m.role === "user");
+    expect(userMessage?.content).not.toContain("Recent activity");
+  });
+
+  // Since plan Task 3, the sidecar routes write no episodic event at all
+  // (writing moved to Swift's single write point, POST /memory/events, fired
+  // only after delivery). So the current turn's own task structurally cannot
+  // appear in `recentEvents()` -- it isn't in the store yet when this
+  // handler reads it. That invariant's real enforcement now lives on the
+  // Swift side (plan Task 5). This test is cheap insurance here: it catches
+  // anyone who later re-adds a write at this route's entry point before the
+  // recentEvents read.
+  test("the current turn's own task is not present in its own injected context", async () => {
+    const store = makeStore();
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const router = createRouter(
+      buildAgentRoutes(store, makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    await router(post({ task: "这是当前这一轮不应该出现在自己的上下文里" }));
+
+    const userMessage = capturedMessages!.find((m) => m.role === "user");
+    expect(userMessage?.content).not.toContain("Recent activity");
+    expect(store.recentEvents(10)).toHaveLength(0);
+  });
+});

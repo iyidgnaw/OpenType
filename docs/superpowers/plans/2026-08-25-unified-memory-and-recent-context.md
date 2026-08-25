@@ -29,9 +29,9 @@
 | 文件 | 职责 |
 |---|---|
 | `sidecar/src/memory/recentActivity.ts` | 纯函数：把 `EpisodicEventRow[]` 渲染成注入用的 JSONL 块 |
-| `sidecar/src/memory/recentActivity.test.ts` | 上者的测试 |
+| `sidecar/test/memory/recentActivity.test.ts` | 上者的测试 |
 | `sidecar/src/agent/readHistoryTool.ts` | `opentype__read_history` 的 handler 与 schema |
-| `sidecar/src/agent/readHistoryTool.test.ts` | 上者的测试 |
+| `sidecar/test/agent/readHistoryTool.test.ts` | 上者的测试 |
 | `Sources/OpenType/EpisodicEventRecorder.swift` | Swift 单写入点：把一次完成的会话变成 `POST /memory/events` 的 body（纯函数 + 一个 best-effort 发送方法） |
 | `Tests/OpenTypeTests/EpisodicEventRecorderTests.swift` | 上者的测试 |
 
@@ -62,7 +62,7 @@
 
 **Files:**
 - Modify: `sidecar/src/memory/db.ts`
-- Test: `sidecar/src/memory/db.test.ts`
+- Test: `sidecar/test/memory/db.test.ts`
 
 **Interfaces:**
 - Consumes: 无
@@ -118,7 +118,7 @@ describe("openDatabase schema reset", () => {
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/memory/db.test.ts`
+Run: `cd sidecar && bun test test/memory/db.test.ts`
 Expected: FAIL —— `SCHEMA_VERSION` 与 `applySchema` 未导出；`conversationId` 列不存在。
 
 - [ ] **Step 3: 实现**
@@ -191,13 +191,13 @@ export function applySchema(db: Database): void {
 
 - [ ] **Step 4: 跑测试确认绿**
 
-Run: `cd sidecar && bun test src/memory/`
+Run: `cd sidecar && bun test test/memory/`
 Expected: PASS，且 `MemoryStore.test.ts`/`consolidator.test.ts` 不回归。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add sidecar/src/memory/db.ts sidecar/src/memory/db.test.ts
+git add sidecar/src/memory/db.ts sidecar/test/memory/db.test.ts
 git commit -m "Reset episodic events instead of migrating them"
 ```
 
@@ -207,7 +207,7 @@ git commit -m "Reset episodic events instead of migrating them"
 
 **Files:**
 - Modify: `sidecar/src/memory/MemoryStore.ts`
-- Test: `sidecar/src/memory/MemoryStore.test.ts`
+- Test: `sidecar/test/memory/MemoryStore.test.ts`
 
 **Interfaces:**
 - Consumes: Task 1 的 `conversationId` 列
@@ -278,7 +278,7 @@ function base(patch: Partial<RecordEpisodicEventInput>): RecordEpisodicEventInpu
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/memory/MemoryStore.test.ts`
+Run: `cd sidecar && bun test test/memory/MemoryStore.test.ts`
 Expected: FAIL —— `recentEvents is not a function`。
 
 - [ ] **Step 3: 实现**
@@ -317,13 +317,13 @@ recentEvents(
 
 - [ ] **Step 4: 跑测试确认绿**
 
-Run: `cd sidecar && bun test src/memory/`
+Run: `cd sidecar && bun test test/memory/`
 Expected: PASS。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add sidecar/src/memory/MemoryStore.ts sidecar/src/memory/MemoryStore.test.ts
+git add sidecar/src/memory/MemoryStore.ts sidecar/test/memory/MemoryStore.test.ts
 git commit -m "Read recent events by time, the query that never existed"
 ```
 
@@ -333,7 +333,8 @@ git commit -m "Read recent events by time, the query that never existed"
 
 **Files:**
 - Modify: `sidecar/src/memory/routes.ts`, `sidecar/src/asr/routes.ts`, `sidecar/src/oneshot/routes.ts`, `sidecar/src/agent/routes.ts`, `sidecar/src/server.ts`
-- Test: `sidecar/src/memory/routes.test.ts`, 以及三个路由各自已有的测试文件
+- Test: `sidecar/test/memory/routes.test.ts`, 以及三个路由各自已有的测试文件
+- **注意** `sidecar/test/memory/episodicWiring.test.ts` 就是钉住「三个路由都写 episodic 事件」的那个文件（P1-7 的成果）。移除写入后它必然全红——**不要删掉它**，把它改写成钉住新契约：三个路由都**不再**写，写入只发生在 `POST /memory/events`。它从「证明三处都接上了」变成「证明三处都摘干净了」，是同一个不变量的另一面。
 
 **Interfaces:**
 - Consumes: Task 2 的 `recordEpisodicEvent(input)`
@@ -385,7 +386,7 @@ test("/asr/transcribe 不再写 episodic 事件 —— 写入已移交 Swift 单
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/memory/routes.test.ts src/asr src/oneshot src/agent`
+Run: `cd sidecar && bun test test/memory/routes.test.ts test/asr test/oneshot test/agent`
 Expected: FAIL —— 路由 404；三处旧写入仍在，`recentEvents` 非空。
 
 - [ ] **Step 3: 实现**
@@ -440,7 +441,7 @@ git commit -m "Move episodic writes behind one endpoint"
 
 **Files:**
 - Modify: `sidecar/src/asr/routes.ts`
-- Test: `sidecar/src/asr/routes.test.ts`
+- Test: `sidecar/test/asr/routes.test.ts`
 
 **Interfaces:**
 - Produces: `/asr/transcribe` 响应形如 `{ text: string, rawText: string, replacements?: ... }`
@@ -466,7 +467,7 @@ test("没有任何改写时 rawText 与 text 相同", async () => {
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/asr/routes.test.ts`
+Run: `cd sidecar && bun test test/asr/routes.test.ts`
 Expected: FAIL —— `body.rawText` 是 `undefined`。
 
 - [ ] **Step 3: 实现**
@@ -484,7 +485,7 @@ return Response.json({ text: corrected.text, rawText: recognizedText, replacemen
 
 - [ ] **Step 4: 跑测试确认绿**
 
-Run: `cd sidecar && bun test src/asr/`
+Run: `cd sidecar && bun test test/asr/`
 Expected: PASS。
 
 - [ ] **Step 5: 提交**
@@ -609,7 +610,7 @@ git commit -m "Record the episode where the truth is, at delivery"
 
 **Files:**
 - Modify: `sidecar/src/memory/routes.ts`
-- Test: `sidecar/src/memory/routes.test.ts`
+- Test: `sidecar/test/memory/routes.test.ts`
 
 **Interfaces:**
 - Produces:
@@ -654,7 +655,7 @@ test("DELETE 全部只清 episodic，不动词典与会话", async () => {
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/memory/routes.test.ts`
+Run: `cd sidecar && bun test test/memory/routes.test.ts`
 Expected: FAIL —— 三个路由 404。
 
 - [ ] **Step 3: 实现**
@@ -700,7 +701,7 @@ Expected: FAIL —— 三个路由 404。
 
 - [ ] **Step 4: 跑测试确认绿**
 
-Run: `cd sidecar && bun test src/memory/`
+Run: `cd sidecar && bun test test/memory/`
 Expected: PASS。
 
 - [ ] **Step 5: 提交**
@@ -866,7 +867,7 @@ git commit -am "Delete the memory layer nothing read"
 ## Task 9: `buildRecentActivityContext` 渲染
 
 **Files:**
-- Create: `sidecar/src/memory/recentActivity.ts`, `sidecar/src/memory/recentActivity.test.ts`
+- Create: `sidecar/src/memory/recentActivity.ts`, `sidecar/test/memory/recentActivity.test.ts`
 
 **Interfaces:**
 - Consumes: Task 2 的 `EpisodicEventRow`
@@ -968,7 +969,7 @@ describe("buildRecentActivityContext", () => {
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/memory/recentActivity.test.ts`
+Run: `cd sidecar && bun test test/memory/recentActivity.test.ts`
 Expected: FAIL —— 模块不存在。
 
 - [ ] **Step 3: 实现**
@@ -1035,13 +1036,13 @@ export function buildRecentActivityContext(
 
 - [ ] **Step 4: 跑测试确认绿**
 
-Run: `cd sidecar && bun test src/memory/recentActivity.test.ts`
+Run: `cd sidecar && bun test test/memory/recentActivity.test.ts`
 Expected: PASS。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add sidecar/src/memory/recentActivity.ts sidecar/src/memory/recentActivity.test.ts
+git add sidecar/src/memory/recentActivity.ts sidecar/test/memory/recentActivity.test.ts
 git commit -m "Render recent turns as JSON the tool can take back"
 ```
 
@@ -1051,7 +1052,7 @@ git commit -m "Render recent turns as JSON the tool can take back"
 
 **Files:**
 - Modify: `sidecar/src/agent/loop.ts`, `sidecar/src/oneshot/routes.ts`, `sidecar/src/agent/routes.ts`
-- Test: `sidecar/src/agent/loop.test.ts`, `sidecar/src/oneshot/routes.test.ts`, `sidecar/src/agent/routes.test.ts`
+- Test: `sidecar/test/agent/loop.test.ts`, `sidecar/test/oneshot/routes.test.ts`, `sidecar/test/agent/routes.test.ts`
 
 **Interfaces:**
 - Consumes: Task 2 的 `recentEvents`，Task 9 的 `buildRecentActivityContext`
@@ -1109,7 +1110,7 @@ test("agent 注入最近活动，且带 eventId", async () => {
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/agent/loop.test.ts src/oneshot src/agent/routes.test.ts`
+Run: `cd sidecar && bun test test/agent/loop.test.ts src/oneshot src/agent/routes.test.ts`
 Expected: FAIL —— `recentActivity` 不是 `RunAgentLoopInput` 的字段，注入块不出现。
 
 - [ ] **Step 3: 实现**
@@ -1171,7 +1172,7 @@ git commit -m "Let both modes see what just happened"
 ## Task 11: `opentype__read_history` 工具
 
 **Files:**
-- Create: `sidecar/src/agent/readHistoryTool.ts`, `sidecar/src/agent/readHistoryTool.test.ts`
+- Create: `sidecar/src/agent/readHistoryTool.ts`, `sidecar/test/agent/readHistoryTool.test.ts`
 - Modify: `sidecar/src/agent/coreTools.ts`
 
 **Interfaces:**
@@ -1224,7 +1225,7 @@ test("ask 的工具集里没有它", () => {
 
 - [ ] **Step 2: 跑测试确认红**
 
-Run: `cd sidecar && bun test src/agent/readHistoryTool.test.ts`
+Run: `cd sidecar && bun test test/agent/readHistoryTool.test.ts`
 Expected: FAIL —— 模块不存在。
 
 - [ ] **Step 3: 实现**

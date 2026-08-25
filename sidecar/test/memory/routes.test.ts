@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../../src/memory/db";
 import { MemoryStore } from "../../src/memory/MemoryStore";
+import { ConversationStore } from "../../src/memory/conversations";
 import { buildMemoryRoutes } from "../../src/memory/routes";
 import { createRouter } from "../../src/router";
 import type { CallLLM } from "../../src/memory/consolidator";
@@ -104,6 +105,40 @@ function seedEvents(store: MemoryStore, count: number): void {
       applicationName: "TestApp",
     });
   }
+}
+
+/**
+ * Single-row counterpart to `seedEvents` above, for the GET/DELETE
+ * `/memory/events` tests below, which need to control mode/applicationName/
+ * transcript per row (ordering and mode-filter assertions read the exact
+ * values back) rather than the fixed transcribe/"TestApp" shape `seedEvents`
+ * bakes in. Returns the new row's id.
+ */
+function seedEvent(
+  store: MemoryStore,
+  overrides: Partial<{
+    mode: string;
+    rawTranscript: string;
+    correctedTranscript: string;
+    applicationName: string;
+  }> = {}
+): number {
+  const values = {
+    mode: "transcribe",
+    rawTranscript: "raw",
+    correctedTranscript: "corrected",
+    applicationName: "TestApp",
+    ...overrides,
+  };
+  return store.recordEpisodicEvent({
+    mode: values.mode,
+    rawTranscript: values.rawTranscript,
+    correctedTranscript: values.correctedTranscript,
+    effectiveInput: null,
+    selectedContext: null,
+    result: null,
+    applicationName: values.applicationName,
+  });
 }
 
 describe("GET /memory/terms", () => {
@@ -1591,5 +1626,397 @@ describe("POST /memory/events", () => {
 
     expect(response.status).toBe(400);
     expect(store.recentEvents(10)).toEqual([]);
+  });
+});
+
+/**
+ * Design §3.7 / plan Task 6: the read/delete surface behind the dictation
+ * history page. Once Swift's local `history.json` is deleted (Task 8), that
+ * page reads `episodic_events` through this endpoint instead of a local
+ * file, so this is the whole data source for a UI a user looks at directly
+ * -- unlike `recentEvents` (MemoryStore.ts), which exists to feed a model
+ * prompt and nobody ever reads by eye.
+ */
+describe("GET /memory/events", () => {
+  test("returns rows newest-first -- the opposite direction from recentEvents, which returns oldest-first for model context. A list UI reads top-down from most recent, so getting this backwards would show the user their oldest dictation first and read as data loss", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    seedEvent(store, { correctedTranscript: "一" });
+    seedEvent(store, { correctedTranscript: "二" });
+    seedEvent(store, { correctedTranscript: "三" });
+
+    const response = await router(get("/memory/events"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      events: Array<{ correctedTranscript: string }>;
+    };
+    expect(body.events.map((e) => e.correctedTranscript)).toEqual(["三", "二", "一"]);
+
+    // Proof this isn't just recentEvents with the response reshaped: that
+    // method is pinned to the opposite (oldest-first) order for the model.
+    expect(store.recentEvents(10).map((e) => e.correctedTranscript)).toEqual([
+      "一",
+      "二",
+      "三",
+    ]);
+  });
+
+  test("limit is honoured: returns only the newest `limit` rows", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    seedEvent(store, { correctedTranscript: "一" });
+    seedEvent(store, { correctedTranscript: "二" });
+    seedEvent(store, { correctedTranscript: "三" });
+
+    const response = await router(get("/memory/events?limit=2"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      events: Array<{ correctedTranscript: string }>;
+    };
+    expect(body.events.map((e) => e.correctedTranscript)).toEqual(["三", "二"]);
+  });
+
+  // Decision (this task): the default, when `limit` is absent, is 200 -- the
+  // exact value plan Task 7's `AppModel.refreshHistory()` is written to pass
+  // explicitly (`GET /memory/events?limit=200`). Picking the same number
+  // means an omitted limit and that call's explicit one behave identically,
+  // so nothing downstream can observe a difference between "the client typed
+  // 200" and "the client typed nothing". 200 is also large enough to hold a
+  // history page's worth of rows without the caller having to think about
+  // pagination for an ordinary user's day.
+  test("an absent limit does not truncate a small result set", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    for (let i = 0; i < 5; i++) {
+      seedEvent(store, { correctedTranscript: `event ${i}` });
+    }
+
+    const response = await router(get("/memory/events"));
+
+    const body = (await response.json()) as { events: unknown[] };
+    expect(body.events).toHaveLength(5);
+  });
+
+  test("the default limit is exactly 200, not merely 'large enough'", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    for (let i = 0; i < 201; i++) {
+      seedEvent(store, { correctedTranscript: `event ${i}` });
+    }
+
+    const response = await router(get("/memory/events"));
+
+    const body = (await response.json()) as {
+      events: Array<{ correctedTranscript: string }>;
+    };
+    expect(body.events).toHaveLength(200);
+    // And still the newest 200, not an arbitrary 200 -- the very oldest row
+    // ("event 0") must be the one left out.
+    expect(body.events.every((e) => e.correctedTranscript !== "event 0")).toBe(true);
+  });
+
+  test("mode= filters to exactly that mode", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    seedEvent(store, { mode: "transcribe", correctedTranscript: "听写" });
+    seedEvent(store, { mode: "ask", correctedTranscript: "问答" });
+    seedEvent(store, { mode: "agent", correctedTranscript: "代理" });
+
+    const response = await router(get("/memory/events?mode=ask"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      events: Array<{ mode: string; correctedTranscript: string }>;
+    };
+    expect(body.events).toHaveLength(1);
+    expect(body.events[0]?.mode).toBe("ask");
+    expect(body.events[0]?.correctedTranscript).toBe("问答");
+  });
+
+  test("an absent mode returns all three modes", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    seedEvent(store, { mode: "transcribe" });
+    seedEvent(store, { mode: "ask" });
+    seedEvent(store, { mode: "agent" });
+
+    const response = await router(get("/memory/events"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { events: Array<{ mode: string }> };
+    expect(body.events.map((e) => e.mode).sort()).toEqual(["agent", "ask", "transcribe"]);
+  });
+
+  test("mode and limit compose: the newest `limit` rows within the filtered mode, not the newest `limit` rows overall then filtered", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    seedEvent(store, { mode: "ask", correctedTranscript: "一" });
+    seedEvent(store, { mode: "transcribe", correctedTranscript: "listen" });
+    seedEvent(store, { mode: "ask", correctedTranscript: "二" });
+    seedEvent(store, { mode: "ask", correctedTranscript: "三" });
+
+    const response = await router(get("/memory/events?mode=ask&limit=2"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      events: Array<{ correctedTranscript: string }>;
+    };
+    expect(body.events.map((e) => e.correctedTranscript)).toEqual(["三", "二"]);
+  });
+
+  test("an empty store returns an empty list, not an error", async () => {
+    const router = createRouter(buildMemoryRoutes(makeStore(), noOpCallLLM()));
+
+    const response = await router(get("/memory/events"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ events: [] });
+  });
+});
+
+/**
+ * Design §3.6's clamp note applies to every read path over `episodic_events`,
+ * not just `opentype__read_history` -- this is the second of the two the
+ * spec names explicitly. SQLite reads a negative `LIMIT` as "unbounded", so
+ * an un-clamped `?limit=-1` here would hand back the user's ENTIRE dictation
+ * history in one response -- exactly the exposure the tool's clamp exists to
+ * prevent, just reached through the HTTP route instead of the agent tool.
+ *
+ * Contract (same *shape* as the tool's, per spec §3.6's closing paragraph,
+ * deliberately different *numbers*): any `limit` that is not a positive
+ * integer -- omitted, zero, negative, or non-integer -- falls back to the
+ * endpoint's own default (200, pinned above); anything above a ceiling
+ * clamps down to it instead of passing through or crashing.
+ *
+ * Ceiling chosen: 200, the same number as the default, rather than a second
+ * invented constant. `opentype__read_history` deliberately keeps its default
+ * (10) and ceiling (50) apart, because it exists to bound what reaches a
+ * model's context -- a small default is worth having even though a caller
+ * may legitimately want to ask for more in one call. This endpoint bounds a
+ * list a person scrolls through, and an absent `limit` already returns as
+ * much as this endpoint considers "enough for one screenful of history" --
+ * there is no separate reason a caller should be able to ask for MORE than
+ * that via an explicit value, so default and ceiling coinciding at 200 is
+ * the natural single-number contract rather than two numbers to reason
+ * about. If that changes, this test (and its sibling above pinning the
+ * default) are where to change it.
+ */
+describe("GET /memory/events limit clamping", () => {
+  // Every case below seeds well past the ceiling and asserts the exact
+  // returned count -- not just "did not throw" -- because an implementation
+  // that merely avoids a crash (e.g. `Number("abc") || 200`, which happens to
+  // work) could still leave the *negative* case unbounded, and a assertion
+  // that only checks `response.status === 200` would not catch that.
+  const CEILING = 200;
+
+  function seedPastCeiling(store: MemoryStore): void {
+    for (let i = 0; i < CEILING + 50; i++) {
+      seedEvent(store, { correctedTranscript: `event ${i}` });
+    }
+  }
+
+  test("limit=abc (non-numeric): falls back to the default, not a 500 from an unbindable NaN", async () => {
+    const store = makeStore();
+    seedPastCeiling(store);
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(get("/memory/events?limit=abc"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { events: unknown[] };
+    expect(body.events).toHaveLength(CEILING);
+  });
+
+  test("limit=-1: clamps to the default rather than reading the SQLite 'negative LIMIT means unbounded' behavior -- the security-relevant case", async () => {
+    const store = makeStore();
+    seedPastCeiling(store);
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(get("/memory/events?limit=-1"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { events: unknown[] };
+    // The load-bearing assertion: more rows exist than this, so an
+    // implementation that let -1 through to SQLite unbounded would return
+    // CEILING + 50, not CEILING.
+    expect(body.events).toHaveLength(CEILING);
+  });
+
+  test("limit=0: falls back to the default, not an empty list", async () => {
+    const store = makeStore();
+    seedPastCeiling(store);
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(get("/memory/events?limit=0"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { events: unknown[] };
+    expect(body.events).toHaveLength(CEILING);
+  });
+
+  test("limit=1.5 (non-integer): falls back to the default rather than truncating or rounding", async () => {
+    const store = makeStore();
+    seedPastCeiling(store);
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(get("/memory/events?limit=1.5"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { events: unknown[] };
+    expect(body.events).toHaveLength(CEILING);
+  });
+
+  test("limit=100000 (absurdly large but syntactically valid): clamps down to the ceiling", async () => {
+    const store = makeStore();
+    seedPastCeiling(store);
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(get("/memory/events?limit=100000"));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { events: unknown[] };
+    expect(body.events).toHaveLength(CEILING);
+  });
+});
+
+describe("DELETE /memory/events/:id", () => {
+  test("removes exactly that row, leaving the others", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const keepId = seedEvent(store, { correctedTranscript: "keep me" });
+    const deleteId = seedEvent(store, { correctedTranscript: "delete me" });
+
+    const response = await router(del(`/memory/events/${deleteId}`));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ deleted: true });
+    const remaining = store.recentEvents(10);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]?.id).toBe(keepId);
+    expect(remaining[0]?.correctedTranscript).toBe("keep me");
+  });
+
+  test("a second delete of the same id is a 404 -- deleting nothing is not success", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const id = seedEvent(store);
+
+    // Delete a real id first, so this test can only pass once the route
+    // actually exists -- a *missing* route also answers 404, same reasoning
+    // as the neighbouring 404 tests for /memory/terms/:id and
+    // /memory/owner-facts/:id elsewhere in this file.
+    expect((await router(del(`/memory/events/${id}`))).status).toBe(200);
+
+    const response = await router(del(`/memory/events/${id}`));
+
+    expect(response.status).toBe(404);
+  });
+
+  // Decision (this task): a malformed id -- one that cannot be a row id at
+  // all (non-numeric) -- is a 400, matching the existing `parseIdParam`
+  // convention this file already uses for /memory/terms/:id and
+  // /memory/owner-facts/:id (see routes.ts's `parseIdParam`). A negative
+  // number, by contrast, IS a syntactically valid integer; it is simply one
+  // that can never address a real row, since ids are positive AUTOINCREMENT
+  // values. Treating it as an ordinary (never-matching) id and answering 404
+  // is sane and requires no special-casing -- the alternative of a 400 would
+  // mean deciding, arbitrarily, which negative-looking inputs count as
+  // "malformed enough", when SQLite already treats -1 as a value that no row
+  // has.
+  test("400 on a non-numeric id -- a malformed id is a bad request, not a missing row", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const id = seedEvent(store);
+
+    const response = await router(del("/memory/events/abc"));
+
+    expect(response.status).toBe(400);
+    // The malformed request must not touch the store -- the real row survives.
+    expect(store.recentEvents(10).some((e) => e.id === id)).toBe(true);
+  });
+
+  test("a negative id is a 404, not a 500 or an accidental delete of another row", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const id = seedEvent(store, { correctedTranscript: "untouched" });
+
+    // Prove the route itself exists first: a *missing* route also answers
+    // 404 for "/memory/events/-1", which would make the assertion below pass
+    // vacuously before this endpoint is even implemented. Deleting a real id
+    // is the same "delete a real id first" pattern this file already uses
+    // for the other 404 tests in this describe block.
+    const probe = await router(del(`/memory/events/${id}`));
+    expect(probe.status).toBe(200);
+
+    const response = await router(del("/memory/events/-1"));
+
+    expect(response.status).toBe(404);
+    expect(store.recentEvents(10)).toHaveLength(0);
+  });
+});
+
+describe("DELETE /memory/events", () => {
+  test("clears every episodic row and returns how many it removed", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    seedEvent(store, { correctedTranscript: "一" });
+    seedEvent(store, { correctedTranscript: "二" });
+    seedEvent(store, { correctedTranscript: "三" });
+
+    const response = await router(del("/memory/events"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ deleted: 3 });
+    expect(store.recentEvents(10)).toHaveLength(0);
+  });
+
+  // Backs the Memory panel / Settings "重置输入历史" (reset input history)
+  // button. A user resetting their dictation history must not silently lose
+  // the dictionary they hand-edited, the owner facts remembered about them,
+  // or the conversations still visible in the sessions list -- so every one
+  // of those has to be seeded here and asserted to survive, not just assumed
+  // safe because the DELETE statement only names one table.
+  test("leaves entity_terms, owner_facts, conversations and conversation_messages completely untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    seedEvent(store, { correctedTranscript: "一" });
+    seedEvent(store, { correctedTranscript: "二" });
+    const termId = seedTerm(store, { canonicalTerm: "PayPal" });
+    const factId = store.recordOwnerFact("The owner's name is Diyi.");
+    const conversations = new ConversationStore(store.db);
+    const conversationId = conversations.createConversation("ask", "what's the weather");
+    conversations.appendMessage(conversationId, "user", "what's the weather");
+    conversations.appendMessage(conversationId, "assistant", "sunny");
+
+    const response = await router(del("/memory/events"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ deleted: 2 });
+
+    // The dictionary the user hand-edited must survive a history reset.
+    expect(store.allTerms().find((t) => t.id === termId)).toBeDefined();
+    // Same for owner facts.
+    expect(store.allOwnerFacts().find((f) => f.id === factId)).toBeDefined();
+    // And the conversations visible in the sessions list, messages included.
+    const conversationRow = store.db
+      .query("SELECT * FROM conversations WHERE id = ?")
+      .get(conversationId);
+    expect(conversationRow).not.toBeNull();
+    const messageRows = store.db
+      .query("SELECT * FROM conversation_messages WHERE conversationId = ?")
+      .all(conversationId);
+    expect(messageRows).toHaveLength(2);
+  });
+
+  test("deleting when there is nothing to delete returns { deleted: 0 }, not an error", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(del("/memory/events"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ deleted: 0 });
   });
 });

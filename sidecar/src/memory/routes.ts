@@ -58,6 +58,31 @@ function requireNonEmptyString(value: unknown, field: string): string {
 }
 
 /**
+ * `GET /memory/events`'s own default/ceiling (design §3.6, §3.7): 200 for
+ * both. SQLite reads a negative `LIMIT` as "unbounded", and this endpoint
+ * sits directly on `episodic_events` -- a table that, since this batch,
+ * holds every dictation the user has ever made -- so an un-clamped
+ * `?limit=-1` would hand back the entire table in one response. Any `limit`
+ * that is not a positive integer (absent, non-numeric, zero, negative, or
+ * non-integer) falls back to the default; anything above the ceiling clamps
+ * down to it. `opentype__read_history` (`agent/readHistoryTool.ts`) clamps
+ * the same *shape* but different *numbers* (default 10, ceiling 50) on
+ * purpose -- that tool bounds how much reaches a model's context, this route
+ * bounds a list a person scrolls through, and 200 already reads as "enough
+ * for one screenful of history" for that use.
+ */
+const EVENTS_DEFAULT_LIMIT = 200;
+const EVENTS_LIMIT_CEILING = 200;
+
+function clampEventsLimit(raw: string | null): number {
+  const value = Number(raw);
+  if (raw === null || !Number.isInteger(value) || value <= 0) {
+    return EVENTS_DEFAULT_LIMIT;
+  }
+  return Math.min(value, EVENTS_LIMIT_CEILING);
+}
+
+/**
  * Routes backing the Settings "Memory" panel (design §4.1): the entity
  * dictionary and the consolidation run log. The reads are plain reads off
  * MemoryStore — no chat client involved, unlike the oneshot routes — and the
@@ -133,6 +158,72 @@ export function buildMemoryRoutes(
           conversationId: body.conversationId ?? null,
         });
         return Response.json({ eventId });
+      },
+    },
+    {
+      // The dictation history page's whole data source (design §3.7), once
+      // Swift's local `history.json` is deleted (plan Task 8): newest-first,
+      // the opposite order from `MemoryStore.recentEvents`, which returns
+      // oldest-first because a model reads best when the last line is the
+      // most recent -- a list a person scrolls reads top-down from newest.
+      // Deliberately its own query rather than a call to `recentEvents` for
+      // that reason: reusing it would either give the UI the wrong order or
+      // require reversing its result, which is the same "one query per
+      // reader with its own contract" reasoning `recentEvents`'s own doc
+      // comment gives for not sharing a query with `consolidationCandidates`.
+      //
+      // `mode` is filtered in the SQL WHERE clause, before LIMIT is applied
+      // -- filtering after limiting could return an empty page while
+      // matching rows still exist further back in the table.
+      method: "GET",
+      path: "/memory/events",
+      handler: (req) => {
+        const url = new URL(req.url);
+        const limit = clampEventsLimit(url.searchParams.get("limit"));
+        const mode = url.searchParams.get("mode");
+
+        const where = mode ? "WHERE mode = ?" : "";
+        const args: (string | number)[] = mode ? [mode, limit] : [limit];
+        const events = store.db
+          .query(
+            `SELECT * FROM episodic_events
+             ${where}
+             ORDER BY createdAt DESC, id DESC
+             LIMIT ?`
+          )
+          .all(...args);
+        return Response.json({ events });
+      },
+    },
+    {
+      // Backs a single row's delete affordance on the dictation history
+      // page. A second delete of the same id is a 404, matching the
+      // `/memory/terms/:id` and `/memory/owner-facts/:id` convention this
+      // file already uses -- deleting nothing is not success.
+      method: "DELETE",
+      path: "/memory/events/:id",
+      handler: (req) => {
+        const id = parseIdParam(req);
+        const result = store.db.run("DELETE FROM episodic_events WHERE id = ?", [id]);
+        if (result.changes === 0) {
+          throw new ApiError("event_not_found", 404);
+        }
+        return Response.json({ deleted: true });
+      },
+    },
+    {
+      // Backs the Settings/Memory panel's "重置输入历史" (reset input
+      // history) button, alongside the existing `DELETE /memory/context-log`.
+      // Touches `episodic_events` only -- the dictionary the user hand-
+      // edited (`entity_terms`), the owner facts remembered about them
+      // (`owner_facts`), and the conversations still visible in the sessions
+      // list (`conversations`/`conversation_messages`) all live in other
+      // tables and must survive a history reset untouched.
+      method: "DELETE",
+      path: "/memory/events",
+      handler: () => {
+        const result = store.db.run("DELETE FROM episodic_events");
+        return Response.json({ deleted: result.changes });
       },
     },
     {

@@ -1310,29 +1310,40 @@ git commit -m "Give the agent a way to open what it was shown"
 - §4 漂移表：`AgentMemoryStore` 相关各行从「已删除读取侧」更新为「整个存储已删除」。
 - §5 新增一个正例：`recentActivity` 为什么必须进 user 消息。
 
-- [ ] **Step 4: 改 `USER_GUIDE.md` 与两个 README**
+- [ ] **Step 4: 改 `USER_GUIDE.md` —— 13 处，一处都不能漏**
 
-`RECENT_ACTIVITY_EXCLUDED_MODES = []`，所以「听写完全不经过任何 AI 模型」
-这条承诺不再成立，**六处必须同批改写**，一处都不能漏：
+逐行盘点已完成。**两个 README 一处都不用改**（它们只说「听写不需要 API Key、
+不需要联网」，2.0.0 之后依然为真——改它们会毁掉一句准确的话）。
 
-| 位置 | 现在写的 | 改成 |
+| 行 | 判定 | 说明 |
 |---|---|---|
-| §115 模式表格「是否经过模型」列 | 「三种都完全不经过」 | 识别本身仍不经过；但转出的文字会作为近期上下文进入之后的问答/Agent 请求 |
-| §184 轻整理段 | 「不经过任何 AI 模型」 | 保留（轻整理本身确实是本机规则），但补一句上下文注入 |
-| §257 语音纠错段 | 「原始的听写本身仍然不经过模型」 | 改写 |
-| §446 整理原料段 | 「这需要一个明确的开关来交换这份承诺，当前版本**没有**提供，也不会偷偷替你打开」 | **这段最关键**：改成「1.2.0 及以前如此；2.0.0 起听写会作为近期上下文进入问答与 Agent 请求，且没有开关——这是一次有意的产品变更，不是默默打开」。**不能只是删掉这段**，删掉等于让读过旧版的用户无从知道口径变了 |
-| §566 隐私小结 | 「没有任何听写文字因为选了某一档而被发给模型」 | 改写 |
-| §593 收尾清单 | 「三档都不经过模型」 | 改写 |
+| L7 | CHANGE | 全文档最顶部的承诺：「听写的内容永远不会被发给模型」 |
+| L115 | CHANGE | 模式表格「是否经过 AI 模型」列，听写行 |
+| L184 | NEEDS-CARE | 前半句「轻整理不经过任何模型」**为真，保留**；结尾「文字不出本机」为假，拆开重写 |
+| L257 | NEEDS-CARE | 「原始的听写本身仍然不经过模型」——窄义为真，但紧邻已失效的全局主张，易被误读为重申 |
+| L420–422 | NEEDS-CARE | 「不会成为整理原料」**为真**；「也就不会被发给模型」是错误推论，拆开 |
+| **L444** | **REWRITE** | 它写了一个**论证**：「延迟发送也是发送」。2.0.0 做的正是那件事——留着等于产品自己写下对自己新行为的指控。必须处理掉这句修辞，不是只改周围事实 |
+| **L446** | **REWRITE** | 「需要一个明确的开关……当前版本没有提供，也不会偷偷替你打开」。改成「1.2.0 及以前如此；2.0.0 起变了，且确实没有开关——这是有意的产品决定」。**不能删**，删掉等于让读过旧版的人无从知道口径变过 |
+| L452 | CHANGE | 转写设置项：「没有一档会把听写内容发给 AI 模型」 |
+| L566 | CHANGE | §14 的锚点主张，整段重写 |
+| L567 | NEEDS-CARE | 整理排除为真；「上面那句……依然成立」不再成立 |
+| L569 | **ADD** | 「问答/Agent 会发送什么」清单——**新增一项**：最近 10 条跨模式上下文（含听写） |
+| L575 | CHANGE | 「听写的那份纯本地留存」不再准确 |
+| L593 | CHANGE | §15 使用原则的四条要点之一，略读者最依赖 |
 
-`README.md` / `README.zh-CN.md` 的特性描述同步。
+**明确保留、不要动**：
 
-**守住这条区别**：语音**识别**默认在本机跑、音频识别完即删——这仍然为真，
-不要连它一起删。变的是**识别出来的文字**会进入之后的请求，不是「音频上云」。
+- **L586** —— 「送出去的只有问答和 Agent 的记录，听写被排除在外」。这句**仍然为真**：
+  它说的是**记忆整理**，而整理与即时注入是两个独立查询、规则不同（spec §3.4）。
+- **L148** —— 「不会调用任何 AI 模型」，作用域是 Direct 交付的那一瞬，字面仍为真。
+
+**守住这条区别**：语音**识别**默认在本机跑、音频识别完即删——仍然为真，不要连它一起删。
+变的是**识别出来的文字**会进入之后的请求，不是「音频上云」。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add CLAUDE.md docs/model-context-inventory.md USER_GUIDE.md README.md README.zh-CN.md sidecar/src/memory/MemoryStore.ts
+git add CLAUDE.md docs/model-context-inventory.md USER_GUIDE.md sidecar/src/memory/MemoryStore.ts
 git commit -m "Say what the code now says"
 ```
 
@@ -1345,22 +1356,33 @@ git commit -m "Say what the code now says"
 
 **Interfaces:** 无代码接口。部署目标 opentype-site.vercel.app。
 
-- [ ] **Step 1: 改隐私文案（中英各一套）**
+- [ ] **Step 1: 改隐私文案 —— 6 处，中英对称**
 
-| 位置 | 现在写的 |
+| 位置 | 判定 |
 |---|---|
-| `i18n.js:38` | 「纯转写，**完全不经过任何大模型**——听到什么就是什么」 |
-| `i18n.js:68` | 「只有『问答』和『Agent』会把文字发出去……『听写』完全不经过大模型」 |
-| `i18n.js:72` | 「纯听写不需要 API Key，也不需要联网」 |
-| `index.html:262` / `i18n.js:204` | "Plain dictation needs no API key and no network." |
+| `i18n.js:38` `modes.transcribe.body`（中） | CHANGE：「纯转写，**完全不经过任何大模型**」 |
+| `i18n.js:68` `privacy.line`（中） | CHANGE：「『听写』完全不经过大模型」 |
+| `i18n.js:170` `modes.transcribe.body`（英） | CHANGE："no model in the loop at all" |
+| `i18n.js:200` `privacy.line`（英） | CHANGE："Transcribe never touches a model" |
+| `index.html:183` | CHANGE：`modes.transcribe.body` 的硬编码英文兜底 |
+| `index.html:254` | CHANGE：`privacy.line` 的硬编码英文兜底 |
 
-`index.html:18`（meta description）和 `index.html:232`／`i18n.js:57`
-「识别默认不出本机 / Recognition stays on your Mac」**保持不动**——
-这两句说的是识别，仍然为真。
+**`index.html` 的兜底必须与 `i18n.js` 对应条目逐字节一致。** 页面默认 `lang="en"`，
+中文由 JS 从 `i18n.js` 换入；只改 `i18n.js` 会让页面在 JS 执行前、以及默认语言下
+继续显示旧承诺。改完用 `diff <(...)` 之类的方式核对两边字符串完全相同。
 
-英文侧（`i18n.js` 189–204 一带）与中文侧一一对应改写，不要只改一种语言。
+**保持不动**：`i18n.js:57/189` `features.local.*`（识别在本机跑，仍为真）、
+`i18n.js:72/204` `closing.body`（「纯听写不需要 API Key，也不需要联网」，仍为真）、
+`index.html:8` meta description、`index.html:233`。
+`index.html:18` 的 `og:description`「Speech stays on your Mac by default」说的是
+**audio**、不是文字，判定为可留——但它是这批里最容易被过度解读的一句，
+执行时留意一下措辞是否值得收紧。
 
 - [ ] **Step 2: 加 2.0.0 发布说明，并把承诺变更放在头条**
+
+站点目前**根本没有 2.0.0 条目**——`i18n.js` 与 `releases.html` 都只到 `releases.120.*`，
+而且 `hero.updates`（`i18n.js` 中文 L33 / 英文约 L165，以及 `index.html` 里它的兜底）
+仍在宣传「1.2.0 有什么变化」。这三处都要跟着升到 2.0.0，不能只加条目不改入口。
 
 `releases.html` 与 `i18n.js` 的 releases 段加 2.0.0 条目。**必须显式点名这条变更**，
 理由是站点上已经存在一条 1.0.0 的修复记录（`i18n.js:133` 中文 / `:267` 英文）：

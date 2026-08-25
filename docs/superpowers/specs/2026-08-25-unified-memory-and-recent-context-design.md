@@ -368,3 +368,18 @@ B4 只依赖 B1 的 id，可与 B2/B3 并行。B2 最大，且是唯一碰 UI �
 
 **不新增** `docs/data-storage-inventory.md`：存储从九个降到必要的几个之后，
 一份独立的落盘清单不再值得单独维护，并入 `CLAUDE.md` 即可。
+
+---
+
+## 十、本批发现、但不在本批修的
+
+**截断不是字素安全的。** `recentActivity.ts` 的 `clip()` 用 `slice(0, 120)`，边界落在
+代理对中间时会把一个 emoji 切成半个（输出里出现孤立的 `\ud83d` 转义）。
+`JSON.stringify` 的良构转义保证它不会变成传输层的坏字节，也不会导致解析失败——
+模型偶尔会在被截断的字段末尾看到一小段乱码，仅此而已。
+
+不在本批修，因为它不是本批引入的：仓库里另外六处截断
+（`contextDebugLog.ts`、`conversations.ts`、`progressRegistry.ts`、`coreTools.ts`、
+`repeatGuard.ts`、`spill.ts`）用的是同一个写法，这是既有约定。
+真正该做的是一个共用的字素安全 `clip` 助手替换全部七处，那是一次独立的改动，
+不该塞进一个已经横跨三个仓库的批次里。

@@ -572,6 +572,64 @@ enum VoiceSurfaceDismissalEffect: Equatable {
     case none
 }
 
+/// One follow-up target: which kind of card it continues, and which live
+/// conversation id (if any) it continues into.
+struct VoiceSurfaceFollowUpTarget: Equatable {
+    var kind: AskPanelState.Kind
+    var conversationId: Int?
+}
+
+/// The decision behind the follow-up composer, mic button, and
+/// 「展开说说」/「换个说法」 chips on a finished result card
+/// (`OverlayController`'s `onFollowUp`/`onFollowUpByVoice`): what, if
+/// anything, does typing or speaking something *right now* continue?
+///
+/// Pulled out as a pure function of state for the same reason
+/// `AssistantEscalationWiring` (`AppModel.swift`) is: `AppModel.init` has
+/// side effects and is not instantiable in tests, so the actual decision has
+/// to live somewhere a test can reach it directly, rather than inline where
+/// `AppModel` is the only thing that can ever exercise it.
+///
+/// The one rule worth stating explicitly: **the id has to come from the
+/// matching panel, never from whichever one happens to be live.**
+/// `VoiceSurfaceState.ResultCard` carries a `kind` but no `conversationId` of
+/// its own (see `AssistantEscalation`'s doc comment on the same point), so
+/// the two ids the caller already tracks — `AskPanelState.conversationId`,
+/// `AgentProgressPanelState.conversationId` — have to be threaded in
+/// separately and picked by the card's own kind. An ask card finishing while
+/// an unrelated agent run happens to still be live (or vice versa) is an
+/// ordinary moment, not an edge case: picking the wrong id would silently
+/// continue a conversation the user never asked to continue. A `nil` id from
+/// the matching panel means the card itself has no thread yet (the
+/// failure-path first turn, before any conversation id ever came back) —
+/// that must start fresh too, never borrow the other kind's id just because
+/// one happens to be sitting there.
+enum VoiceSurfaceFollowUp {
+    static func target(
+        for surface: VoiceSurfaceState,
+        askConversationId: Int?,
+        agentConversationId: Int?
+    ) -> VoiceSurfaceFollowUpTarget? {
+        let card: VoiceSurfaceState.ResultCard
+        switch surface {
+        case .result(let resultCard), .failed(let resultCard):
+            card = resultCard
+        default:
+            // Only a finished (or failed) card has a composer/mic/chips to
+            // attach a follow-up to — the listening pill, the processing
+            // dots, the working ticker, and a pending agent question all
+            // have nothing on screen for this to continue.
+            return nil
+        }
+        switch card.kind {
+        case .ask:
+            return VoiceSurfaceFollowUpTarget(kind: .ask, conversationId: askConversationId)
+        case .agent:
+            return VoiceSurfaceFollowUpTarget(kind: .agent, conversationId: agentConversationId)
+        }
+    }
+}
+
 /// Bottom-center-anchored geometry for the unified voice surface's single
 /// panel. Pure namespace enum (precedent: `OutputDeliveryPolicy`,
 /// `OnboardingPolicy`) so the frame math is unit-testable without a screen.
@@ -1598,6 +1656,47 @@ struct ConsolidationRunSummary: Decodable, Identifiable {
     let candidatesAccepted: Int
     let summary: String
     let rolledBackAt: Int?
+}
+
+/// Pure decision for the Memory panel's consolidation-log 回滚 button: which
+/// run (if any) is eligible to be rolled back next.
+///
+/// Not a computed property on `ConsolidationRunSummary`, because eligibility
+/// is a property of a run's position among the OTHERS, not of the run alone.
+/// The sidecar's `rollbackRun` (`sidecar/src/memory/consolidator.ts`)
+/// restores a FULL-TABLE snapshot taken *before* the run being undone, not a
+/// diff -- so undoing anything but the newest still-active run would
+/// silently erase whatever a later run added, while that later run's own row
+/// keeps claiming `rolledBackAt: nil` (the run log would then lie about
+/// what's actually in the store). A run is therefore eligible iff (1) it is
+/// not already rolled back, and (2) every run that ran after it has already
+/// been rolled back -- a stack, popped from the top only. The sidecar's
+/// `POST /memory/consolidation-runs/:id/rollback` route enforces the same
+/// rule server-side (returning 409 `rollback_out_of_order` otherwise); this
+/// is what decides which single row gets a button to try at all.
+///
+/// Assumes `runs` arrives newest-first, matching the sidecar's actual
+/// `GET /memory/consolidation-runs` order (`MemoryStore.listConsolidationRuns()`
+/// is `ORDER BY ranAt DESC`) rather than asserting it -- this is a pure
+/// function over whatever list it's handed, and re-sorting defensively here
+/// would hide a real ordering bug elsewhere instead of surfacing it.
+enum ConsolidationRollback {
+    /// The `id` of the one run currently eligible for rollback, or `nil` if
+    /// none is -- either the list is empty, or every run in it has already
+    /// been rolled back.
+    ///
+    /// Because `runs` is newest-first, the first not-yet-rolled-back entry
+    /// encountered while scanning from the front is, by construction, the
+    /// newest one -- which means every run ahead of it in the list (i.e.
+    /// every run that ran after it) is already rolled back. So a plain
+    /// first-match scan already encodes condition (2) above; no separate
+    /// pass over "everything after it" is needed.
+    static func eligibleRunId(in runs: [ConsolidationRunSummary]) -> Int? {
+        for run in runs where run.rolledBackAt == nil {
+            return run.id
+        }
+        return nil
+    }
 }
 
 /// Mirrors the sidecar's `ConsolidationResult` (`sidecar/src/memory/consolidator.ts`),

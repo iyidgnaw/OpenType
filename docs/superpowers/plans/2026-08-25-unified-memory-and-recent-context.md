@@ -823,6 +823,13 @@ git commit -m "Read dictation history from the one place it now lives"
 
 ## Task 8: 删除 Swift 侧记忆层
 
+> **已并入 Task 7（2026-08-25）。** 两者分不开：把 `HistoryEntry.id` 从 `UUID` 改成 `Int`
+> 会让 `HistoryStoreDeleteTests` 编译不过——那个文件有一半在测「从 UUID 键的旧
+> `history.json` 迁移」，而 UUID 字符串根本解码不进 `Int`，这个前提随类型改动一起消失。
+> 掏空一个马上要删的文件是白干，留着则是提交一个编译不过的中间状态。
+> 计划把它们分开是为了好审，但类型改动让它们成了一次原子变更。下面的清单仍然有效，
+> 只是由 Task 7 的实现阶段一并执行、一并审查、一并提交。
+
 **Files:**
 - Delete: `Sources/OpenType/AgentMemoryStore.swift`, `MemoryInsightsAnalyzer.swift`, `OwnerProfileAutoUpdater.swift`, `HistoryStore.swift` 及 `Tests/OpenTypeTests/` 下对应测试
 - Modify: `Sources/OpenType/AppModel.swift`, `AppConfiguration.swift`, `SettingsViews2.swift`

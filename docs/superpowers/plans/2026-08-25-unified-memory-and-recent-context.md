@@ -510,6 +510,8 @@ git commit -m "Return what Whisper heard, not only what the dictionary rewrote"
 
 **Interfaces:**
 - Consumes: Task 3 的 `POST /memory/events`，Task 4 的 `rawText`
+- **`LearningLoop.swift` 也在范围内**（2026-08-25 补）：Swift 侧解码 `/asr/transcribe` 响应的是那里的 `TranscribeResponse`，它目前只有 `{text, replacements}`。Task 4 加的 `rawText` 在 Swift 侧**无人接收**，计划初稿漏了这一环。三个字符串都要传到 `body(...)`：`rawTranscript` 是 Whisper 听到的，`correctedTranscript` 是词典改写后的，`result` 是最终交付的（经 tidy 或 Review 编辑）。整理器把前两者当一对来挖听错，丢掉任何一半，写入搬到 Swift 这件事就白做了。ask/agent 没有词典阶段，raw 与 corrected 同串——也要钉住，免得以后有人「简化」掉一个。
+- **`"Unknown"` 与 `"Unknown app"` 是两回事，不要对齐**：端点的 `applicationName ?? "Unknown"` 意思是「调用方根本没带这个字段」，Swift 的 `"Unknown app"`（仓库既有约定，三处在用）意思是「应用没报出名字」。Swift 一旦总是传值，端点那个默认值就从真实调用方够不到了。两处各自留注释说明差异。
 - Produces:
   ```swift
   struct EpisodicEventBody: Encodable, Equatable {

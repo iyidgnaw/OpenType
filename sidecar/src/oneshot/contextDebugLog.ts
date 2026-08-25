@@ -175,11 +175,12 @@ export function createFileContextUsageLogWriter(path: string): ContextUsageLogWr
 
 /**
  * Deletes the context-debug log and its rotated generation, idempotently.
- * The primitive behind `DELETE /memory/context-log`
- * (`memory/routes.ts`) -- what makes 「重置输入历史」 actually clear this log
- * instead of leaving it as the one thing a reset doesn't touch. A caller
- * that only checked "does the main file exist" would leave the `.1`
- * generation behind, still readable, so this always attempts both paths.
+ * The primitive behind `DELETE /memory/context-log` (`memory/routes.ts`),
+ * which `AppModel.resetHistory()` (`Sources/OpenType/AppModel.swift`) calls
+ * so 「重置输入历史」 actually clears this log instead of leaving it as the one
+ * thing a reset doesn't touch. A caller that only checked "does the main
+ * file exist" would leave the `.1` generation behind, still readable, so
+ * this always attempts both paths.
  */
 export function clearContextUsageLog(path: string): void {
   for (const candidate of [path, `${path}.1`]) {

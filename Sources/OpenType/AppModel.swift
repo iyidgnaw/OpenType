@@ -89,6 +89,17 @@ final class AppModel: ObservableObject {
     /// is a deliberate user action, so a failed one must say so rather than
     /// look like nothing happened.
     @Published private(set) var memoryEditError: String?
+    /// Last failure from the sidecar half of `resetHistory()` (`DELETE
+    /// /memory/context-log`), shown on the 清除本地数据 page next to the button
+    /// that triggered it. `history.clear()` itself cannot fail (it's a local
+    /// JSON-file write), so this only ever reports the context-log leg. A
+    /// success clears this to `nil` so a stale failure doesn't linger past
+    /// it; overlapping resets aren't ordered against each other, so in
+    /// principle a slow first failure could still land after a fast second
+    /// success, but that window is narrow — the confirm button disables
+    /// itself the instant `history.clear()` empties the list, so reopening
+    /// it needs a fresh dictation to land mid-flight.
+    @Published private(set) var historyResetError: String?
     /// Set when an append to the immutable audit trail throws. The audit log is
     /// the app's local "source of truth"; a failed write must not be silent, so
     /// this surfaces a small warning in the Home / menubar status area. It stays
@@ -1368,8 +1379,52 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The HTTP method/path `resetHistory()` sends to clear the sidecar's
+    /// context-debug log (`DELETE /memory/context-log`, served by
+    /// `buildMemoryRoutes` in `sidecar/src/memory/routes.ts`). Pulled out as
+    /// its own value — rather than inlined at the one call site — so a test
+    /// can pin the exact method/path without constructing a live `AppModel`
+    /// (see `HistoryResetContextLogTests`); `resetHistory()` is this
+    /// constant's only reader.
+    struct ContextLogResetRequest: Equatable {
+        let method: String
+        let path: String
+    }
+    nonisolated static let contextLogResetRequest = ContextLogResetRequest(
+        method: "DELETE",
+        path: "/memory/context-log"
+    )
+
+    /// Clears local input history, then best-effort clears the sidecar's
+    /// context-debug log so 「重置输入历史」 actually removes both halves of what
+    /// it promises: the local record the 会话 list reads, and the first-200-
+    /// characters-of-every-ask/agent-input log the sidecar keeps alongside it
+    /// (`sidecar/src/oneshot/contextDebugLog.ts`). `history.clear()` runs
+    /// first, synchronous and unconditional — the confirmation dialog has
+    /// already told the user the local clear happened, so it is never gated
+    /// on, nor rolled back by, the sidecar call. That call is fired from a
+    /// detached Task so this method stays synchronous and
+    /// `ClearLocalDataPage`'s button action keeps calling it directly —
+    /// `refreshUsageStats()` above is the same shape. A failure is recorded
+    /// to `historyResetError` rather than dropped, and cleared on the next
+    /// successful reset so a stale failure can't misreport a later good one.
     func resetHistory() {
         history.clear()
+
+        let request = Self.contextLogResetRequest
+        let client = sidecarClient
+        Task.detached(priority: .utility) {
+            do {
+                let _: MemoryDeletionResponseBody = try await client.request(
+                    method: request.method,
+                    path: request.path
+                )
+                await MainActor.run { [weak self] in self?.historyResetError = nil }
+            } catch {
+                let message = ErrorMessagePresenter.message(for: error)
+                await MainActor.run { [weak self] in self?.historyResetError = message }
+            }
+        }
     }
 
     func resetAgentMemory() {

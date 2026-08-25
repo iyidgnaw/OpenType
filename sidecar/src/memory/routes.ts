@@ -61,8 +61,9 @@ export function buildMemoryRoutes(
   callLLM: CallLLM,
   /**
    * Backs `DELETE /memory/context-log` (the exit for
-   * `oneshot/contextDebugLog.ts`'s `clearContextUsageLog`, i.e. what makes
-   * 「重置输入历史」 actually clear `context-debug.log`). Trailing and optional,
+   * `oneshot/contextDebugLog.ts`'s `clearContextUsageLog`), which
+   * `AppModel.resetHistory()` (`Sources/OpenType/AppModel.swift`) calls so
+   * 「重置输入历史」 actually clears `context-debug.log`. Trailing and optional,
    * mirroring `server.ts`'s `buildApp` convention for `spillRoot?`/
    * `runLogRoot?`, so every pre-existing 2-arg call site keeps compiling.
    * When omitted -- a sidecar assembled without a context log path -- the

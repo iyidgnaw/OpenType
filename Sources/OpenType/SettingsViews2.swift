@@ -940,6 +940,19 @@ private struct ClearLocalDataPage: View {
             .foregroundStyle(DS.Colour.ink(0.5))
             .fixedSize(horizontal: false, vertical: true)
 
+            // Surfaces a failed context-log clear (the sidecar half of
+            // `resetHistory()`) right where the button that triggered it
+            // lives — same idiom as `MemoryColumn`'s `memoryEditError` row.
+            // Without this, a reset that only half-worked would look
+            // identical to one that fully did.
+            if let error = model.historyResetError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(DS.Text.caption())
+                    .foregroundStyle(DS.Colour.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             VStack(spacing: 0) {
                 SettingsRow(
                     divided: false,

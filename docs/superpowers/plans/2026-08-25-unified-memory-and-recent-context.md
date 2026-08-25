@@ -17,7 +17,7 @@
 - **不写数据迁移**。schema 变更一律走 Task 1 的清零策略。
 - **`DS.*` 设计令牌**：任何 SwiftUI 改动用 `DesignTokens.swift` 的值，不用字面量。
 - **注入内容一律进 user 消息，绝不进 system prompt**（KV cache 前缀稳定纪律，`docs/model-context-inventory.md` §5）。
-- **`excludeModes` 默认值在本计划中是 `["transcribe"]`**，不是 spec §3.4 写的 `[]`。原因见 Task 9 的「开放决策」块——这是唯一一处计划有意偏离 spec，是为了让其余 11 个 Task 不被一个未决的产品承诺问题阻塞。
+- **`RECENT_ACTIVITY_EXCLUDED_MODES = []`**：三个模式全部注入，**不留开关**（产品负责人 2026-08-25 在完整了解代价后的决定，spec §六）。这条承诺的对外文案改写是 Task 12 的一等交付，不是收尾工作。
 - **best-effort 姿态**：任何 episodic 写入/读取失败只影响记忆，绝不影响交付，绝不冒泡到用户。
 
 ---
@@ -874,7 +874,7 @@ git commit -am "Delete the memory layer nothing read"
   ```ts
   export const RECENT_ACTIVITY_LIMIT = 10;
   export const RECENT_ACTIVITY_FIELD_MAX = 120;
-  export const RECENT_ACTIVITY_EXCLUDED_MODES: readonly string[] = ["transcribe"];
+  export const RECENT_ACTIVITY_EXCLUDED_MODES: readonly string[] = [];
   export function buildRecentActivityContext(
     rows: EpisodicEventRow[],
     opts: { includeIds: boolean }
@@ -884,12 +884,9 @@ git commit -am "Delete the memory layer nothing read"
   `MemoryStore` 的 `CONSOLIDATION_EXCLUDED_MODES` 是**两个独立常量**，
   刻意不共用——见 spec §3.4。）
 
-> **开放决策（不阻塞本 Task）**：spec §3.4 写的 `excludeModes` 默认是 `[]`（三个模式全带）。
-> 本计划 Task 10 先接 `["transcribe"]`，因为 `USER_GUIDE.md` 有六处明文承诺
-> 「听写完全不经过任何 AI 模型」，其中 §446 更直接写明「想让整理也从你的听写里学新词……
-> 这需要一个明确的开关来交换这份承诺，当前版本**没有**提供，也不会偷偷替你打开」。
-> 产品负责人决定如何处理这条承诺之后，改的是 Task 10 里的一个常量。
-> **本 Task 的渲染函数本身不关心这件事**，照常支持三个模式。
+> **已决**：`RECENT_ACTIVITY_EXCLUDED_MODES = []`——三个模式全部注入，不留开关。
+> 这推翻了一条已发布的对外承诺（spec §六列出了全部三个仓库里的位置），
+> 改写工作在 Task 12，与本 Task 无关。**本 Task 的渲染函数本身不关心这件事**。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1141,9 +1138,9 @@ if (input.recentActivity) {
 `oneshot/routes.ts` 的 `handleAsk` 里，取 `knownTerms` 之后：
 
 ```ts
-// excludeModes 暂接 ["transcribe"]：USER_GUIDE.md 有六处明文承诺听写不经过
-// 任何 AI 模型（§566、§446 尤其明确）。产品负责人决定如何处理这条承诺之后，
-// 这里改成 []。这个常量是 spec §六 那笔欠账的收口点。
+// RECENT_ACTIVITY_EXCLUDED_MODES 为空：三个模式全部注入，包括听写。
+// 这是一次知情的对外承诺变更（spec §六），不是疏漏 —— 参数保留是为了
+// 将来若要做「按 app 排除」「按时间窗排除」时有现成接缝。
 const recentActivity = buildRecentActivityContext(
   store.recentEvents(RECENT_ACTIVITY_LIMIT, { excludeModes: RECENT_ACTIVITY_EXCLUDED_MODES }),
   { includeIds: false }
@@ -1312,19 +1309,117 @@ git commit -m "Give the agent a way to open what it was shown"
 - §4 漂移表：`AgentMemoryStore` 相关各行从「已删除读取侧」更新为「整个存储已删除」。
 - §5 新增一个正例：`recentActivity` 为什么必须进 user 消息。
 
-- [ ] **Step 4: 改 `USER_GUIDE.md`**
+- [ ] **Step 4: 改 `USER_GUIDE.md` 与两个 README**
 
-**这一步取决于产品负责人对 Task 9 那个开放决策的裁定。** 若维持
-`RECENT_ACTIVITY_EXCLUDED_MODES = ["transcribe"]`，USER_GUIDE 的承诺依然成立，
-只需在 §记忆 增补一段说明「`问答` 和 `Agent` 的最近记录会作为上下文注入」。
-若改成 `[]`，则 §115 表格、§446、§566、§593 四处必须同批改写，不能只改一处。
+`RECENT_ACTIVITY_EXCLUDED_MODES = []`，所以「听写完全不经过任何 AI 模型」
+这条承诺不再成立，**六处必须同批改写**，一处都不能漏：
+
+| 位置 | 现在写的 | 改成 |
+|---|---|---|
+| §115 模式表格「是否经过模型」列 | 「三种都完全不经过」 | 识别本身仍不经过；但转出的文字会作为近期上下文进入之后的问答/Agent 请求 |
+| §184 轻整理段 | 「不经过任何 AI 模型」 | 保留（轻整理本身确实是本机规则），但补一句上下文注入 |
+| §257 语音纠错段 | 「原始的听写本身仍然不经过模型」 | 改写 |
+| §446 整理原料段 | 「这需要一个明确的开关来交换这份承诺，当前版本**没有**提供，也不会偷偷替你打开」 | **这段最关键**：改成「1.2.0 及以前如此；2.0.0 起听写会作为近期上下文进入问答与 Agent 请求，且没有开关——这是一次有意的产品变更，不是默默打开」。**不能只是删掉这段**，删掉等于让读过旧版的用户无从知道口径变了 |
+| §566 隐私小结 | 「没有任何听写文字因为选了某一档而被发给模型」 | 改写 |
+| §593 收尾清单 | 「三档都不经过模型」 | 改写 |
+
+`README.md` / `README.zh-CN.md` 的特性描述同步。
+
+**守住这条区别**：语音**识别**默认在本机跑、音频识别完即删——这仍然为真，
+不要连它一起删。变的是**识别出来的文字**会进入之后的请求，不是「音频上云」。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add CLAUDE.md docs/model-context-inventory.md USER_GUIDE.md sidecar/src/memory/MemoryStore.ts
+git add CLAUDE.md docs/model-context-inventory.md USER_GUIDE.md README.md README.zh-CN.md sidecar/src/memory/MemoryStore.ts
 git commit -m "Say what the code now says"
 ```
+
+---
+
+## Task 13: 站点改写（独立仓库 `opentype-site`）
+
+**Files（注意：不在本仓库）:**
+- Modify: `/Users/diywang/hackathon/opentype-site/i18n.js`, `index.html`, `releases.html`
+
+**Interfaces:** 无代码接口。部署目标 opentype-site.vercel.app。
+
+- [ ] **Step 1: 改隐私文案（中英各一套）**
+
+| 位置 | 现在写的 |
+|---|---|
+| `i18n.js:38` | 「纯转写，**完全不经过任何大模型**——听到什么就是什么」 |
+| `i18n.js:68` | 「只有『问答』和『Agent』会把文字发出去……『听写』完全不经过大模型」 |
+| `i18n.js:72` | 「纯听写不需要 API Key，也不需要联网」 |
+| `index.html:262` / `i18n.js:204` | "Plain dictation needs no API key and no network." |
+
+`index.html:18`（meta description）和 `index.html:232`／`i18n.js:57`
+「识别默认不出本机 / Recognition stays on your Mac」**保持不动**——
+这两句说的是识别，仍然为真。
+
+英文侧（`i18n.js` 189–204 一带）与中文侧一一对应改写，不要只改一种语言。
+
+- [ ] **Step 2: 加 2.0.0 发布说明，并把承诺变更放在头条**
+
+`releases.html` 与 `i18n.js` 的 releases 段加 2.0.0 条目。**必须显式点名这条变更**，
+理由是站点上已经存在一条 1.0.0 的修复记录（`i18n.js:133` 中文 / `:267` 英文）：
+
+> 听写内容会经由记忆整理悄悄传到云端，与「听写不经过模型」的承诺相悖
+
+产品公开把这件事当 bug 修过一次。2.0.0 主动做同一件事，**发布说明里若找不到这条，
+读过 1.0.0 说明的用户只会读成「那个 bug 又回来了」**。措辞要点明区别：
+上次是「悄悄地」，这次是明说的产品决定，为的是让三个模式共享同一份上下文。
+
+- [ ] **Step 3: 本地核对**
+
+Run: `cd /Users/diywang/hackathon/opentype-site && python3 -m http.server 8765`
+打开 `http://localhost:8765/` 与 `/releases.html`，中英两种语言各看一遍，
+确认没有残留的「完全不经过大模型」，也确认「识别不出本机」还在。
+
+- [ ] **Step 4: 提交（在该仓库内）**
+
+```bash
+cd /Users/diywang/hackathon/opentype-site
+git add i18n.js index.html releases.html
+git commit -m "Say that dictation now feeds the context"
+```
+
+**不要自行 push 或部署**——那是对外发布动作，交给产品负责人。
+
+---
+
+## Task 14: Release 2.0.0
+
+**Files:** `Resources/Info.plist`，以及 `grep -rn "1\.2\.0"` 命中的每一处版本号。
+
+- [ ] **Step 1: 找全版本号**
+
+Run: `grep -rn "1\.2\.0" --include=* . | grep -v node_modules | grep -v "^./.git"`
+把命中位置列出来，逐一判断哪些是当前版本号、哪些是历史记录（发布说明里的历史条目**不要**改）。
+
+- [ ] **Step 2: 改版本号并构建**
+
+Run: `./scripts/build-app.sh`
+Expected: `dist/OpenType.app` 产出，ad-hoc 签名成功。
+
+- [ ] **Step 3: 全套测试**
+
+Run: `swift test && cd sidecar && bun test`
+Expected: 两套全绿。**这是发版前的硬门槛，不是形式。**
+
+- [ ] **Step 4: 冒烟**
+
+`open dist/OpenType.app`，实测一遍本设计的主路径：
+听写一句 → 切问答问一个依赖那句话的问题 → 切 Agent 交一个依赖前两句的任务。
+确认第 2、3 步的回答确实用上了第 1 步的内容——**这是整个批次的验收标准本身**。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git commit -am "Release 2.0.0"
+```
+
+**不打 tag、不发布**——交给产品负责人。
 
 ---
 
@@ -1341,3 +1436,10 @@ Task 12 最后。
 ```
 
 Task 11 可与 3–8 并行。Task 9 可与 3–8 并行，但 **Task 10 必须等 Task 5**。
+
+Task 12（本仓库文档）与 Task 13（站点）互不依赖，可并行，但两者都必须等 Task 10 落地——
+在代码真的开始注入听写之前改掉承诺，文档就领先于事实，那是另一种谎。
+
+**Task 14 最后**，且它的 Step 4 冒烟是整个批次的验收：
+听写一句 → 问答问一个依赖那句话的问题 → Agent 交一个依赖前两句的任务。
+这三步跑通，这个批次才算交付；跑不通，前面 13 个 Task 全绿也不算。

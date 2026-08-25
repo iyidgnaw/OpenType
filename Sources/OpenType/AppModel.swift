@@ -2334,7 +2334,13 @@ final class AppModel: ObservableObject {
                     provider: nil,
                     model: nil,
                     error: nil,
-                    supersedesEventId: session.lastEventId
+                    supersedesEventId: session.lastEventId,
+                    // A committed Review delivery, whether or not it went
+                    // through a correction round — `UsageStats` is what tells
+                    // the two apart (correction rounds are already excluded
+                    // via `.corrected` timestamps; this label is what
+                    // excludes the case that had none).
+                    variant: TranscribeVariant.review.rawValue
                 )
             )
 
@@ -3480,7 +3486,8 @@ final class AppModel: ObservableObject {
             error: String? = nil,
             provider: String? = nil,
             model: String? = nil,
-            recordingEndedAt: Date? = nil
+            recordingEndedAt: Date? = nil,
+            variant: String? = nil
         ) -> UUID {
             let eventId = UUID()
             recordAuditEvent(
@@ -3496,7 +3503,8 @@ final class AppModel: ObservableObject {
                     provider: provider,
                     model: model,
                     error: error,
-                    recordingEndedAt: recordingEndedAt
+                    recordingEndedAt: recordingEndedAt,
+                    variant: variant
                 )
             )
             return eventId
@@ -3829,7 +3837,17 @@ final class AppModel: ObservableObject {
                 // no model was involved, which for Tidy is the product
                 // promise, not merely a missing field.
                 provider: mode == .transcribe ? nil : sidecarTextProvider,
-                model: effectiveTextModel
+                model: effectiveTextModel,
+                // This call is reachable only for `.transcribe` Direct/Tidy:
+                // Review takes the dispatch-and-return path above and records
+                // its own `.completed` event in `commitReview()`, and
+                // `.ask`/`.agent` return before this call via the
+                // `guard let result` above. `variant` is the **effective**
+                // one `AppRules` resolved for this delivery, not necessarily
+                // the user's raw Settings choice — see `UsageStats` for why
+                // that distinction is what lets the statistics panel tell
+                // Review apart from Direct/Tidy in the audit trail.
+                variant: variant.rawValue
             )
 
             // P0-3: the text is delivered and the user is looking at it — for

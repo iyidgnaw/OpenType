@@ -55,6 +55,29 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
     /// missing measurement in as 0s would quietly flatter the number forever.
     let recordingEndedAt: Date?
 
+    /// The **effective** `TranscribeVariant` (`AppRules.transcribeVariant`'s
+    /// resolution, not necessarily the user's raw Settings choice) that
+    /// delivered this session, as its `rawValue` — `"direct"`, `"tidy"`, or
+    /// `"review"`. Stamped only on the `.completed` event of a `transcribe`
+    /// session; `nil` for every other mode, and for `.recognized`/
+    /// `.corrected`/`.cancelled` events regardless of mode.
+    ///
+    /// It exists so `UsageStats` can tell a Review session the user committed
+    /// without ever correcting anything — which passes every other guard
+    /// `averageEndToEndLatency` had — apart from a Direct delivery: the two
+    /// look identical in the trail otherwise, but a Review session's span
+    /// includes the user's own reading/deciding time in the panel, not just
+    /// the system's.
+    ///
+    /// Optional for the same reason `recordingEndedAt` is: this file is
+    /// append-only and never rewritten, so every row written before this
+    /// field existed simply lacks the key and decodes as `nil`. Readers must
+    /// **not** treat a missing `variant` as "might be Review, exclude to be
+    /// safe" — that would silently blank the statistics panel for every
+    /// session recorded before this batch, which is a worse lie than the one
+    /// this field fixes.
+    let variant: String?
+
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
         case id = "eventId"
@@ -72,6 +95,7 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         case error
         case supersedesEventId
         case recordingEndedAt
+        case variant
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -92,7 +116,8 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         model: String?,
         error: String?,
         supersedesEventId: UUID? = nil,
-        recordingEndedAt: Date? = nil
+        recordingEndedAt: Date? = nil,
+        variant: String? = nil
     ) {
         schemaVersion = 1
         self.id = id
@@ -110,6 +135,7 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
         self.error = error
         self.supersedesEventId = supersedesEventId
         self.recordingEndedAt = recordingEndedAt
+        self.variant = variant
     }
 
     init(from decoder: Decoder) throws {
@@ -149,6 +175,7 @@ struct ImmutableAuditEvent: Codable, Equatable, Identifiable {
             Date.self,
             forKey: .recordingEndedAt
         )
+        variant = try container.decodeIfPresent(String.self, forKey: .variant)
     }
 }
 

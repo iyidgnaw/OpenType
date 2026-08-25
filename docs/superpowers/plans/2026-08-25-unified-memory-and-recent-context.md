@@ -336,7 +336,7 @@ git commit -m "Read recent events by time, the query that never existed"
 - Modify: `sidecar/src/memory/routes.ts`, `sidecar/src/asr/routes.ts`, `sidecar/src/oneshot/routes.ts`, `sidecar/src/agent/routes.ts`, `sidecar/src/server.ts`
 - Test: `sidecar/test/memory/routes.test.ts`, 以及三个路由各自已有的测试文件
 - **注意** `sidecar/test/memory/episodicWiring.test.ts` 就是钉住「三个路由都写 episodic 事件」的那个文件（P1-7 的成果）。移除写入后它必然全红——**不要删掉它**，把它改写成钉住新契约：三个路由都**不再**写，写入只发生在 `POST /memory/events`。它从「证明三处都接上了」变成「证明三处都摘干净了」，是同一个不变量的另一面。
-- **还有三个文件钉着同一个旧契约**（本计划初稿遗漏，2026-08-25 补）：`test/asr/episodicEvent.test.ts`（11 个测试，钉 `AsrRouteDeps.recordEpisodicEvent` 的字段映射）、`test/oneshot/episodicEvent.test.ts`（8 个）、`test/agent/routes.test.ts` 第 56–91 行的两个内联测试。删掉写入点会让这 21 个测试全部失效。**删之前先读，找出其中仍然成立的规则并搬到 `POST /memory/events` 的测试里**——重构正是这类规则蒸发的地方。
+- **还有三个文件钉着同一个旧契约**（本计划初稿遗漏，2026-08-25 补）：`test/asr/episodicEvent.test.ts`（10 个测试，钉 `AsrRouteDeps.recordEpisodicEvent` 的字段映射）、`test/oneshot/episodicEvent.test.ts`（7 个）、`test/agent/routes.test.ts` 第 56–91 行的两个内联测试。删掉写入点会让这 17 个测试全部失效。**删之前先读，找出其中仍然成立的规则并搬到 `POST /memory/events` 的测试里**——重构正是这类规则蒸发的地方。
 - **一条必须承接的规则**：`recordDictation` 开头的 `if (rawTranscript.trim() === "") return;`。空录音（误触快捷键）不记录，注释写明代价：五次误触就会顶开 `shouldConsolidate` 的门槛，白烧一次真实 LLM 调用。写入收敛后**这条守卫要放在端点里，不是放在调用方**——放在端点，任何未来的第二个调用方都绕不过；放在 Swift，就得靠下一个人重新想起来。
 
 **Interfaces:**

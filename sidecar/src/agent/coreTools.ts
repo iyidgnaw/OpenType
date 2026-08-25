@@ -2,6 +2,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolSet } from "./toolSets";
+import type { MemoryStore } from "../memory/MemoryStore";
+import type { ConversationStore } from "../memory/conversations";
+import {
+  handleReadHistory,
+  READ_HISTORY_TOOL_NAME,
+  READ_HISTORY_TOOL_SCHEMA,
+} from "./readHistoryTool";
 
 /**
  * Product-owned "hands and feet" for the Agent runtime (B2 core tools v2,
@@ -34,6 +41,15 @@ export interface CoreToolsDeps {
   execTimeoutMs?: number;
   /** Launches the system opener for an (already `~`-expanded) absolute path. */
   openRunner?: (path: string, signal?: AbortSignal) => Promise<{ exitCode: number }>;
+  /**
+   * Backing stores for `opentype__read_history` (readHistoryTool.ts).
+   * Optional like every other dep here: the tool is always listed in
+   * `openAiTools` regardless of whether memory is wired up, and its handler
+   * degrades to a readable explanation rather than throwing when either is
+   * absent.
+   */
+  memoryStore?: MemoryStore;
+  conversations?: ConversationStore;
 }
 
 const BASH_TOOL_NAME = "opentype__bash";
@@ -422,6 +438,23 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: `Opened ${filePath} with its default application.` };
   }
 
+  async function handleReadHistoryTool(rawArgs: unknown): Promise<{ content: string }> {
+    const args = (rawArgs ?? {}) as {
+      eventId?: unknown;
+      conversationId?: unknown;
+      limit?: unknown;
+    };
+    const content = await handleReadHistory(
+      {
+        eventId: typeof args.eventId === "number" ? args.eventId : undefined,
+        conversationId: typeof args.conversationId === "number" ? args.conversationId : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      },
+      { store: deps.memoryStore, conversations: deps.conversations }
+    );
+    return { content };
+  }
+
   const handlers = new Map<
     string,
     (rawArgs: unknown, signal?: AbortSignal) => Promise<{ content: string }>
@@ -434,6 +467,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     [WEB_SEARCH_TOOL_NAME, handleWebSearch],
     [WEB_FETCH_TOOL_NAME, handleWebFetch],
     [OPEN_FILE_TOOL_NAME, handleOpenFile],
+    [READ_HISTORY_TOOL_NAME, handleReadHistoryTool],
   ]);
 
   const openAiTools: unknown[] = [
@@ -590,6 +624,7 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
         },
       },
     },
+    READ_HISTORY_TOOL_SCHEMA,
   ];
 
   async function callTool(

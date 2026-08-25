@@ -90,11 +90,12 @@ function toolNames(set: ToolSet): string[] {
 }
 
 describe("createCoreTools tool inventory", () => {
-  // Contract extension (B2 open-file + ask-web design §1): the inventory
-  // grows from seven to exactly eight -- `opentype__open_file` joins the set.
-  // This test previously hardcoded the seven-name list, so the list itself
-  // legitimately changes here; every other assertion is untouched.
-  test("exposes exactly the eight namespaced core tools, all type 'function'", () => {
+  // Contract extension (unified-memory-and-recent-context design §3.6,
+  // Task 11): the inventory grows from eight to exactly nine --
+  // `opentype__read_history` joins the set. Same precedent as the
+  // seven-to-eight change above it: the list itself legitimately changes
+  // here; every other assertion is untouched.
+  test("exposes exactly the nine namespaced core tools, all type 'function'", () => {
     const tools = createCoreTools({ homeDir: makeTempHome(), fetchFn: blockedFetch() });
 
     for (const tool of tools.openAiTools) {
@@ -110,6 +111,7 @@ describe("createCoreTools tool inventory", () => {
         "opentype__web_search",
         "opentype__web_fetch",
         "opentype__open_file",
+        "opentype__read_history",
       ].sort()
     );
   });

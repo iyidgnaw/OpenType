@@ -449,6 +449,19 @@ export class MemoryStore {
     return rows.reverse();
   }
 
+  /**
+   * Fetches one `episodic_events` row by id, or `null` if it doesn't exist.
+   * Same table and row shape as `recentEvents`, id-scoped rather than
+   * time-scoped -- the by-id counterpart `opentype__read_history`
+   * (`agent/readHistoryTool.ts`) needs to expand one clipped "Recent
+   * activity" entry back to its full, untruncated record.
+   */
+  getEventById(id: number): EpisodicEventRow | null {
+    return this.db
+      .query("SELECT * FROM episodic_events WHERE id = ?")
+      .get(id) as EpisodicEventRow | null;
+  }
+
   hoursSinceLastConsolidation(): number | null {
     const row = this.db
       .query(

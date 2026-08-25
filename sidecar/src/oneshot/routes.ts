@@ -27,7 +27,7 @@ interface AskRequestBody {
  * these two names, so the web-only property belongs to the ask route, not to
  * the server wiring.
  */
-const ASK_TOOL_NAMES = ["opentype__web_search", "opentype__web_fetch"];
+export const ASK_TOOL_NAMES = ["opentype__web_search", "opentype__web_fetch"];
 
 /** Spec §2: an answer should need at most a few searches, not the agent's 10. */
 const ASK_MAX_ITERATIONS = 6;

@@ -245,7 +245,7 @@ async function main() {
   // is what lets a config-route write below apply without a restart.
   const mcpTools = createReloadableMcpToolSet(resolvedMcpServers.servers);
   const builtInTools = createBuiltInTools({ store, callLLM });
-  const coreTools = createCoreTools({});
+  const coreTools = createCoreTools({ memoryStore: store, conversations });
   // The approval seam wraps the *merged* set so built-in memory tools, core
   // tools, and MCP tools all flow through the same gate. The policy here is
   // the always-allow baseline, and stays that way on purpose: this is the set

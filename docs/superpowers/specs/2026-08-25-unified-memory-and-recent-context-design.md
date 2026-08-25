@@ -245,6 +245,19 @@ Swift 侧的关键是**保住 `HistoryEntry` 这个视图模型**，只把来源
 
 刷新时机两处：每次交付完成后，以及打开听写页时的 `.task`。
 
+**「拿不到」不等于「没有」**（2026-08-25 补，`HistoryLoadState`）。听写历史从本地文件改成
+HTTP 之后多了一种以前不存在的失败：sidecar 不可用。而 `historyEntries` 启动时是空的，
+所以首次拉取失败的话，用户看到的不是「加载失败」，是听写页那句「还没有历史记录」——
+**他的历史好好的，应用告诉他没有。** 这大概是这个产品能说出口的最吓人的一句错话，
+而计划里那行 `guard let ... else { return }` 把它藏得很好。
+
+三态而非两态，因为两态会把同一个 bug 往后挪一步：`.notYetLoaded` / `.loaded([HistoryEntry])` /
+`.unavailable(lastKnown: [HistoryEntry])`。`.unavailable` **必须携带上次拿到的列表**——
+否则屏幕上正显示着真实历史的用户，一次 sidecar 抖动就会被清空，还是同一句谎，只是晚了一步。
+配套的另一半同样重要：**成功返回空要被信任**（比如刚点完重置），那是真实信息，
+不能和失败一视同仁。`isConfirmedEmpty` 只对 `.loaded([])` 为真，
+视图必须据它分支，而不是据 `entries.isEmpty`。
+
 ---
 
 ## 四、删除清单

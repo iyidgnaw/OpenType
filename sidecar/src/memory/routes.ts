@@ -1,3 +1,4 @@
+import { clearContextUsageLog } from "../oneshot/contextDebugLog";
 import { ApiError, type Route } from "../router";
 import type { EntityCategory, EntityTermPatch, MemoryStore } from "./MemoryStore";
 import { runConsolidation, upsertEntityTerm, type CallLLM } from "./consolidator";
@@ -50,7 +51,22 @@ function requireNonEmptyString(value: unknown, field: string): string {
  * bypass path, so "run it now" behaves identically whether triggered by
  * voice or by clicking a button.
  */
-export function buildMemoryRoutes(store: MemoryStore, callLLM: CallLLM): Route[] {
+export function buildMemoryRoutes(
+  store: MemoryStore,
+  callLLM: CallLLM,
+  /**
+   * Backs `DELETE /memory/context-log` (the exit for
+   * `oneshot/contextDebugLog.ts`'s `clearContextUsageLog`, i.e. what makes
+   * 「重置输入历史」 actually clear `context-debug.log`). Trailing and optional,
+   * mirroring `server.ts`'s `buildApp` convention for `spillRoot?`/
+   * `runLogRoot?`, so every pre-existing 2-arg call site keeps compiling.
+   * When omitted -- a sidecar assembled without a context log path -- the
+   * route still exists but reports "nothing to delete" rather than
+   * crashing or silently no-opping on an unconfigured path it might
+   * mistake for a real one.
+   */
+  contextLogPath?: string
+): Route[] {
   return [
     {
       method: "GET",
@@ -213,6 +229,30 @@ export function buildMemoryRoutes(store: MemoryStore, callLLM: CallLLM): Route[]
         const id = parseIdParam(req);
         if (!store.deleteOwnerFact(id)) {
           throw new ApiError("owner_fact_not_found", 404);
+        }
+        return Response.json({ deleted: true });
+      },
+    },
+    {
+      // Closes docs/superpowers/specs/2026-08-09-current-system-state.md
+      // §11's "context-debug.log has no governance" gap, the "not cleared
+      // by the reset input history action" third (permissions and rotation
+      // are `contextDebugLog.ts`'s own governance, applied on every write).
+      //
+      // Unlike the id-addressed term/owner-fact deletes above, this route
+      // has no "unknown id" concept: it clears a file that may or may not
+      // exist, so idempotent-clear-of-nothing is success (200), not a 404 --
+      // matching `clearContextUsageLog`'s own no-op contract.
+      method: "DELETE",
+      path: "/memory/context-log",
+      handler: () => {
+        // No configured path (a sidecar assembled without one, e.g. an
+        // older test-only assembly) means there is nothing on disk this
+        // route could ever have written -- report the same success a real
+        // clear-of-nothing would, rather than crashing or fabricating a 404
+        // for a resource concept this route doesn't have.
+        if (contextLogPath) {
+          clearContextUsageLog(contextLogPath);
         }
         return Response.json({ deleted: true });
       },

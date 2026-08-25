@@ -97,7 +97,15 @@ export function buildApp(
    * child (every pre-existing test call site) simply serves no status route
    * rather than reporting on a process that does not exist.
    */
-  asrStatusDeps?: AsrStatusDeps
+  asrStatusDeps?: AsrStatusDeps,
+  /**
+   * Backs `DELETE /memory/context-log` (see `memory/routes.ts`). Optional,
+   * trailing, for the same reason as `spillRoot`/`runLogRoot` above -- every
+   * pre-existing test call site (none of which pass this far) keeps
+   * compiling and simply gets a route that reports "nothing to delete"
+   * rather than one wired to a real path.
+   */
+  contextLogPath?: string
 ) {
   return createRouter([
     {
@@ -106,7 +114,7 @@ export function buildApp(
       handler: () => Response.json({ status: "ok" }),
     },
     ...buildOneShotRoutes(store, conversations, chat, contextLogWriter, tools),
-    ...buildMemoryRoutes(store, callLLM),
+    ...buildMemoryRoutes(store, callLLM, contextLogPath),
     ...buildAgentRoutes(
       store,
       conversations,
@@ -383,7 +391,8 @@ async function main() {
         }
         return (await response.json()) as LocalWhisperStatus;
       },
-    }
+    },
+    env.contextLogPath
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

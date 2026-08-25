@@ -196,7 +196,7 @@ final class EpisodicEventRecorderTests: XCTestCase {
     /// to match the fallback the rest of the codebase already uses for this
     /// exact situation: `ContextBridge.swift`'s
     /// `application?.localizedName ?? "Unknown app"` and the identical
-    /// literal in `AgentMemoryStore.swift` and `AppModel.swift`. If a future
+    /// literal in `AppModel.swift`. If a future
     /// implementation picks a different string, this test — not a comment —
     /// is what should change first.
     ///

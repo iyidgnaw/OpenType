@@ -12,7 +12,10 @@
 > 才出现了 §4 里记录的那批"文档声称存在但代码里没有"的注入点。
 
 核对于 `50a7d0c`（2026-08-14），含 dsh 借鉴计划 T1–T9 全部改动；
-2026-08-14 产品批次 P1-7（记忆层清理 + episodic 补全 + 自动整理）已并入 §1.2 与 §4。
+2026-08-14 产品批次 P1-7（记忆层清理 + episodic 补全 + 自动整理）已并入 §1.2 与 §4；
+2026-08-25 记忆层归一批次（`docs/superpowers/specs/
+2026-08-25-unified-memory-and-recent-context-design.md`：Swift 单写入点、`recentActivity`
+跨模式注入、`opentype__read_history`）已并入新增的 §3.9、§3.6、§4、§5。
 
 ---
 
@@ -40,9 +43,15 @@ episodic 事件（`/oneshot/ask` 同样追加一条 `mode: "ask"`）。这条路
 没有工具）：一段 instruction + 现有实体词典的 `{id, canonicalTerm, aliases}` + 最多 200 条
 未整理事件的 `{id, mode, rawTranscript, correctedTranscript}` 四个字段。
 
-**`mode: "transcribe"` 的事件不在其中，这是本清单里最重要的一条排除。** 「纯听写不经过任何
-LLM」是写在 README、`USER_GUIDE.md` §14 和 `CLAUDE.md` 模式表里的产品承诺，而这里的**记忆整理**
-是一次真实的模型调用——**延迟发送也是发送**，「只在整理时才发」不构成豁免。
+**`mode: "transcribe"` 的事件不在其中，这是本清单里最重要的一条排除之一。** 这不再是
+"听写内容绝不进模型"这条已经不成立的旧论证（自 §3.9 起，听写会作为近期上下文进入
+`ask`/`agent` 的每次请求）——排除的理由收窄到**这一条路径本身**：记忆整理是一次真实的
+模型调用，产出会长期留存并反复被读取的记忆（`entity_terms`/`owner_facts`），这条边界
+即使在近期上下文注入不设排除的情况下也继续保留，因为它管的是"值不值得让一句听写永久
+沉淀成词典/事实"，与 §3.9 管的"这句听写能不能出现在下一次请求里"是两件不同的事、两个
+独立的排除列表（`CONSOLIDATION_EXCLUDED_MODES` 与 `RECENT_ACTIVITY_EXCLUDED_MODES`），
+不要把其中一个的存在当成另一个也该存在（或也该消失）的理由，见 §3.9 与
+`sidecar/src/memory/MemoryStore.ts` 顶部对应的 doc comment。
 
 （别和听写的 `轻整理` 档搞混：那一档只有本机固定规则，没有任何模型调用，见
 `2026-08-09-current-system-state.md` §8。本节的「整理」自始至终指的是上面这条记忆整理路径。）排除点在
@@ -332,6 +341,14 @@ Tool call to opentype__bash was denied by the approval policy: the user denied i
 
 **Token 成本**：约 20 token，且只在被拒绝时出现；安全调用不产生任何额外上下文。
 
+**`opentype__read_history`（§3.9，仅 agent）的结果走的是同一条回灌路径**，没有专属处理：
+它是 `coreTools.ts` 里登记的一个普通工具，返回值就是一条 `role: "tool"` 消息，
+同样受本节两级钳制（25 000 字符源头钳制 → 20 000 字符循环钳制 → 超限落盘）。这一点值得
+点名，因为它是这张表里**读起来可能最大**的工具——`conversationId` 命中一段长会话时，
+返回的是该会话全部消息的未截断拼接，`§3.9` 表头里"用 `opentype__read_history` 展开"的
+承诺因此不是没有代价的：一次展开可能就顶到源头钳制、触发落盘。`eventId`/无参数两种调用
+返回单条或若干条完整记录，通常小得多。
+
 ---
 
 ### 3.7 重复调用劝告（`src/agent/repeatGuard.ts`，仅 agent）
@@ -383,33 +400,82 @@ Which file did you mean?
 
 ---
 
+### 3.9 `Recent activity` 块（`src/memory/recentActivity.ts`，ask 与 agent 都有）
+
+**模型看到什么**：一段表头 + 最多 `RECENT_ACTIVITY_LIMIT`（10）行 JSONL，旧→新排列，
+插在 `Known terms`/`What you know about the user`/时间锚点旁边的同一个 user 消息里：
+
+```
+Recent activity, oldest first. Expand any entry with opentype__read_history.
+{"eventId":42,"mode":"transcribe","app":"WeChat","input":"明天上午帮我安排一个去深圳的拜访会议吧"}
+{"eventId":43,"mode":"ask","conversationId":17,"input":"明天那边天气怎么样","result":"深圳明天多云转晴，24–31℃…"}
+```
+
+**两种形态，一份实现，`includeIds: boolean` 切换**：agent 传 `true`——表头那句连同
+`eventId`/`conversationId` 都出现，因为它能用 `opentype__read_history`（结果回灌走 §3.6
+的老路径，见该节新增的一段）把 id 换回完整记录；ask 传 `false`——表头那句和任何数字 id
+都不出现，它够不着的工具不该在它眼前留一个看似可用的 id。缺的键直接不写，从不写 `null`（省 token，也不给模型
+一个可以照抄回工具调用的假值）。每个字段截断到 `RECENT_ACTIVITY_FIELD_MAX`（120 字符）并加
+省略号；输入列表为空时返回空字符串，不产生一个只有表头的块。
+
+**三个模式全部注入，没有开关**：`RECENT_ACTIVITY_EXCLUDED_MODES` 当前值是 `[]`——
+听写（`transcribe`）与另外两个模式一样进入这个块。这不是"暂时关着的隐私控制"，是产品负责人
+2026-08-25 在完整了解代价后做出的决定（`docs/superpowers/specs/
+2026-08-25-unified-memory-and-recent-context-design.md` §六；对外承诺的改写见
+`USER_GUIDE.md`）。它与 §1.2 记忆整理的排除列表（`CONSOLIDATION_EXCLUDED_MODES`，仍然是
+`["transcribe"]`）是**两个独立的列表、两个独立的查询**：整理是一次真实模型调用、产出会
+一直留存的长期记忆，继续排除听写；这里是每次请求都会消失的即时上下文，边界不同、故意不排除。
+两者共用一个带开关的查询会让改一边的同时悄悄放宽另一边，`MemoryStore.recentEvents` 与
+`consolidationCandidates` 的 doc comment 都点名了这一点，改这里的排除逻辑前先读那两段。
+
+**Token 成本**：10 条约 1200–1400 token。选 JSON 而非紧凑写法（如 `[#43 ask · conv 17]`）
+比紧凑形态贵约 15–20%，换来的是键名与 `opentype__read_history` 的参数名一字不差、
+模型零翻译地把 id 抄进工具调用。零条历史时**完全不出现**。
+
+**KV Cache**：与 §3.1/§3.2 同理——位于 user 消息末尾，几乎每次请求内容都不同 ⇒ 不复用；
+但排在系统提示之后，不影响系统提示前缀的复用（§5 的正例之一，见该节）。
+
+**一个必须钉住的顺序**：ask/agent 都是**答完之后**才由 Swift 单写入点写下自己那条 episodic
+事件（design §3.2/§3.5），所以取最近 10 条时当前这一轮还没入库——模型天然看不见自己正在
+回答的问题。这是 Swift 侧「先取答案、后写事件」的顺序保证的，不是这里的渲染函数自己保证的。
+
+---
+
 ## 4. **不**到达模型的东西（漂移记录）
 
 写这份清单的直接产出：以下机制在文档或直觉上"应该在注入"，但**代码里并没有**。
 
 | 机制 | 真实状态 |
 |---|---|
-| `AgentMemoryStore.entriesForPrompt()` | ~~仅测试调用~~ **已删除**（P1-7） |
-| `AgentMemoryStore.memoriesForPrompt()` | ~~仅测试调用~~ **已删除**（P1-7） |
-| `AgentMemoryStore.profileContextForPrompt()` | ~~仅测试调用~~ **已删除**（P1-7） |
-| `LocalMemoryRetriever.retrieve()` | ~~整条语义检索链在生产路径上不可达~~ **整个文件已删除**（P1-7），连同只有它读的 `memory_embeddings` 表和每条事件的 NLEmbedding 向量 |
-| "约 12 条近期任务注入 Agent 上下文" | **不存在**。`/agent/run` 的请求体只有 `task + context + conversationId + runId`；Swift 侧从不发送近期任务 |
-| "About Me" 用户档案 | Settings 编辑 UI 已移除 ⇒ 既不可填也不注入；`updateOwnerProfile`/`ownerProfile` 仅为旧数据清洗保留 |
+| `AgentMemoryStore.entriesForPrompt()` | ~~仅测试调用，已删除（P1-7）~~ **整个 `AgentMemoryStore.swift`（660 行）已删除**（2026-08-25 统一记忆批次）——P1-7 只删了这个和另外两个 prompt 读取方法；这一批发现剩下的 8 个 `@Published` 属性也已经零订阅者（连 UI 都不读了，记忆面板读的是 sidecar 的 HTTP 接口），于是把整个类连同它的 SQLite 表一起删掉，而不是留着当装饰 |
+| `AgentMemoryStore.memoriesForPrompt()` | 同上，随整个类一起删除 |
+| `AgentMemoryStore.profileContextForPrompt()` | 同上 |
+| `LocalMemoryRetriever.retrieve()` | ~~整条语义检索链在生产路径上不可达~~ **整个文件已删除**（P1-7，早于本批），连同只有它读的 `memory_embeddings` 表和每条事件的 NLEmbedding 向量——与 `AgentMemoryStore` 是两次独立的删除，不要合并成一条时间线 |
+| "约 12 条近期任务注入 Agent 上下文" | 仍然**不存在**，且理由变了：不再是"Swift 侧没接线"，而是 Swift 侧现在**没有**能接线的东西——`AgentMemoryStore` 已删除。`/agent/run` 的请求体是 `task + context + conversationId + runId` |
+| "About Me" 用户档案 | 曾经是"Settings 编辑 UI 已移除 ⇒ 既不可填也不注入，`updateOwnerProfile`/`ownerProfile` 仅为旧数据清洗保留"；本批之后**这两个符号本身也不存在了**——`AgentMemoryStore.swift` 删除时一并带走 |
 
-**结论**：Swift 侧的整个记忆读取层曾经是生产路径上的死代码；2026-08-14 的 P1-7 **把它删了**，
-而不是接上——"删掉"还是"接上"这个独立决策选了前者，理由是真正注入模型的记忆只有 sidecar 侧的
-两条线（§3.1 的实体词条、§3.2 的 owner 事实），留着第二套只会让下一个读代码的人再判断一次。
-`AgentMemoryStore` 本身保留：任务历史、已学到的偏好、旧数据清洗、历史重置都还在用，
-只是没有一条通向 prompt 的路。
+**结论**：Swift 侧的整个记忆读取层曾经是生产路径上的死代码；2026-08-14 的 P1-7 删掉了它的
+读取侧（`entriesForPrompt`/`memoriesForPrompt`/`profileContextForPrompt`、整个
+`LocalMemoryRetriever.swift`），但保留了 `AgentMemoryStore` 本身——当时的理由是任务历史、
+已学到的偏好、旧数据清洗、历史重置还在用它。2026-08-25 的统一记忆批次
+（`docs/superpowers/specs/2026-08-25-unified-memory-and-recent-context-design.md`）把这个
+保留决定也推翻了：一条用户输入此前同时落进四份存储，其中三份没有任何消费者，
+`AgentMemoryStore` 就是最大的一份。它剩下的那些用途逐一核实后全部没有生产读者，
+于是这一批把 `AgentMemoryStore.swift`／`MemoryInsightsAnalyzer.swift`／
+`OwnerProfileAutoUpdater.swift`／`HistoryStore.swift` 一并删除，记忆与历史收敛到
+sidecar 的 `episodic_events`（单写入点见 `CLAUDE.md`）。真正注入模型的记忆现在仍然只有
+sidecar 侧的三条线：§3.1 的实体词条、§3.2 的 owner 事实、新增的 §3.9 近期活动块。
 
 补充两点核对结果：
 
-- `CLAUDE.md` 对这件事的描述当时是**准确的**——它已经自我更正过，明说这层"在读取侧基本是惰性的"、
-  "~12 条近期任务注入 Agent 上下文"这个说法"在接线的代码里不存在"。本节是对它的**独立验证**，
-  不是对它的更正。P1-7 之后它改成了"读取侧已删除"，与上表一致。
-- 一处**小漂移**：`CLAUDE.md` 说 `/agent/run` 请求体是 `task + selectedText + conversationId`，
-  实际是 `task + context + conversationId + runId`（`runId` 是进度面板那批改动加的，
-  字段名是 `context` 不是 `selectedText`）。
+- `CLAUDE.md` 对这件事的描述在 2026-08-14 之后是**准确的**——它已经自我更正过，明说这层
+  "在读取侧基本是惰性的"、"~12 条近期任务注入 Agent 上下文"这个说法"在接线的代码里不存在"。
+  本节当时是对它的**独立验证**，不是更正。2026-08-25 批次之后 `CLAUDE.md` 的对应段落已经
+  整段重写，不再提这几个已删除的类名，与上表一致。
+- 一处**已修的小漂移**：`CLAUDE.md` 曾经说 `/agent/run` 请求体是
+  `task + selectedText + conversationId`，实际是 `task + context + conversationId + runId`
+  （`runId` 是进度面板那批改动加的，字段名是 `context` 不是 `selectedText`）。
+  这份文件早已记录了正确版本；`CLAUDE.md` 的那处笔误随 2026-08-25 的文档同步一并改正。
 
 ---
 
@@ -423,3 +489,14 @@ Which file did you mean?
 
 这条纪律决定了 T4（时间上下文）为什么必须注入 user 消息而不是系统提示：
 一个每秒都在变的时间戳放进系统提示，会让**整个前缀**在每次请求上失效。
+
+**另一个正例：§3.9 的 `recentActivity` 块。** 它比时间戳更容易被误判成"该放系统提示"的内容——
+不像时间戳每秒都变，它在同一个会话里可能连续好几次请求都不变（用户在两轮之间没再说新话）。
+但它仍然必须进 user 消息，理由和时间戳不同：时间戳是"内容频繁变化，放系统提示会拖垮复用率"；
+`recentActivity` 是"内容随**用户的操作**变化，不是随时间或请求次数变化"——它的值取决于
+`episodic_events` 表最新的十行，任何一次新的听写/问答/Agent 交付都会让它改变，而这个改变
+发生的时机与本次请求毫无关系。把它放进系统提示，等于让"系统提示不变"这条前提本身变得
+不可预测：同一份代码在同一个会话里，前缀是否复用取决于用户在别处做了什么。放进 user
+消息则没有这个问题——它就是每次请求都重新给出的当次输入的一部分，前缀（角色定义、
+安全约束、工具策略）继续保持恒定，`recentActivity` 排在末尾，只影响它自己这一段，
+不影响它前面已经缓存的部分。

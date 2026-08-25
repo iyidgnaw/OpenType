@@ -224,12 +224,14 @@ async function handleAgentRun(
     );
   } catch (error) {
     if (error instanceof AgentCancelledError) {
-      // A cancelled run is not a failed one. It gets its own terminal status,
-      // its own status code, and -- deliberately -- NO episodic memory event:
-      // an abandoned run is not a task the user completed, so recording it
-      // would teach the memory layer from work that never happened. The user
-      // message already appended to the conversation stays, because it did
-      // happen.
+      // A cancelled run is not a failed one. It gets its own terminal status
+      // and its own status code. This route no longer writes an episodic
+      // memory event on ANY path -- success, failure, or cancellation --
+      // since that write moved to Swift's single write point
+      // (`POST /memory/events`, design §3.2), which only fires once a
+      // delivery actually completes. So there is nothing special about the
+      // cancel path here to record or skip. The user message already
+      // appended to the conversation stays, because it did happen.
       if (runId) {
         progressRegistry.finish(runId, "cancelled");
         cancellations.release(runId);

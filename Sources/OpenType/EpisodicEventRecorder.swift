@@ -87,7 +87,7 @@ enum EpisodicEventRecorder {
     ///     name — a normal `CapturedContext` shape, not a malformed request)
     ///     falls back to `"Unknown app"`, the literal already used in three
     ///     other places in this codebase (`ContextBridge.swift`,
-    ///     `AgentMemoryStore.swift`, and this file's third use two lines
+    ///     `AppModel.swift`, and this file's third use two lines
     ///     down). **This deliberately does not match**
     ///     `sidecar/src/memory/routes.ts`'s own `body.applicationName ??
     ///     "Unknown"` (no "app") — that fallback answers a different

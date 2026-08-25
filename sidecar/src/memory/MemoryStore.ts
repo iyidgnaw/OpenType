@@ -4,28 +4,43 @@ export type EventOrigin = "owner" | "agent" | "untrusted" | "system";
 export type EntityCategory = "person" | "project" | "term" | "org";
 
 /**
- * Modes whose episodic events are recorded locally but must never be handed to
- * a model.
+ * Modes excluded from consolidation — the pass that turns raw episodic events
+ * into long-term memory (`entity_terms`/`owner_facts`) via a real model call.
  *
- * `transcribe` is on this list because "plain dictation never reaches an LLM"
- * is a stated product guarantee, not an implementation detail — it is in the
- * README, in `USER_GUIDE.md` §13, and in `CLAUDE.md`'s mode table. Consolidation
- * is a real model call, so routing dictation through it would break that
- * guarantee no matter how much later the call happens: delayed transmission is
- * still transmission, and "only during consolidation" is not a defence to a
- * user who chose this product because their dictation stays on the machine.
+ * `transcribe` stays on this list. Consolidation is exactly the kind of use
+ * this project has chosen to keep dictation out of: it is a call to the
+ * user's configured model that produces material which then persists and
+ * resurfaces indefinitely (a dictionary alias, an owner fact), so excluding
+ * it here is a durable-memory boundary, not a blanket "dictation never
+ * reaches a model" rule — that broader rule is no longer true of this
+ * product (see `recentEvents` below and `recentActivity.ts`).
  *
- * Recording is deliberately *not* what gets suppressed. The rows stay, because
- * they are local-only material for the stats panel, and because an explicit
- * opt-in ("use my dictation to improve the dictionary — this sends recent
- * transcripts to your configured model") is the honest way to offer this later.
- * That opt-in only has something to work with if the material is still here.
+ * Since the 2026-08-25 batch, dictation *is* sent to a model in a different,
+ * narrower sense: the last several turns across all three modes — dictation
+ * included — are rendered into the `ask`/`agent` prompt as immediate,
+ * per-request context (spec `docs/superpowers/specs/
+ * 2026-08-25-unified-memory-and-recent-context-design.md` §3.4–§3.5). That
+ * injection is a separate query (`recentEvents`, with its own
+ * `RECENT_ACTIVITY_EXCLUDED_MODES` in `recentActivity.ts`, currently empty by
+ * deliberate product decision) with a different consumer and a different
+ * kind of trust in the result: it is scoped to one request, is not persisted
+ * anywhere new, and disappears once that request ends, where a consolidation
+ * run produces memory that outlives the request that triggered it and gets
+ * re-read by every future one.
  *
- * The high-signal half of learning from dictation is already covered without
- * any of this: P0-2 turns every voice correction the user actually makes into a
- * dictionary alias locally, with no model involved. What consolidation would
- * add is discovery of terms the user never corrected — real value, but not
- * worth silently voiding a promise to get it.
+ * The two queries are kept independent on purpose, not merged behind a
+ * shared flag: consolidation's exclusion is a boundary this product still
+ * holds, and immediate injection is a boundary it has decided not to hold.
+ * Sharing one query would mean a change made for one caller's needs could
+ * silently widen or narrow the other's scope — e.g. loosening what
+ * consolidation reads by accident also loosening what gets injected into the
+ * next prompt, or vice versa. Keeping them as two queries means each rule
+ * can only be changed by editing its own constant.
+ *
+ * Recording is *not* what either query gates — episodic rows are always
+ * written for all three modes (`POST /memory/events`, the Swift-side single
+ * write point). What differs between the two queries is which rows a given
+ * consumer is allowed to read back out.
  */
 export const CONSOLIDATION_EXCLUDED_MODES: readonly string[] = ["transcribe"];
 

@@ -126,17 +126,38 @@ enum EpisodicEventRecorder {
     }
 
     /// Whether a delivery at this audit status should also write an episodic
-    /// event. Only `.completed` — a cancelled or failed run must record
-    /// nothing: teaching the memory layer from work the user abandoned fills
-    /// it with results nobody accepted.
+    /// event. All three gates must be open, and each is required (no
+    /// defaults) so the one production caller
+    /// (`AppModel.recordEpisodicEvent(for:_:)`) cannot compile without
+    /// answering all three:
     ///
-    /// Every one of the three (now four, with Review's commit path — see
-    /// `AppModel.commitReview()`) call sites already has an `AuditEventStatus`
-    /// in hand at the point it decides what to write, so this gives the rule
-    /// a single, unit-testable home instead of leaving "only call the write
-    /// from the success branch" as an unenforced convention repeated at every
-    /// call site.
-    static func shouldRecord(for status: AuditEventStatus) -> Bool {
-        status == .completed
+    ///  - `status == .completed` — a cancelled or failed run must record
+    ///    nothing: teaching the memory layer from work the user abandoned
+    ///    fills it with results nobody accepted.
+    ///  - `keepHistory` — the user's own opt-out
+    ///    (`AppConfiguration.keepHistory`, Settings' 「保留本地输入历史」
+    ///    row). Before the 2026-08-25 fix, every pre-migration call site
+    ///    gated its `history.add(...)` on this flag, but the migration to
+    ///    this type dropped the check entirely, so a user who turned history
+    ///    off kept being recorded regardless — and, since this same design
+    ///    batch made these records injectable into every Ask/Agent prompt,
+    ///    an explicit "don't keep my dictation" preference was being
+    ///    overridden at exactly the moment the product started sending
+    ///    dictation to a model.
+    ///  - `!isPractice` — the guided first-run onboarding exercise
+    ///    (`AppModel.togglePracticeDictation()`, `mode: .ask, practice:
+    ///    true`) is by definition not real intent (two throwaway sentences
+    ///    read aloud during onboarding). Recording it made it eligible for
+    ///    the same recent-context injection and `opentype__read_history`
+    ///    tool as a real dictation, landing in the exact minutes the user is
+    ///    forming an impression of whether the product understands them.
+    ///
+    /// Every one of the four call sites (transcribe Direct/Tidy, the Review
+    /// commit, `ask`, `agent`) already has all three values in hand at the
+    /// point it decides what to write, so this gives the rule a single,
+    /// unit-testable home instead of leaving it as an unenforced convention
+    /// repeated at every call site.
+    static func shouldRecord(for status: AuditEventStatus, keepHistory: Bool, isPractice: Bool) -> Bool {
+        status == .completed && keepHistory && !isPractice
     }
 }

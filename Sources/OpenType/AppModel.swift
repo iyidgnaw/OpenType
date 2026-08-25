@@ -326,19 +326,24 @@ final class AppModel: ObservableObject {
     /// never at dispatch, or the model would find the question it is
     /// currently answering sitting in its own context on the next turn.
     ///
-    /// Gated on `EpisodicEventRecorder.shouldRecord(for:)` rather than
-    /// trusting "only called from a success branch" as an unenforced
-    /// convention repeated at every call site: a cancelled or failed run
-    /// must record nothing, since teaching the memory layer from work the
-    /// user abandoned fills it with results nobody accepted.
+    /// Gated on `EpisodicEventRecorder.shouldRecord(for:keepHistory:isPractice:)`
+    /// rather than trusting "only called from a success branch" as an
+    /// unenforced convention repeated at every call site: a cancelled or
+    /// failed run must record nothing, since teaching the memory layer from
+    /// work the user abandoned fills it with results nobody accepted; a user
+    /// who turned 保留本地输入历史 off must not be recorded either; and a
+    /// practice/onboarding delivery is not real intent and must not be
+    /// recorded even if history is on.
     ///
     /// Best-effort, exactly like `recordAuditEvent`'s neighbours elsewhere in
     /// this file (`resetHistory()`, `refreshUsageStats()`): a failed write
     /// loses one episodic row and must never affect delivery or surface to
     /// the user. `sidecarClient` is captured into a local before entering the
     /// detached task so the task doesn't need to hop back through `self`.
-    private func recordEpisodicEvent(for status: AuditEventStatus, _ body: EpisodicEventBody) {
-        guard EpisodicEventRecorder.shouldRecord(for: status) else { return }
+    private func recordEpisodicEvent(for status: AuditEventStatus, isPractice: Bool, _ body: EpisodicEventBody) {
+        guard EpisodicEventRecorder.shouldRecord(
+            for: status, keepHistory: configuration.keepHistory, isPractice: isPractice
+        ) else { return }
         let client = sidecarClient
         Task.detached(priority: .utility) { [weak self] in
             struct Ack: Decodable { let eventId: Int }
@@ -2517,8 +2522,36 @@ final class AppModel: ObservableObject {
             // trim) from when the session was staged, same as `recognition
             // .text` at the Direct/Tidy site; `session.rawTranscript` is the
             // unrewritten ASR output from the same recording.
+            //
+            // `isPractice: false` is a literal, not a read of
+            // `isPracticeSession`, for two independent reasons:
+            //
+            // 1. Review is architecturally unreachable from the practice
+            //    flow today — `togglePracticeDictation()` always dispatches
+            //    `mode: .ask, practice: true`, and Review only exists as a
+            //    `.transcribe` variant.
+            //
+            // 2. Even setting that aside, there is no meaningful value to
+            //    read here at all: `process(audioURL:)`'s `defer` clears
+            //    `isPracticeSession = false` as soon as staging finishes —
+            //    right after `beginReviewSession` puts the panel up, and
+            //    long before the user reads, edits, or commits anything.
+            //    That `defer` runs for *every* session, practice or not, so
+            //    a read at commit time would report "not practice" purely
+            //    because the signal is already gone by then, regardless of
+            //    what produced it.
+            //
+            // Reason 1 says today's value happens to be false; reason 2 says
+            // no live value is readable at this point in the first place —
+            // so even if 1 stopped holding, reaching for `isPracticeSession`
+            // here would still be wrong. If practice ever becomes reachable
+            // in dictation mode, the fix is to capture the flag into
+            // `ReviewSession` at `beginReviewSession()` instead, the same way
+            // `rawTranscript` is already captured there for exactly this
+            // reason.
             self.recordEpisodicEvent(
                 for: .completed,
+                isPractice: false,
                 EpisodicEventRecorder.body(
                     mode: .transcribe,
                     rawTranscript: session.rawTranscript,
@@ -4022,8 +4055,12 @@ final class AppModel: ObservableObject {
             // actually-delivered text (post-Tidy) are all known at once.
             // Reachable only for `.transcribe` Direct/Tidy — same reachability
             // note as `appendAudit(status: .completed, ...)` above.
+            // `isPractice: practice` — the value captured at the top of
+            // `process(audioURL:)` before its `defer` clears
+            // `isPracticeSession`.
             recordEpisodicEvent(
                 for: .completed,
+                isPractice: practice,
                 EpisodicEventRecorder.body(
                     mode: mode,
                     rawTranscript: recognition.rawText,
@@ -4373,9 +4410,11 @@ final class AppModel: ObservableObject {
             // own next-turn "recent activity" injection can never see the
             // question it is currently answering. `ask` has no dictionary
             // stage, so `rawTranscript`/`correctedTranscript` are the same
-            // spoken `transcript`.
+            // spoken `transcript`. `isPractice: practice` — this function's
+            // own `practice` parameter.
             recordEpisodicEvent(
                 for: .completed,
+                isPractice: practice,
                 EpisodicEventRecorder.body(
                     mode: .ask,
                     rawTranscript: transcript,
@@ -4720,9 +4759,11 @@ final class AppModel: ObservableObject {
             // only now that `response.result` exists — never at dispatch —
             // same ordering requirement as the ask site above. `agent` has
             // no dictionary stage either, so raw and corrected are the same
-            // spoken `transcript`.
+            // spoken `transcript`. `isPractice: practice` — this function's
+            // own `practice` parameter.
             recordEpisodicEvent(
                 for: .completed,
+                isPractice: practice,
                 EpisodicEventRecorder.body(
                     mode: .agent,
                     rawTranscript: transcript,

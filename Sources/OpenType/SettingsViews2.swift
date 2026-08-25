@@ -565,8 +565,8 @@ struct SettingsColumn: View {
                 divided: false,
                 title: OpenTypeL10n.text("保留本地输入历史", english: "Keep local input history"),
                 subtitle: OpenTypeL10n.text(
-                    "关闭后不再写入听写记录；审计记录不受影响",
-                    english: "When off, no dictation records are written; the audit trail is unaffected"
+                    "关闭后，听写、问答与任务的结果都不再写入本地记录，也不会被用作后续问答和任务的上下文；审计记录不受影响",
+                    english: "When off, results from dictation, ask, and agent tasks are no longer recorded locally, and won't be reused as context for later questions and tasks; the audit trail is unaffected"
                 )
             ) {
                 SettingsSwitch(isOn: $configuration.keepHistory)

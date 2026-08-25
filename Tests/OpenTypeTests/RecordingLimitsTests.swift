@@ -658,4 +658,56 @@ final class RecordingLimitsTests: XCTestCase {
             elapsed += 0.5
         }
     }
+
+    // MARK: - `warningText` must follow a live language switch
+
+    /// `warningText` is declared `static let warningText: String =
+    /// OpenTypeL10n.text(...)`. Swift memoizes a static stored property once
+    /// per process — on whichever thread first reads it — so it freezes at
+    /// whatever `OpenTypeL10n.current` happened to be at that first access,
+    /// for the rest of the process's lifetime. §F's interface-language switch
+    /// (`Settings ▸ 通用`, `InterfaceLanguagePolicy`) is live, not
+    /// restart-required, so after a user switches languages the two-minute
+    /// recording warning keeps rendering in whichever language was active the
+    /// first time anything in the process touched this property — which, in
+    /// this very test target, is as early as `testTheWarningTellsTheUserWhat
+    /// IsAboutToHappen` above.
+    ///
+    /// **Why this asserts a transition rather than either language's exact
+    /// string.** The bug is order-dependent and process-global: some earlier
+    /// test in this target (in this file or another) may already have read
+    /// `warningText` under some language before this test ever runs, and
+    /// XCTest does not promise this method runs first. So asserting "under
+    /// Chinese it reads such-and-such" would pass or fail for reasons that
+    /// have nothing to do with whether the value can change — it would just
+    /// restate whichever language happened to win the race to initialize the
+    /// `static let`. What is true regardless of that race is the shape of the
+    /// bug itself: read it under one explicit language, switch to the other,
+    /// read it again — today those two reads are byte-for-byte identical
+    /// (both return whatever got cached, no matter which language is current
+    /// by the second read); once `warningText` stops being a frozen
+    /// `static let`, the second read reflects the language actually set at
+    /// that moment and the two values differ. Asserting `notEqual` is exactly
+    /// that live-update behavior, and it is true independent of which
+    /// language happened to be cached first.
+    ///
+    /// RED today: this fails because the two reads come back equal (the
+    /// second one is the frozen value from whenever `warningText` was first
+    /// touched in this process, not a fresh read under `.english`), not
+    /// because of a compile error.
+    func testTheWarningTextFollowsALiveLanguageSwitchInsteadOfFreezingAtFirstAccess() {
+        OpenTypeL10n.current = .chinese
+        let firstRead = RecordingLimits.warningText
+
+        OpenTypeL10n.current = .english
+        let secondRead = RecordingLimits.warningText
+
+        XCTAssertNotEqual(
+            firstRead,
+            secondRead,
+            "warningText must reflect the language current at the moment it is " +
+                "read, not freeze at whatever language was active the first time " +
+                "any test (or any other code in this process) touched it"
+        )
+    }
 }

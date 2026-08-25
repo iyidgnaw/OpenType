@@ -27,6 +27,11 @@ private final class OverlayPresentation: ObservableObject {
     /// long as a recording is being timed. `AppModel`'s recording tick is the
     /// only writer — the controller never reads a clock of its own.
     @Published var elapsedText: String?
+    /// What the listening pill's trailing hint says, and whether tapping it
+    /// ends the recording — pushed by `apply(...)` on every recording, and
+    /// read together by `listeningContent` so the two can never disagree
+    /// (see `RecordingClock.StopAffordance`'s doc comment).
+    @Published var stopAffordance = RecordingClock.stopAffordance(startedByClick: false)
     /// The speech model's load state, so a transcription queued behind the
     /// first-launch download can say what it is waiting for.
     @Published var whisperStatus: WhisperStatusSnapshot?
@@ -500,11 +505,18 @@ final class OverlayController {
     /// after anything that could change what the surface should look like.
     /// A `.hidden` surface falls through to the legacy HUD for `state`, so
     /// transcribe keeps behaving exactly as before.
+    ///
+    /// - Parameter startedByClick: whether the recording behind this push (if
+    ///   any) began from a UI tap rather than the hotkey — forwarded straight
+    ///   into `RecordingClock.stopAffordance(startedByClick:)` below. Harmless
+    ///   to set even when `state != .listening`: the affordance is pure and
+    ///   the listening pill is the only reader of `presentation.stopAffordance`.
     func apply(
         _ surface: VoiceSurfaceState,
         state: ProcessingState,
         mode: InputMode,
-        escalation: AssistantEscalation? = nil
+        escalation: AssistantEscalation? = nil,
+        startedByClick: Bool = false
     ) {
         let previous = surfaceState
         let previousProcessing = presentation.state
@@ -550,6 +562,7 @@ final class OverlayController {
 
         presentation.mode = mode
         presentation.state = state
+        presentation.stopAffordance = RecordingClock.stopAffordance(startedByClick: startedByClick)
 
         guard surface != .hidden else {
             presentation.surface = .hidden
@@ -1465,9 +1478,24 @@ private struct OverlayView: View {
                         )
                 }
 
-                Text(OpenTypeL10n.text("松开结束", english: "Release to finish"))
-                    .font(DS.Text.mono())
-                    .foregroundStyle(DS.Colour.ink(0.3))
+                // P0's follow-up-recording fix: a hotkey-started recording has
+                // no control here (just today's hint, unchanged), but a
+                // click-started one — the result card's mic button, which is
+                // off screen the instant this pill replaces the card — has no
+                // other discoverable way to stop. `presentation.stopAffordance`
+                // is one value for both the hint text and whether it is
+                // actually clickable, so the two can never disagree (see
+                // `RecordingClock.StopAffordance`'s doc comment).
+                if presentation.stopAffordance.stopsOnClick {
+                    Button(presentation.stopAffordance.hintText, action: onFollowUpByVoice)
+                        .buttonStyle(.plain)
+                        .font(DS.Text.mono())
+                        .foregroundStyle(DS.Colour.accent)
+                } else {
+                    Text(presentation.stopAffordance.hintText)
+                        .font(DS.Text.mono())
+                        .foregroundStyle(DS.Colour.ink(0.3))
+                }
             }
 
             Text(captionText)

@@ -1,18 +1,24 @@
+import { clearContextUsageLog } from "../oneshot/contextDebugLog";
 import { ApiError, type Route } from "../router";
 import type { EntityCategory, EntityTermPatch, MemoryStore } from "./MemoryStore";
-import { runConsolidation, upsertEntityTerm, type CallLLM } from "./consolidator";
+import { rollbackRun, runConsolidation, upsertEntityTerm, type CallLLM } from "./consolidator";
 
 const ENTITY_CATEGORIES: EntityCategory[] = ["person", "project", "term", "org"];
 
 /**
- * Parses the trailing `:id` segment of a `/memory/*<...>/:id` path. A malformed
- * id (`Number("not-an-id")` is NaN) is a 400, not a 404: letting NaN reach the
- * store would read as "no such row" and report a client mistake as a missing
- * record.
+ * Parses an `:id` segment of a `/memory/*<...>/:id<...>` path, counting back
+ * from the end. Defaults to the last segment (`segmentsFromEnd = 1`), which
+ * is every pre-existing call site (`/memory/terms/:id`, etc., where `:id` IS
+ * the last segment) -- unchanged byte-for-byte. `/memory/consolidation-runs/
+ * :id/rollback` has a literal segment *after* the id, so that route passes
+ * `segmentsFromEnd: 2`. A malformed id (`Number("not-an-id")` is NaN) is a
+ * 400, not a 404: letting NaN reach the store would read as "no such row"
+ * and report a client mistake as a missing record.
  */
-function parseIdParam(req: Request): number {
+function parseIdParam(req: Request, segmentsFromEnd = 1): number {
   const { pathname } = new URL(req.url);
-  const raw = pathname.split("/").pop() ?? "";
+  const parts = pathname.split("/");
+  const raw = parts[parts.length - segmentsFromEnd] ?? "";
   const id = Number(raw);
   if (raw.trim().length === 0 || !Number.isInteger(id)) {
     throw new ApiError("invalid_id", 400);
@@ -50,7 +56,23 @@ function requireNonEmptyString(value: unknown, field: string): string {
  * bypass path, so "run it now" behaves identically whether triggered by
  * voice or by clicking a button.
  */
-export function buildMemoryRoutes(store: MemoryStore, callLLM: CallLLM): Route[] {
+export function buildMemoryRoutes(
+  store: MemoryStore,
+  callLLM: CallLLM,
+  /**
+   * Backs `DELETE /memory/context-log` (the exit for
+   * `oneshot/contextDebugLog.ts`'s `clearContextUsageLog`), which
+   * `AppModel.resetHistory()` (`Sources/OpenType/AppModel.swift`) calls so
+   * 「重置输入历史」 actually clears `context-debug.log`. Trailing and optional,
+   * mirroring `server.ts`'s `buildApp` convention for `spillRoot?`/
+   * `runLogRoot?`, so every pre-existing 2-arg call site keeps compiling.
+   * When omitted -- a sidecar assembled without a context log path -- the
+   * route still exists but reports "nothing to delete" rather than
+   * crashing or silently no-opping on an unconfigured path it might
+   * mistake for a real one.
+   */
+  contextLogPath?: string
+): Route[] {
   return [
     {
       method: "GET",
@@ -154,6 +176,55 @@ export function buildMemoryRoutes(store: MemoryStore, callLLM: CallLLM): Route[]
       },
     },
     {
+      // The 回滚 button's HTTP exit. `rollbackRun` (consolidator.ts) already
+      // does the actual work -- restore `entity_terms` from the run's
+      // pre-run snapshot, transactionally -- this route is only what makes
+      // it reachable, plus the two things `rollbackRun` deliberately does
+      // NOT take responsibility for:
+      //
+      //   1. `rollbackRun` restores a FULL-TABLE snapshot, not a diff, so
+      //      undoing anything but the newest still-active run would erase
+      //      whatever a later run added while leaving that later run's row
+      //      claiming `rolledBackAt: null` -- the run log would lie about
+      //      what's actually in the store. So a run here is eligible only
+      //      if every run that ran after it (by `ranAt`) has already been
+      //      rolled back -- a stack, popped from the top only. This guard
+      //      runs BEFORE `rollbackRun` is called at all: a 409 that had
+      //      already mutated the table would be worse than no guard. It is
+      //      skipped for a run that is already rolled back -- `rollbackRun`
+      //      no-ops on those regardless of what's above them, so there is
+      //      nothing to protect and a repeat POST stays a harmless 200
+      //      rather than an order error.
+      //   2. `rollbackRun` throws a plain `Error` (not `ApiError`) for an
+      //      unknown run id, which would otherwise surface as an uncaught
+      //      500 -- translated to a 404 here instead.
+      method: "POST",
+      path: "/memory/consolidation-runs/:id/rollback",
+      handler: (req) => {
+        const id = parseIdParam(req, 2);
+
+        const runsBefore = store.listConsolidationRuns(); // ranAt DESC, newest first
+        const target = runsBefore.find((r) => r.id === id);
+        if (target && target.rolledBackAt === null) {
+          const blockedByALaterActiveRun = runsBefore.some(
+            (r) => r.ranAt > target.ranAt && r.rolledBackAt === null
+          );
+          if (blockedByALaterActiveRun) {
+            throw new ApiError("rollback_out_of_order", 409);
+          }
+        }
+
+        try {
+          rollbackRun(store, id);
+        } catch {
+          throw new ApiError("consolidation_run_not_found", 404);
+        }
+
+        const run = store.listConsolidationRuns().find((r) => r.id === id);
+        return Response.json({ run });
+      },
+    },
+    {
       // Lists EVERY owner fact regardless of origin (owner/untrusted/agent/
       // system) — the opposite requirement to prompt injection, which only
       // surfaces "owner" facts. Exposing all origins here is what lets a user
@@ -213,6 +284,30 @@ export function buildMemoryRoutes(store: MemoryStore, callLLM: CallLLM): Route[]
         const id = parseIdParam(req);
         if (!store.deleteOwnerFact(id)) {
           throw new ApiError("owner_fact_not_found", 404);
+        }
+        return Response.json({ deleted: true });
+      },
+    },
+    {
+      // Closes docs/superpowers/specs/2026-08-09-current-system-state.md
+      // §11's "context-debug.log has no governance" gap, the "not cleared
+      // by the reset input history action" third (permissions and rotation
+      // are `contextDebugLog.ts`'s own governance, applied on every write).
+      //
+      // Unlike the id-addressed term/owner-fact deletes above, this route
+      // has no "unknown id" concept: it clears a file that may or may not
+      // exist, so idempotent-clear-of-nothing is success (200), not a 404 --
+      // matching `clearContextUsageLog`'s own no-op contract.
+      method: "DELETE",
+      path: "/memory/context-log",
+      handler: () => {
+        // No configured path (a sidecar assembled without one, e.g. an
+        // older test-only assembly) means there is nothing on disk this
+        // route could ever have written -- report the same success a real
+        // clear-of-nothing would, rather than crashing or fabricating a 404
+        // for a resource concept this route doesn't have.
+        if (contextLogPath) {
+          clearContextUsageLog(contextLogPath);
         }
         return Response.json({ deleted: true });
       },

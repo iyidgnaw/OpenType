@@ -34,6 +34,50 @@ enum RecordingClock {
         let total = Int(max(0, seconds))
         return "\(total / 60):\(String(format: "%02d", total % 60))"
     }
+
+    /// What the listening pill offers as a way to end the recording in
+    /// progress, and what its trailing hint should say. One value for both so
+    /// the two can never disagree — see the call site in
+    /// `OverlayController.listeningContent`, which reads `hintText` and
+    /// `stopsOnClick` off the same instance rather than deriving clickability
+    /// separately.
+    struct StopAffordance: Equatable {
+        /// What the pill's trailing hint reads.
+        let hintText: String
+        /// Whether a click/tap on that hint actually ends the recording.
+        let stopsOnClick: Bool
+    }
+
+    /// - Parameter startedByClick: whether this recording began from a UI tap
+    ///   (the result card's mic button —
+    ///   `AppModel.startVoiceSurfaceFollowUpRecording()`) rather than the
+    ///   physical hotkey.
+    ///
+    /// A hotkey-started recording keeps today's copy and offers no click
+    /// affordance: the hotkey is already a perfectly good way out, and any
+    /// hint here would be naming a control the pill does not have. A
+    /// click-started recording has no such discoverable way out — the mic
+    /// button that started it is gone the instant the pill replaces the
+    /// result card, and the physical hotkey was never pressed to begin with
+    /// (`hotKeyReleased()` still ends it too, but nothing on screen says so)
+    /// — so it gets a hint naming the control that *is* actually there, and
+    /// the affordance to make that hint true.
+    ///
+    /// A `func`, not a `static let`: see `RecordingLimits.warningText`'s doc
+    /// comment below for why a memoized string is the wrong shape for
+    /// anything that reads `OpenTypeL10n.current`.
+    static func stopAffordance(startedByClick: Bool) -> StopAffordance {
+        guard startedByClick else {
+            return StopAffordance(
+                hintText: OpenTypeL10n.text("松开结束", english: "Release to finish"),
+                stopsOnClick: false
+            )
+        }
+        return StopAffordance(
+            hintText: OpenTypeL10n.text("点击结束", english: "Click to finish"),
+            stopsOnClick: true
+        )
+    }
 }
 
 /// How long a single recording is allowed to run, and what happens when it has
@@ -63,10 +107,20 @@ enum RecordingLimits {
     /// long thought needs to know both that they are being watched and that the
     /// recording will end on its own at five minutes — naming the deadline is
     /// what makes the auto-stop feel like a net rather than an ambush.
-    static let warningText: String = OpenTypeL10n.text(
-        "已录 2 分钟，满 5 分钟会自动停止并照常交付",
-        english: "Two minutes in — recording stops on its own at 5 minutes and is delivered as usual"
-    )
+    ///
+    /// A computed `static var`, not a `static let`: Swift memoizes a `static
+    /// let` once per process, on whichever thread first touches it, so a
+    /// literal `let` here would freeze at whatever `OpenTypeL10n.current` was
+    /// at that first access — for the rest of the process — even though §F's
+    /// interface-language switch is live, not restart-required. A `var` that
+    /// re-evaluates `OpenTypeL10n.text` on every read is what makes this
+    /// track the language actually current at the moment the warning fires.
+    static var warningText: String {
+        OpenTypeL10n.text(
+            "已录 2 分钟，满 5 分钟会自动停止并照常交付",
+            english: "Two minutes in — recording stops on its own at 5 minutes and is delivered as usual"
+        )
+    }
 
     /// What the recording tick should do at this instant.
     enum Action: Equatable, CaseIterable {

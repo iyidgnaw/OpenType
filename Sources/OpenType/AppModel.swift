@@ -54,6 +54,21 @@ final class AppModel: ObservableObject {
     @Published private(set) var microphonePermission: PermissionStatus = .notDetermined
     @Published private(set) var speechRecognitionPermission: PermissionStatus = .notDetermined
     @Published private(set) var isPracticeSession = false
+    /// Whether the recording in progress was started by a UI tap (the result
+    /// card's mic button — `startVoiceSurfaceFollowUpRecording()`) rather than
+    /// the physical hotkey. `isHotKeyHeld` cannot answer this question: it is
+    /// forced `true` on both paths (see `beginRecording`'s and
+    /// `startVoiceSurfaceFollowUpRecording()`'s own `isHotKeyHeld = true`) so
+    /// that the recording-length clock's held-key exemption logic sees no
+    /// difference between the two origins. This flag exists for the one thing
+    /// that *does* need to tell them apart: which hint and stop affordance the
+    /// listening pill shows (`RecordingClock.stopAffordance(startedByClick:)`,
+    /// read via `presentVoiceSurface()`). Shaped exactly like
+    /// `isPracticeSession` above — set at recording start, cleared on every
+    /// completion/cancel path — for the same reason: both are a UI origin bit
+    /// that has to survive an async recording round-trip and be reset no
+    /// matter how that round-trip ends.
+    @Published private(set) var isClickStartedRecording = false
     @Published private(set) var lastResultWasPractice = false
     @Published private(set) var lastResult = ""
     @Published private(set) var lastTranscript = ""
@@ -74,6 +89,17 @@ final class AppModel: ObservableObject {
     /// is a deliberate user action, so a failed one must say so rather than
     /// look like nothing happened.
     @Published private(set) var memoryEditError: String?
+    /// Last failure from the sidecar half of `resetHistory()` (`DELETE
+    /// /memory/context-log`), shown on the 清除本地数据 page next to the button
+    /// that triggered it. `history.clear()` itself cannot fail (it's a local
+    /// JSON-file write), so this only ever reports the context-log leg. A
+    /// success clears this to `nil` so a stale failure doesn't linger past
+    /// it; overlapping resets aren't ordered against each other, so in
+    /// principle a slow first failure could still land after a fast second
+    /// success, but that window is narrow — the confirm button disables
+    /// itself the instant `history.clear()` empties the list, so reopening
+    /// it needs a fresh dictation to land mid-flight.
+    @Published private(set) var historyResetError: String?
     /// Set when an append to the immutable audit trail throws. The audit log is
     /// the app's local "source of truth"; a failed write must not be silent, so
     /// this surfaces a small warning in the Home / menubar status area. It stays
@@ -582,6 +608,16 @@ final class AppModel: ObservableObject {
         self.overlay.onEscalate = { [weak self] escalation in
             self?.escalateToAgent(escalation)
         }
+        // The composer's submit, and the 「展开说说」/「换个说法」 chips (which
+        // call `onFollowUp` with their own canned text rather than routing
+        // through the composer): both were dead until now — declared on
+        // `OverlayController`, wired to real UI, never assigned here.
+        self.overlay.onFollowUp = { [weak self] text in
+            self?.submitVoiceSurfaceFollowUp(text)
+        }
+        self.overlay.onFollowUpByVoice = { [weak self] in
+            self?.startVoiceSurfaceFollowUpRecording()
+        }
         self.reviewPanel.onCommit = { [weak self] in self?.commitReview() }
         self.reviewPanel.onCancel = { [weak self] in self?.cancelReview() }
         microphonePermission = audioRecorder.permissionStatus
@@ -852,7 +888,8 @@ final class AppModel: ObservableObject {
     private func beginRecording(
         context: CapturedContext,
         mode: InputMode,
-        practice: Bool
+        practice: Bool,
+        startedByClick: Bool = false
     ) {
         // The single choke point for "a NEW dictation began" — which is what
         // closes a correction window (P0-3). Deliberately not in
@@ -863,6 +900,7 @@ final class AppModel: ObservableObject {
         capturedContext = context
         activeMode = mode
         isPracticeSession = practice
+        isClickStartedRecording = startedByClick
         processingTask?.cancel()
         processingTask = Task { [weak self] in
             guard let self else { return }
@@ -966,6 +1004,7 @@ final class AppModel: ObservableObject {
         isHotKeyHeld = false
         isStartingRecording = false
         isPracticeSession = false
+        isClickStartedRecording = false
         isCorrectionRecording = false
         inPlaceCorrection = nil
         activeMode = nil
@@ -1340,8 +1379,52 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The HTTP method/path `resetHistory()` sends to clear the sidecar's
+    /// context-debug log (`DELETE /memory/context-log`, served by
+    /// `buildMemoryRoutes` in `sidecar/src/memory/routes.ts`). Pulled out as
+    /// its own value — rather than inlined at the one call site — so a test
+    /// can pin the exact method/path without constructing a live `AppModel`
+    /// (see `HistoryResetContextLogTests`); `resetHistory()` is this
+    /// constant's only reader.
+    struct ContextLogResetRequest: Equatable {
+        let method: String
+        let path: String
+    }
+    nonisolated static let contextLogResetRequest = ContextLogResetRequest(
+        method: "DELETE",
+        path: "/memory/context-log"
+    )
+
+    /// Clears local input history, then best-effort clears the sidecar's
+    /// context-debug log so 「重置输入历史」 actually removes both halves of what
+    /// it promises: the local record the 会话 list reads, and the first-200-
+    /// characters-of-every-ask/agent-input log the sidecar keeps alongside it
+    /// (`sidecar/src/oneshot/contextDebugLog.ts`). `history.clear()` runs
+    /// first, synchronous and unconditional — the confirmation dialog has
+    /// already told the user the local clear happened, so it is never gated
+    /// on, nor rolled back by, the sidecar call. That call is fired from a
+    /// detached Task so this method stays synchronous and
+    /// `ClearLocalDataPage`'s button action keeps calling it directly —
+    /// `refreshUsageStats()` above is the same shape. A failure is recorded
+    /// to `historyResetError` rather than dropped, and cleared on the next
+    /// successful reset so a stale failure can't misreport a later good one.
     func resetHistory() {
         history.clear()
+
+        let request = Self.contextLogResetRequest
+        let client = sidecarClient
+        Task.detached(priority: .utility) {
+            do {
+                let _: MemoryDeletionResponseBody = try await client.request(
+                    method: request.method,
+                    path: request.path
+                )
+                await MainActor.run { [weak self] in self?.historyResetError = nil }
+            } catch {
+                let message = ErrorMessagePresenter.message(for: error)
+                await MainActor.run { [weak self] in self?.historyResetError = message }
+            }
+        }
     }
 
     func resetAgentMemory() {
@@ -1606,7 +1689,13 @@ final class AppModel: ObservableObject {
                 surface,
                 askConversationId: askPanelState?.conversationId,
                 agentConversationId: agentPanelState?.conversationId
-            )
+            ),
+            // The listening pill's hint/stop-affordance (P0's follow-up-recording
+            // fix): `isClickStartedRecording` is only meaningful while
+            // recording, but it costs nothing to pass through unconditionally —
+            // `RecordingClock.stopAffordance` is pure, and the pill is the only
+            // reader of the result.
+            startedByClick: isClickStartedRecording
         )
     }
 
@@ -2300,7 +2389,13 @@ final class AppModel: ObservableObject {
                     provider: nil,
                     model: nil,
                     error: nil,
-                    supersedesEventId: session.lastEventId
+                    supersedesEventId: session.lastEventId,
+                    // A committed Review delivery, whether or not it went
+                    // through a correction round — `UsageStats` is what tells
+                    // the two apart (correction rounds are already excluded
+                    // via `.corrected` timestamps; this label is what
+                    // excludes the case that had none).
+                    variant: TranscribeVariant.review.rawValue
                 )
             )
 
@@ -2742,6 +2837,41 @@ final class AppModel: ObservableObject {
             } catch {
                 self.consolidateNowStatus = .failed(error.localizedDescription)
             }
+        }
+    }
+
+    private struct ConsolidationRollbackResponseBody: Decodable { let run: ConsolidationRunSummary }
+
+    /// Rolls back one consolidation run: the consolidation-log row's 回滚
+    /// button (`MemoryViews.swift`), hitting `POST
+    /// /memory/consolidation-runs/:id/rollback`.
+    ///
+    /// The button only ever draws on the one row `ConsolidationRollback
+    /// .eligibleRunId(in:)` names, but the sidecar route re-derives and
+    /// enforces the same reverse-order rule itself (409
+    /// `rollback_out_of_order` if a later run is still active), so a stale
+    /// or race-y click still can't corrupt anything -- it just fails and
+    /// surfaces a readable error, same as every other memory-panel mutation
+    /// below.
+    ///
+    /// A rollback restores `entity_terms` to its pre-run snapshot on the
+    /// sidecar, so the dictionary -- not just the run log -- changes
+    /// underneath the panel. A full `refreshMemoryPanel()` (not just
+    /// re-fetching the runs list) is what keeps the term list from
+    /// continuing to show rows the rollback just removed.
+    @discardableResult
+    func rollbackConsolidationRun(id: Int) async -> Bool {
+        do {
+            let _: ConsolidationRollbackResponseBody = try await sidecarClient.request(
+                method: "POST",
+                path: "/memory/consolidation-runs/\(id)/rollback"
+            )
+            memoryEditError = nil
+            await refreshMemoryPanel()
+            return true
+        } catch {
+            recordMemoryEditFailure("consolidation run rollback", error)
+            return false
         }
     }
 
@@ -3411,7 +3541,8 @@ final class AppModel: ObservableObject {
             error: String? = nil,
             provider: String? = nil,
             model: String? = nil,
-            recordingEndedAt: Date? = nil
+            recordingEndedAt: Date? = nil,
+            variant: String? = nil
         ) -> UUID {
             let eventId = UUID()
             recordAuditEvent(
@@ -3427,7 +3558,8 @@ final class AppModel: ObservableObject {
                     provider: provider,
                     model: model,
                     error: error,
-                    recordingEndedAt: recordingEndedAt
+                    recordingEndedAt: recordingEndedAt,
+                    variant: variant
                 )
             )
             return eventId
@@ -3437,6 +3569,7 @@ final class AppModel: ObservableObject {
             try? FileManager.default.removeItem(at: audioURL)
             activeMode = nil
             isPracticeSession = false
+            isClickStartedRecording = false
         }
 
         do {
@@ -3759,7 +3892,17 @@ final class AppModel: ObservableObject {
                 // no model was involved, which for Tidy is the product
                 // promise, not merely a missing field.
                 provider: mode == .transcribe ? nil : sidecarTextProvider,
-                model: effectiveTextModel
+                model: effectiveTextModel,
+                // This call is reachable only for `.transcribe` Direct/Tidy:
+                // Review takes the dispatch-and-return path above and records
+                // its own `.completed` event in `commitReview()`, and
+                // `.ask`/`.agent` return before this call via the
+                // `guard let result` above. `variant` is the **effective**
+                // one `AppRules` resolved for this delivery, not necessarily
+                // the user's raw Settings choice — see `UsageStats` for why
+                // that distinction is what lets the statistics panel tell
+                // Review apart from Direct/Tidy in the audit trail.
+                variant: variant.rawValue
             )
 
             // P0-3: the text is delivered and the user is looking at it — for
@@ -3864,6 +4007,144 @@ final class AppModel: ObservableObject {
                 conversationId: conversation.id
             )
         }
+    }
+
+    /// The follow-up composer's submit (Return, or the send button) —
+    /// `onFollowUp`'s handler, and also what the 「展开说说」/「换个说法」
+    /// chips call with their own canned text. Modeled on `submitTypedTurn(_:
+    /// in:)` and `escalateToAgent(_:)` above: same trim-and-guard shape, same
+    /// placeholder `CapturedContext` for the same reason (a follow-up typed
+    /// into OpenType's own card has no other app's selection to read), and
+    /// the target itself comes from `VoiceSurfaceFollowUp.target(for:
+    /// askConversationId:agentConversationId:)` rather than from
+    /// `conversation.kind` the way `submitTypedTurn` reads it — a card on the
+    /// voice surface has no `FocusedConversation` of its own to pass in, only
+    /// the surface state and the two live panel ids `AppModel` already
+    /// tracks.
+    ///
+    /// For `.ask`, `askPanelState` is assigned BEFORE `dispatchAskRun` is
+    /// called — the same ordering `finishRecording`'s spoken-ask branch uses
+    /// (search `askThread` there): it is what puts the surface back into its
+    /// thinking state and lets it morph into the new card, rather than
+    /// sitting on the old answer until the round trip finishes. `.agent`
+    /// needs no equivalent pre-assignment; `dispatchAgentRun` already owns
+    /// `agentPanelState` and replaces it itself.
+    func submitVoiceSurfaceFollowUp(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isBusy else { return }
+
+        guard let target = VoiceSurfaceFollowUp.target(
+            for: currentVoiceSurfaceState(),
+            askConversationId: askPanelState?.conversationId,
+            agentConversationId: agentPanelState?.conversationId
+        ) else { return }
+
+        let context = CapturedContext(
+            selectedText: nil,
+            applicationName: "OpenType",
+            bundleIdentifier: "ai.rain.opentype"
+        )
+        let requestID = UUID()
+        lastTranscript = trimmed
+
+        switch target.kind {
+        case .ask:
+            askPanelState = AskPanelState(
+                kind: .ask,
+                query: trimmed,
+                answer: nil,
+                conversationId: target.conversationId
+            )
+            dispatchAskRun(
+                transcript: trimmed,
+                context: context,
+                practice: false,
+                requestID: requestID,
+                conversationId: target.conversationId,
+                model: sidecarTextModel
+            )
+        case .agent:
+            dispatchAgentRun(
+                transcript: trimmed,
+                context: context,
+                practice: false,
+                requestID: requestID,
+                conversationId: target.conversationId
+            )
+        }
+    }
+
+    /// The follow-up card's mic button (`onFollowUpByVoice`): starts a fresh
+    /// recording in the card's own mode, so a spoken follow-up lands in the
+    /// same thread a typed one would (`VoiceFollowUp.conversationId` then
+    /// continues that thread automatically once the recording finishes and
+    /// reaches `finishRecording`'s `.ask`/`.agent` branch — this method does
+    /// not need to, and must not, touch `askPanelState`/`agentPanelState`
+    /// itself). Once recording starts, `VoiceSurfaceState.reduce`'s rule 2
+    /// (a new recording always wins) swaps the card for the listening pill.
+    ///
+    /// **This method is a toggle, exactly like `togglePracticeDictation()`
+    /// above is: the same button starts the recording and, once the card has
+    /// been replaced by the pill, stops it too.** The listening pill has no
+    /// mic button of its own to swap in — its stop affordance
+    /// (`RecordingClock.stopAffordance(startedByClick:)`) is wired to this
+    /// same `onFollowUpByVoice` closure (`OverlayController.listeningContent`)
+    /// rather than a second entry point, so a click on the pill while this
+    /// method's own recording is in progress arrives here again. Gated on
+    /// `isClickStartedRecording` rather than bare `state == .listening` for
+    /// the same reason `togglePracticeDictation()` gates its own toggle-off on
+    /// `isPracticeSession`: some *other*, unrelated recording (started by the
+    /// hotkey) could in principle be in progress when this fires, and ending
+    /// that one out from under the user would be wrong — only a recording
+    /// this method itself started is this method's to stop.
+    ///
+    /// Deliberately does NOT reuse `hotKeyToggled()`, even though it is the
+    /// existing "start a recording" entry point, for two hazards found
+    /// reading it and `hotKeyPressed()`:
+    ///
+    ///  1. `hotKeyPressed()` reads the mode to record in from
+    ///     `configuration.selectedMode`, not from whatever card is on
+    ///     screen. Those two can disagree — the user can switch the mode
+    ///     picker while an older card is still up — and recording into the
+    ///     wrong mode would silently defeat the one thing this method exists
+    ///     to guarantee: that the follow-up lands in the mode the card
+    ///     belongs to.
+    ///  2. `hotKeyPressed()`'s very first branch is "if `reviewPanelState`
+    ///     is open, this press means correct the Review panel's selection" —
+    ///     a completely unrelated flow that an open Review session (its own,
+    ///     independent piece of state, and not mutually exclusive with a
+    ///     live ask/agent card) would silently hijack this click into.
+    ///
+    /// Both hazards are avoided by calling the shared primitive
+    /// (`beginRecording(context:mode:practice:startedByClick:)`) directly
+    /// with the card's own mode instead, which skips exactly those two
+    /// branches and nothing else: `state == .listening` / `isBusy` /
+    /// `isStartingRecording` are still guarded here, the same gate
+    /// `hotKeyPressed()` itself opens with.
+    func startVoiceSurfaceFollowUpRecording() {
+        // Toggle-off, per the doc comment above: a second tap while this
+        // method's own recording is still listening ends it, the same path
+        // letting go of the hotkey takes.
+        if isClickStartedRecording, state == .listening {
+            isHotKeyHeld = false
+            finishRecording()
+            return
+        }
+
+        guard let target = VoiceSurfaceFollowUp.target(
+            for: currentVoiceSurfaceState(),
+            askConversationId: askPanelState?.conversationId,
+            agentConversationId: agentPanelState?.conversationId
+        ) else { return }
+        guard state != .listening, !isBusy, !isStartingRecording else { return }
+
+        isHotKeyHeld = true
+        beginRecording(
+            context: contextBridge.capture(),
+            mode: target.kind == .ask ? .ask : .agent,
+            practice: false,
+            startedByClick: true
+        )
     }
 
     private func dispatchAskRun(
@@ -4491,6 +4772,7 @@ final class AppModel: ObservableObject {
         isHotKeyHeld = false
         isStartingRecording = false
         isPracticeSession = false
+        isClickStartedRecording = false
         activeMode = nil
         shortcutBehavior = hotKey.behavior
         hotKey.setRecordingActive(false)

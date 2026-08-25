@@ -187,7 +187,7 @@ struct MemoryColumn: View {
     }
 
     private var consolidationRuns: some View {
-        MemoryConsolidationRunsCard(runs: model.memoryConsolidationRuns)
+        MemoryConsolidationRunsCard(model: model, runs: model.memoryConsolidationRuns)
     }
 }
 
@@ -551,6 +551,7 @@ private struct MemoryOwnerFactRowView: View {
 
 /// 「整理记录」: what each consolidation pass concluded, newest first.
 private struct MemoryConsolidationRunsCard: View {
+    @ObservedObject var model: AppModel
     let runs: [ConsolidationRunSummary]
 
     var body: some View {
@@ -566,36 +567,91 @@ private struct MemoryConsolidationRunsCard: View {
                     OpenTypeL10n.text("还没有整理过。", english: "No consolidation has run yet.")
                 )
             } else {
+                // Computed once over the whole (newest-first) list, not per
+                // row -- a lone row cannot tell whether it is "the top of
+                // the stack" on its own, since that's a property of its
+                // position among the others (`ConsolidationRollback
+                // .eligibleRunId(in:)`'s doc comment in `Models.swift`).
+                let eligibleRunId = ConsolidationRollback.eligibleRunId(in: runs)
                 VStack(spacing: 0) {
                     ForEach(Array(runs.enumerated()), id: \.element.id) { index, run in
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text(MemoryFormatters.log.string(from: MemoryColumn.date(run.ranAt)))
-                                .font(DS.Text.mono())
-                                .foregroundStyle(DS.Colour.ink(0.42))
-                                .frame(width: MemoryMetrics.logTimeColumn, alignment: .leading)
-                            // A rolled-back run still happened, so the row
-                            // stays; its summary describes changes that are no
-                            // longer in effect, so it reads at the level of a
-                            // footnote rather than a result.
-                            Text(run.rolledBackAt == nil
-                                 ? run.summary
-                                 : OpenTypeL10n.text("已回滚 · \(run.summary)", english: "Rolled back · \(run.summary)"))
-                                .font(DS.Text.size(12.5))
-                                .foregroundStyle(run.rolledBackAt == nil
-                                                 ? AnyShapeStyle(HierarchicalShapeStyle.primary)
-                                                 : AnyShapeStyle(DS.Colour.ink(0.45)))
-                                .lineSpacing(MemoryMetrics.logLineSpacing)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(.horizontal, MemoryMetrics.rowH)
-                        .padding(.vertical, DS.Space.rowV)
+                        MemoryConsolidationRunRowView(
+                            model: model,
+                            run: run,
+                            canRollback: run.id == eligibleRunId
+                        )
                         .modifier(MemoryRowSeparator(isFirst: index == 0))
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
                 .dsCard()
             }
+        }
+    }
+}
+
+/// One row of the consolidation log, plus (on at most one row) the 回滚
+/// button. `canRollback` arrives already decided by the parent -- see
+/// `MemoryConsolidationRunsCard` above -- this view only draws it.
+private struct MemoryConsolidationRunRowView: View {
+    @ObservedObject var model: AppModel
+    let run: ConsolidationRunSummary
+    let canRollback: Bool
+
+    @State private var showingRollbackConfirmation = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(MemoryFormatters.log.string(from: MemoryColumn.date(run.ranAt)))
+                .font(DS.Text.mono())
+                .foregroundStyle(DS.Colour.ink(0.42))
+                .frame(width: MemoryMetrics.logTimeColumn, alignment: .leading)
+            // A rolled-back run still happened, so the row
+            // stays; its summary describes changes that are no
+            // longer in effect, so it reads at the level of a
+            // footnote rather than a result.
+            Text(run.rolledBackAt == nil
+                 ? run.summary
+                 : OpenTypeL10n.text("已回滚 · \(run.summary)", english: "Rolled back · \(run.summary)"))
+                .font(DS.Text.size(12.5))
+                .foregroundStyle(run.rolledBackAt == nil
+                                 ? AnyShapeStyle(HierarchicalShapeStyle.primary)
+                                 : AnyShapeStyle(DS.Colour.ink(0.45)))
+                .lineSpacing(MemoryMetrics.logLineSpacing)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Drawn on exactly one row -- the one the parent's
+            // `eligibleRunId` names -- so rollback always reads as "undo the
+            // most recent still-active pass", never as a per-row action a
+            // user could reach for out of order.
+            if canRollback {
+                Button {
+                    showingRollbackConfirmation = true
+                } label: {
+                    Text(OpenTypeL10n.text("回滚", english: "Roll back"))
+                        .font(DS.Text.size(11.5, .medium))
+                        .foregroundStyle(DS.Colour.ink(0.45))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, MemoryMetrics.rowH)
+        .padding(.vertical, DS.Space.rowV)
+        .confirmationDialog(
+            OpenTypeL10n.text("回滚这次整理？", english: "Roll back this consolidation?"),
+            isPresented: $showingRollbackConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(OpenTypeL10n.text("确认回滚", english: "Roll back"), role: .destructive) {
+                Task { await model.rollbackConsolidationRun(id: run.id) }
+            }
+            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(OpenTypeL10n.text(
+                "此操作不可撤销。这次整理新增或修改的词典条目会被移除。",
+                english: "This cannot be undone. Terms this run added or changed will be removed from the dictionary."
+            ))
         }
     }
 }

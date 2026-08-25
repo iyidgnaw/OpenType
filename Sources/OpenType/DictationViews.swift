@@ -877,12 +877,49 @@ struct UsageStatsBand: View {
             value: Self.latencyValue(summary.averageEndToEndLatency),
             unit: summary.averageEndToEndLatency == nil ? nil : Self.secondsUnit,
             label: OpenTypeL10n.text("平均等待", english: "Average wait"),
-            note: OpenTypeL10n.text(
-                "松开快捷键 → 出字",
-                english: "Key release → delivered text"
-            ),
+            note: endToEndNote,
             hasData: summary.averageEndToEndLatency != nil
         )
+    }
+
+    /// 「松开快捷键 → 出字」, broken into per-mode figures when there is more
+    /// than one mode's worth of data behind the headline this week (see (c)
+    /// in `UsageStatsPerModeLatencyTests`) — named only for the modes that
+    /// actually delivered something, so a dictation-only week and a
+    /// questions-only week each print one plain figure instead of a lopsided
+    /// 「·」 pointing at a mode with nothing behind it. This is a fifth number
+    /// riding on an existing figure's `note` line rather than a fifth
+    /// `Figure`, on purpose — the panel's layout is closed at four.
+    ///
+    /// Falls back to the plain description every earlier week has shown when
+    /// neither per-mode figure has data — the headline can still be non-`nil`
+    /// in that case (a legacy pre-3-mode-era row, or a `transcribe`/`ask`
+    /// session missing `recognized.recordingEndedAt`, both still counted
+    /// toward the headline but attributed to neither column), and the note
+    /// should not claim a breakdown it cannot show.
+    private var endToEndNote: String {
+        switch (summary.averageTranscribeEndToEndLatency, summary.averageAskEndToEndLatency) {
+        case let (transcribe?, ask?):
+            return OpenTypeL10n.text(
+                "听写 \(Self.latencyValue(transcribe))秒 · 问答 \(Self.latencyValue(ask))秒",
+                english: "Transcribe \(Self.latencyValue(transcribe))s · Ask \(Self.latencyValue(ask))s"
+            )
+        case let (transcribe?, nil):
+            return OpenTypeL10n.text(
+                "听写 \(Self.latencyValue(transcribe))秒",
+                english: "Transcribe \(Self.latencyValue(transcribe))s"
+            )
+        case let (nil, ask?):
+            return OpenTypeL10n.text(
+                "问答 \(Self.latencyValue(ask))秒",
+                english: "Ask \(Self.latencyValue(ask))s"
+            )
+        case (nil, nil):
+            return OpenTypeL10n.text(
+                "松开快捷键 → 出字",
+                english: "Key release → delivered text"
+            )
+        }
     }
 
     private var response: Figure {

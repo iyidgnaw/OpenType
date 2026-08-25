@@ -232,8 +232,8 @@ struct AgentToolsPage: View {
                 model.restartSidecarManually()
             }
             .help(OpenTypeL10n.text(
-                "MCP 连接只在语音服务启动时建立，重启会用当前配置重新连接一次。",
-                english: "MCP connections are made when the voice service starts; restarting reconnects with the current configuration."
+                "保存只重新连接改动过的服务器；这个按钮会把所有已启用的服务器都重新连接一次，找回一个配置没问题、但连接已经断开的服务器。",
+                english: "A save only reconnects servers whose configuration changed. This button reconnects every enabled server, which is how you recover one whose configuration is fine but whose connection has died."
             ))
         }
         .padding(.leading, DS.Space.content)
@@ -370,8 +370,8 @@ struct AgentToolsPage: View {
             }
 
             Text(OpenTypeL10n.text(
-                "连接在语音服务启动时建立，改动从下次启动生效。",
-                english: "Connections are made when the voice service starts; changes take effect from the next start."
+                "改动在保存时就会生效，不用重启语音服务。",
+                english: "Changes take effect as soon as you save — no restart needed."
             ))
             .font(DS.Text.groupLabel())
             .fontWeight(.regular)
@@ -670,6 +670,79 @@ private struct McpBuiltInToolRow: View {
     }
 }
 
+/// The prose for the three pieces of MCP status this file draws that vary
+/// with actual state — a row's dot caption, a startup-failure line, and the
+/// edit sheet's disabled banner. Pulled out as pure functions so a unit test
+/// can pin the wording without instantiating a SwiftUI view (this target
+/// can't construct `McpServerRowView`/`McpServerSheet` — see
+/// `AssistantEscalationWiringTests`'s doc comment for the same constraint on
+/// `AppModel`-adjacent views).
+///
+/// Since `b1d61cc` ("Let a saved MCP server take effect without a restart"),
+/// `createReloadableMcpToolSet.apply()` (`sidecar/src/agent/mcpClient.ts`)
+/// reloads on every save: a disabled server's connection drops on that same
+/// save, and a newly-enabled or newly-added one connects on it too — neither
+/// waits for "the next start" the way it did before that commit. These three
+/// members say that. What none of them can say is that a server is connected
+/// *right now*: Swift never learns live per-server connectedness, only
+/// whether this session's own Test Connection passed, and whether the most
+/// recent connection attempt (`lastStartupError`, read live off the same
+/// `ReloadableMcpToolSet` a save's `reload()` mutates — see
+/// `McpStartupFailureLine`'s doc comment) failed or timed out.
+enum McpServerStatusWording {
+    /// `McpServerRowView.statusText` — the row's one-line dot caption.
+    /// `testedToolCount` is non-nil only when *this session's* Test
+    /// Connection produced a count; it says nothing about whether the server
+    /// is connected right now, so the wording must not claim it does.
+    static func rowStatusText(isEnabled: Bool, testedToolCount: Int?) -> String {
+        guard isEnabled else {
+            return OpenTypeL10n.text(
+                "已停用 · 未连接",
+                english: "Disabled · not connected"
+            )
+        }
+        if let testedToolCount {
+            return OpenTypeL10n.text(
+                "\(testedToolCount) 个工具 · 测试通过 · 保存时连接",
+                english: "\(testedToolCount) tools · test passed · connects on save"
+            )
+        }
+        return OpenTypeL10n.text(
+            "已启用 · 保存时连接",
+            english: "Enabled · connects on save"
+        )
+    }
+
+    /// `McpStartupFailureLine.text` — the warning line under a row whose last
+    /// connection attempt didn't land. The fact survives; only the framing
+    /// that pins it to *boot* specifically is gone, since that attempt can
+    /// just as easily be from the most recent save's reconnect.
+    static func failureLineText(_ failure: McpStartupFailure) -> String {
+        switch failure {
+        case .timedOut:
+            return OpenTypeL10n.text(
+                "连接超时，已跳过",
+                english: "Timed out and was skipped"
+            )
+        case .failed(let message):
+            return OpenTypeL10n.text(
+                "连接失败：\(message)",
+                english: "Failed to connect: \(message)"
+            )
+        }
+    }
+
+    /// `McpServerSheet.disabledNotice` — the edit sheet's banner for a server
+    /// that is currently disabled. No branching state, but its wording is one
+    /// of the strings `b1d61cc` invalidated.
+    static func disabledExplanation() -> String {
+        OpenTypeL10n.text(
+            "这个服务器已停用，不会连接。改好之后重新测试，通过再保存就会重新启用。",
+            english: "This server is disabled and won't connect. Fix it, test again, and a passing save turns it back on."
+        )
+    }
+}
+
 /// One saved MCP server. The whole row is the button — the chevron says the
 /// row opens something, and a separate hit target would be a smaller one.
 private struct McpServerRowView: View {
@@ -733,19 +806,21 @@ private struct McpServerRowView: View {
         }
     }
 
-    /// Why the last start skipped this server, when it did.
+    /// Why the last connection attempt skipped this server, when it did —
+    /// that attempt can be from boot or from the most recent save (see
+    /// `McpStartupFailureLine`'s doc comment).
     ///
     /// Only asked of an enabled server. A disabled one already explains itself
-    /// on the line above, and the verdict it would show is from a start where
-    /// it was still enabled — stale by construction, and pointing at a fix the
-    /// user has already made.
+    /// on the line above, and the verdict it would show is from an attempt
+    /// where it was still enabled — stale by construction, and pointing at a
+    /// fix the user has already made.
     private var startupFailure: McpStartupFailure? {
         server.isEnabled ? server.startupFailure : nil
     }
 
-    /// Green claims "this is working", so a server the last start gave up on
-    /// must not get one — that identical-looking dot is precisely the silent
-    /// skip this row now reports.
+    /// Green claims "this is working", so a server the last connection
+    /// attempt gave up on must not get one — that identical-looking dot is
+    /// precisely the silent skip this row now reports.
     private var dotColour: Color {
         guard server.isEnabled else { return DS.Colour.ink(0.25) }
         return startupFailure == nil ? DS.Colour.ok : DS.Colour.warningText
@@ -760,24 +835,12 @@ private struct McpServerRowView: View {
     /// contributed. A tool count is therefore shown only when this session's
     /// Test Connection produced one, labelled as the test rather than as the
     /// connection; the failures get their own line below; and the rest states
-    /// the thing that is always true — that this takes effect at the next start.
+    /// the thing that is actually true since `b1d61cc` — that a save connects
+    /// or disconnects this server immediately, not at the next start. Wording
+    /// lives in `McpServerStatusWording.rowStatusText` so it can be pinned by
+    /// a unit test.
     private var statusText: String {
-        guard server.isEnabled else {
-            return OpenTypeL10n.text(
-                "已停用 · 不会在下次启动时连接",
-                english: "Disabled · won't be connected at the next start"
-            )
-        }
-        if let toolCount {
-            return OpenTypeL10n.text(
-                "\(toolCount) 个工具 · 测试通过 · 下次启动时连接",
-                english: "\(toolCount) tools · test passed · connects at the next start"
-            )
-        }
-        return OpenTypeL10n.text(
-            "已启用 · 下次启动时连接",
-            english: "Enabled · connects at the next start"
-        )
+        McpServerStatusWording.rowStatusText(isEnabled: server.isEnabled, testedToolCount: toolCount)
     }
 }
 
@@ -842,16 +905,20 @@ private struct McpEnvironmentRow: View {
 ///
 /// Its absence was the whole failure: `startMcpConnections` has always recorded
 /// why each server was skipped, but nothing read that report, so a server that
-/// timed out at startup drew identically to one contributing tools — and the
+/// failed to connect drew identically to one contributing tools — and the
 /// user's model of the product ("I saved it, so the agent has it") stayed wrong
 /// with nothing on screen to correct it.
 ///
 /// Two wordings, because the fix differs. A timeout gets a sentence, since the
 /// recorded text ("No response within 12000ms.") says less to the reader than
 /// the fact that the server was given up on. A failure gets the server's own
-/// message verbatim behind a label that places it at startup — `spawn npx
-/// ENOENT` is the actionable half, and paraphrasing it would delete the only
-/// evidence the user has.
+/// message verbatim behind a label — `spawn npx ENOENT` is the actionable
+/// half, and paraphrasing it would delete the only evidence the user has.
+/// Neither wording pins the attempt to *boot* specifically: `connectionReport`
+/// is read live off the same `ReloadableMcpToolSet` a save's `reload()`
+/// mutates, so `failure` here can just as easily be from the most recent save
+/// as from launch. Wording lives in `McpServerStatusWording.failureLineText`
+/// so it can be pinned by a unit test.
 private struct McpStartupFailureLine: View {
     let failure: McpStartupFailure
 
@@ -869,18 +936,7 @@ private struct McpStartupFailureLine: View {
     }
 
     private var text: String {
-        switch failure {
-        case .timedOut:
-            return OpenTypeL10n.text(
-                "启动超时，已跳过",
-                english: "Timed out at startup and was skipped"
-            )
-        case .failed(let message):
-            return OpenTypeL10n.text(
-                "启动失败：\(message)",
-                english: "Failed at startup: \(message)"
-            )
-        }
+        McpServerStatusWording.failureLineText(failure)
     }
 }
 
@@ -904,11 +960,12 @@ private struct McpStartupFailureLine: View {
 /// key left out of the body is deleted.
 ///
 /// **Saving requires a passing test.** Not a button beside Save; a step on the
-/// way to it. A server that cannot be reached costs its tools and slows the
-/// next start of the voice service, and the test is the only thing that tells
-/// the user which of those they are about to buy. The result is invalidated
-/// whenever the connection-relevant part of the draft changes, so the passing
-/// test always describes the configuration actually being saved.
+/// way to it. A save always tries the connection regardless — that is not
+/// what the test is for. What the test buys is finding out *before* saving
+/// whether the server can be reached at all, rather than discovering it only
+/// after the save has already stored the server disabled. The result is
+/// invalidated whenever the connection-relevant part of the draft changes, so
+/// the passing test always describes the configuration actually being saved.
 struct McpServerSheet: View {
     /// What the page needs to know about a save that just happened.
     struct SaveOutcome {
@@ -1206,19 +1263,19 @@ struct McpServerSheet: View {
 
     /// A disabled server is saved, visible and editable — this says how to get
     /// it back, because "disabled" with no stated way out is indistinguishable
-    /// from broken.
+    /// from broken. Since `b1d61cc` a disabled server's connection drops on
+    /// the save that disabled it, not merely at "the next start" — wording
+    /// lives in `McpServerStatusWording.disabledExplanation` so it can be
+    /// pinned by a unit test.
     private var disabledNotice: some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: McpIcon.inlineGlyph))
                 .foregroundStyle(DS.Colour.warningText)
-            Text(OpenTypeL10n.text(
-                "这个服务器已停用，不会在下次启动时连接。改好之后重新测试，通过再保存就会重新启用。",
-                english: "This server is disabled and won't be connected at the next start. Fix it, test again, and a passing save turns it back on."
-            ))
-            .font(DS.Text.size(11.5))
-            .foregroundStyle(DS.Colour.ink(0.6))
-            .fixedSize(horizontal: false, vertical: true)
+            Text(McpServerStatusWording.disabledExplanation())
+                .font(DS.Text.size(11.5))
+                .foregroundStyle(DS.Colour.ink(0.6))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 13)
@@ -1231,17 +1288,24 @@ struct McpServerSheet: View {
     }
 
     /// 「停用」 is bold in the handoff, and it is the word that says what the
-    /// button under this block will actually do to the server.
+    /// button under this block will actually do to the server. This doesn't
+    /// cost startup — `startMcpConnections` never waits on a connection, at
+    /// boot or at save — so the advice is re-justified on what actually
+    /// happens: a save fires the reload unawaited, so the write response (and
+    /// the one `GET /config/mcp` refetch right after it) lands well inside
+    /// `MCP_CONNECT_TIMEOUT_MS` and cannot show an unreachable server's
+    /// failure yet — nothing polls again after that. Reopening the panel is
+    /// what actually shows it, since that issues a fresh `GET /config/mcp`.
     private var failureAdviceText: Text {
         Text(OpenTypeL10n.text(
-            "连不上的服务器会拖慢语音服务启动。仍要保存的话，它会以",
-            english: "A server that can't be reached slows the voice service down at start. Save anyway and it is stored "
+            "保存会尝试连接这个服务器；连不上的话，重新打开这个面板能看到原因。仍要保存的话，它会以",
+            english: "Saving will try to connect this server; if it can't be reached, reopening this panel will show why. Save anyway and it is stored "
         ))
         + Text(OpenTypeL10n.text("停用", english: "disabled"))
             .fontWeight(.semibold)
         + Text(OpenTypeL10n.text(
-            "状态存下，不参与下次连接。",
-            english: ", taking no part in the next connection."
+            "状态存下，不会去连接。",
+            english: ", and won't be connected."
         ))
     }
 
@@ -1280,8 +1344,8 @@ struct McpServerSheet: View {
                 }
             } else {
                 Text(OpenTypeL10n.text(
-                    "连接在下次启动语音服务时建立",
-                    english: "The connection is made the next time the voice service starts"
+                    "保存后开始连接",
+                    english: "Saving starts the connection"
                 ))
                 .font(DS.Text.size(11.5))
                 .foregroundStyle(DS.Colour.ink(0.45))
@@ -1319,8 +1383,8 @@ struct McpServerSheet: View {
                     save(enabled: false)
                 }
                 .help(OpenTypeL10n.text(
-                    "存下你填的内容，但标记为停用 —— 下次启动不会连接它。改好之后重新测试，通过再保存就会重新启用。",
-                    english: "Keeps what you typed but marks it disabled, so the next start won't connect it. Fix it, test again, and a passing save turns it back on."
+                    "存下你填的内容，但标记为停用 —— 不会连接它。改好之后重新测试，通过再保存就会重新启用。",
+                    english: "Keeps what you typed but marks it disabled — it won't connect. Fix it, test again, and a passing save turns it back on."
                 ))
             } else {
                 McpButton(
@@ -1335,8 +1399,8 @@ struct McpServerSheet: View {
                 .help(canSave
                     ? OpenTypeL10n.text("保存这个服务器", english: "Save this server")
                     : OpenTypeL10n.text(
-                        "先测试连接。连不上的服务器会拖慢下次启动，测试是在保存前发现这件事的唯一方式。",
-                        english: "Test the connection first. A server that can't be reached slows the next start down, and the test is the only way to learn that before saving."
+                        "先测试连接。保存也会尝试连接，但测试能让你在保存前就发现连不上，避免服务器被存成停用状态。",
+                        english: "Test the connection first. A save also attempts the connection, but testing lets you catch a failure before it saves the server as disabled."
                     ))
             }
         }

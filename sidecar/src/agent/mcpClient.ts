@@ -258,6 +258,35 @@ function defaultDelay(ms: number): Promise<void> {
 }
 
 /**
+ * Turns one server's raw tool list into this module's two derived shapes:
+ * the OpenAI-style function descriptors merged into `openAiTools`, and the
+ * `serverName__toolName -> toolName` map used to route a call back to its
+ * original name. Shared by `startMcpConnections` and
+ * `createReloadableMcpToolSet` so the two connect paths can't drift on how a
+ * tool gets namespaced.
+ */
+function namespaceMcpTools(
+  serverName: string,
+  tools: McpToolDescriptor[]
+): { openAiTools: OpenAiFunctionTool[]; routes: Map<string, string> } {
+  const openAiTools: OpenAiFunctionTool[] = [];
+  const routes = new Map<string, string>();
+  for (const tool of tools) {
+    const namespacedName = `${serverName}__${tool.name}`;
+    routes.set(namespacedName, tool.name);
+    openAiTools.push({
+      type: "function",
+      function: {
+        name: namespacedName,
+        description: tool.description ?? "",
+        parameters: tool.inputSchema ?? { type: "object", properties: {} },
+      },
+    });
+  }
+  return { openAiTools, routes };
+}
+
+/**
  * Starts connecting to every configured MCP server and returns a tool set
  * **synchronously**, before any of them has answered.
  *
@@ -320,19 +349,15 @@ export function startMcpConnections(
     const { tools } = await client.listTools();
     // The client is only published once the whole handshake succeeded, so a
     // half-connected server can never be routed to.
-    return tools.map((tool) => {
-      const namespacedName = `${config.name}__${tool.name}`;
-      routes.set(namespacedName, { client, originalName: tool.name });
-      openAiTools.push({
-        type: "function",
-        function: {
-          name: namespacedName,
-          description: tool.description ?? "",
-          parameters: tool.inputSchema ?? { type: "object", properties: {} },
-        },
-      });
-      return tool;
-    });
+    const { openAiTools: namespaced, routes: toolRoutes } = namespaceMcpTools(
+      config.name,
+      tools
+    );
+    for (const [namespacedName, originalName] of toolRoutes) {
+      routes.set(namespacedName, { client, originalName });
+    }
+    openAiTools.push(...namespaced);
+    return tools;
   }
 
   async function connectOne(config: McpServerConfig, index: number): Promise<void> {
@@ -409,6 +434,329 @@ export function startMcpConnections(
   }
 
   return { openAiTools, callTool, ready, status: snapshot };
+}
+
+function sortedEntries(
+  map: Record<string, string> | undefined
+): [string, string][] | undefined {
+  if (!map) {
+    return undefined;
+  }
+  return Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
+}
+
+/**
+ * Deep-equality over every field `McpServerConfig` carries -- what
+ * `createReloadableMcpToolSet`'s `reload` uses to decide "unchanged" (see its
+ * doc comment for why name alone, or a `{command, args}`-only comparison,
+ * isn't enough: an `env`-only edit is how a user rotates a leaked
+ * credential). `env`/`headers` compare by contents regardless of key order --
+ * a config re-saved through a UI that re-serializes the object shouldn't
+ * count as a change; `args` compares in order, since argument order is
+ * meaningful to the process it starts.
+ */
+function configsEqual(a: McpServerConfig, b: McpServerConfig): boolean {
+  return (
+    a.name === b.name &&
+    (a.transport ?? "stdio") === (b.transport ?? "stdio") &&
+    a.command === b.command &&
+    JSON.stringify(a.args ?? []) === JSON.stringify(b.args ?? []) &&
+    JSON.stringify(sortedEntries(a.env)) === JSON.stringify(sortedEntries(b.env)) &&
+    a.url === b.url &&
+    JSON.stringify(sortedEntries(a.headers)) === JSON.stringify(sortedEntries(b.headers))
+  );
+}
+
+export interface ReloadableMcpToolSet extends LazyMcpToolSet {
+  /**
+   * Applies a new server list to the running set, in place, and returns
+   * **synchronously** -- reload must never reintroduce the boot-blocking
+   * hazard `startMcpConnections`'s own doc comment describes, just at a
+   * later point in the process's life. `server.ts`'s `onServersChanged`
+   * wiring never awaits this, and `mcpConfigRoutes.ts`'s handler never
+   * awaits its call into that, for the same reason: a Settings save must
+   * not be able to hang against an unreachable server.
+   *
+   * A server present in both the old and new list, with byte-for-byte the
+   * same config (`name`, `transport`, `command`, `args`, `env`, `url`,
+   * `headers`), keeps its live connection completely untouched -- same
+   * client, no second handshake, no close. Everything else (a server now
+   * absent, or present with a changed config) is closed (best-effort,
+   * fire-and-forget) and, if still present under the new list, reconnected
+   * from scratch with its own budget, concurrently with every other server
+   * being (re)connected in the same reload. See the function's own doc
+   * comment for why the "leave unchanged servers alone" half of this is
+   * load-bearing rather than an optimization that happens to be free.
+   */
+  reload(servers: McpServerConfig[]): void;
+}
+
+interface ReloadEntry {
+  config: McpServerConfig;
+  status: McpServerConnectionStatus;
+  client?: McpClientLike;
+  /** This server's own namespaced tools, concatenated across every entry for `openAiTools`. */
+  tools: OpenAiFunctionTool[];
+  /** namespacedName -> original tool name, this server's own slice of the live routing table. */
+  toolNames: Map<string, string>;
+}
+
+/**
+ * `startMcpConnections` plus the ability to swap the running server list in
+ * place -- what makes an MCP server added, edited, enabled, disabled or
+ * deleted through the Settings panel take effect immediately instead of at
+ * the next sidecar start (`server.ts`'s `onServersChanged` wiring,
+ * `mcpConfigRoutes.ts`).
+ *
+ * Before any `reload()` call this behaves identically to
+ * `startMcpConnections`: synchronous construction, `openAiTools` fills in as
+ * servers connect, `status()` reports per-server state, `ready` settles and
+ * never rejects.
+ *
+ * `reload(servers)` diffs the new list against the live one *by server
+ * name*, then *by value* for a name present in both:
+ *
+ *  - Absent from the new list: closed (best-effort, fire-and-forget -- same
+ *    reasoning as `startMcpConnections`'s own abandoned-timeout close) and
+ *    dropped. This is also how a *disabled* server is handled -- `enabled`
+ *    is filtered upstream (`resolveMcpServers`/`server.ts` and the config
+ *    routes' `onServersChanged` call only ever pass the enabled subset), so
+ *    a disabled server reaches here as an absent entry, never as a present
+ *    one to special-case.
+ *  - Present with an unchanged config (`configsEqual`, deep-equal by value,
+ *    not by object reference): left completely alone. A stdio server is an
+ *    `npx` child whose cold start already exceeds the sidecar's own 5s
+ *    boot-readiness budget (see `MCP_CONNECT_TIMEOUT_MS`'s doc comment), so
+ *    a teardown-and-reconnect on every save would cost the user every
+ *    *other* server's live connection and blank the agent's whole toolset
+ *    for the length of the slowest reconnect, just to apply an edit to one
+ *    server.
+ *  - Present with a changed config, or new: closed if it was live, then
+ *    (re)connected exactly as at boot.
+ *
+ * A tool call already dispatched before a reload holds its own reference to
+ * the client it started on -- `callTool` resolves the route once, at call
+ * time, into a local variable -- so a reload that closes that server's
+ * connection does not cancel or misroute a call already in flight.
+ */
+export function createReloadableMcpToolSet(
+  servers: McpServerConfig[],
+  options: McpConnectOptions = {}
+): ReloadableMcpToolSet {
+  const factories = options.factories ?? defaultMcpConnectionFactories;
+  const budgetMs = options.connectTimeoutMs ?? MCP_CONNECT_TIMEOUT_MS;
+  const delay = options.delay ?? defaultDelay;
+
+  const entries = new Map<string, ReloadEntry>();
+  const liveRoutes = new Map<string, { client: McpClientLike; originalName: string }>();
+  // Bumped per server *name* on every reload that drops or changes it, so a
+  // handshake still in flight for that name recognizes -- once it finally
+  // settles -- that it has been superseded and must not publish its result
+  // into `entries`. Without this, a slow reconnect that finishes after a
+  // *second* reload (two Settings saves in quick succession) could stomp a
+  // newer entry with a stale one.
+  const generationByName = new Map<string, number>();
+  let order: string[] = [];
+  let ready: Promise<McpConnectionReport> = Promise.resolve({ servers: [] });
+
+  function snapshot(): McpConnectionReport {
+    return {
+      servers: order.map((name) => ({ ...(entries.get(name) as ReloadEntry).status })),
+    };
+  }
+
+  function closeClient(client: McpClientLike | undefined): void {
+    if (!client) {
+      return;
+    }
+    // Best-effort, fire-and-forget -- same reasoning as
+    // `startMcpConnections`'s abandoned-client close: a client that hangs on
+    // `close()` must not become a new way to block a reload.
+    void Promise.resolve()
+      .then(() => client.close?.())
+      .catch(() => {});
+  }
+
+  /** Replaces (or adds) `name`'s entry, keeping `liveRoutes` in sync with it. */
+  function setEntry(name: string, entry: ReloadEntry): void {
+    const prev = entries.get(name);
+    if (prev) {
+      for (const namespacedName of prev.toolNames.keys()) {
+        liveRoutes.delete(namespacedName);
+      }
+    }
+    entries.set(name, entry);
+    if (entry.client) {
+      for (const [namespacedName, originalName] of entry.toolNames) {
+        liveRoutes.set(namespacedName, { client: entry.client, originalName });
+      }
+    }
+  }
+
+  /** Removes `name`'s entry and its routes; hands back its client (if any) to close. */
+  function dropEntry(name: string): McpClientLike | undefined {
+    const prev = entries.get(name);
+    if (!prev) {
+      return undefined;
+    }
+    for (const namespacedName of prev.toolNames.keys()) {
+      liveRoutes.delete(namespacedName);
+    }
+    entries.delete(name);
+    return prev.client;
+  }
+
+  async function connectOne(config: McpServerConfig): Promise<void> {
+    const name = config.name;
+    const generation = (generationByName.get(name) ?? 0) + 1;
+    generationByName.set(name, generation);
+    // Set synchronously, before any `await` below -- callers that reload and
+    // immediately inspect `status()`/`openAiTools` on the same tick (the
+    // "reload returns synchronously" contract) must see "connecting", not a
+    // stale or missing entry.
+    setEntry(name, {
+      config,
+      status: { name, state: "connecting", toolCount: 0 },
+      tools: [],
+      toolNames: new Map(),
+    });
+
+    let started: McpClientLike | undefined;
+    try {
+      const outcome = await Promise.race([
+        (async () => {
+          const transport = factories.createTransport(config);
+          const client = factories.createClient(config);
+          started = client;
+          await client.connect(transport);
+          const { tools } = await client.listTools();
+          return { client, tools };
+        })(),
+        delay(budgetMs).then(() => TIMED_OUT as typeof TIMED_OUT),
+      ]);
+
+      const stillCurrent = generationByName.get(name) === generation;
+
+      if (outcome === TIMED_OUT) {
+        if (stillCurrent) {
+          setEntry(name, {
+            config,
+            status: {
+              name,
+              state: "timedOut",
+              toolCount: 0,
+              error: `No response within ${budgetMs}ms.`,
+            },
+            tools: [],
+            toolNames: new Map(),
+          });
+        }
+        console.warn(
+          `MCP server "${config.name}" did not answer within ${budgetMs}ms; continuing without its tools.`
+        );
+        closeClient(started);
+        return;
+      }
+
+      if (!stillCurrent) {
+        // A later reload already dropped or replaced this name while this
+        // handshake was still in flight -- this connection has no entry to
+        // publish into. Close it rather than leaking it.
+        closeClient(outcome.client);
+        return;
+      }
+
+      const { openAiTools, routes } = namespaceMcpTools(config.name, outcome.tools);
+      setEntry(name, {
+        config,
+        status: { name, state: "connected", toolCount: outcome.tools.length },
+        client: outcome.client,
+        tools: openAiTools,
+        toolNames: routes,
+      });
+    } catch (err) {
+      const stillCurrent = generationByName.get(name) === generation;
+      if (stillCurrent) {
+        setEntry(name, {
+          config,
+          status: {
+            name,
+            state: "failed",
+            toolCount: 0,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          tools: [],
+          toolNames: new Map(),
+        });
+      }
+      console.warn(`Skipping MCP server "${config.name}": failed to connect or list tools.`, err);
+    }
+  }
+
+  function apply(newServers: McpServerConfig[]): void {
+    const newByName = new Map(newServers.map((s) => [s.name, s] as const));
+
+    // Pass 1: close and drop anything gone or changed. Snapshotted to an
+    // array first so dropping entries mid-loop can't interact with Map
+    // iteration.
+    for (const [name, entry] of Array.from(entries.entries())) {
+      const next = newByName.get(name);
+      if (next && configsEqual(entry.config, next)) {
+        continue; // unchanged -- left alone entirely, see doc comment above.
+      }
+      generationByName.set(name, (generationByName.get(name) ?? 0) + 1);
+      closeClient(dropEntry(name));
+    }
+
+    order = newServers.map((s) => s.name);
+
+    // Pass 2: (re)connect anything new or changed. An unchanged server's
+    // entry from before this call is still sitting in `entries` untouched.
+    const toConnect: McpServerConfig[] = [];
+    for (const config of newServers) {
+      const current = entries.get(config.name);
+      if (current && configsEqual(current.config, config)) {
+        continue;
+      }
+      toConnect.push(config);
+    }
+
+    ready = Promise.all(toConnect.map(connectOne)).then(snapshot);
+  }
+
+  apply(servers);
+
+  async function callTool(
+    name: string,
+    args: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
+    const route = liveRoutes.get(name);
+    if (!route) {
+      throw new Error(`Unknown MCP tool: ${name}`);
+    }
+    const result = await route.client.callTool(
+      {
+        name: route.originalName,
+        arguments: args as Record<string, unknown> | undefined,
+      },
+      undefined,
+      signal ? { signal } : undefined
+    );
+    return { content: stringifyToolResultContent(result.content) };
+  }
+
+  return {
+    get openAiTools() {
+      return order.flatMap((name) => entries.get(name)?.tools ?? []);
+    },
+    callTool,
+    get ready() {
+      return ready;
+    },
+    status: snapshot,
+    reload: apply,
+  };
 }
 
 /** What a server would hand the agent, as reported by "Test Connection". */

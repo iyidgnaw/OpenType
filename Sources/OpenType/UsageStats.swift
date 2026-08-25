@@ -58,6 +58,22 @@ enum UsageStats {
         /// Kept beside the headline because for `ask`, which is in both, the
         /// *difference* between the two is what ASR cost.
         let averageResponseLatency: TimeInterval?
+        /// The headline wait, `transcribe` sessions only — same exclusion
+        /// rules as `averageEndToEndLatency` (Review committed without a
+        /// correction, a pre-delivery correction round), computed from
+        /// exactly the spans that figure sums. Splits the headline apart from
+        /// `ask`: a week heavy on web-searched questions (30s) blended with
+        /// two-second dictation reads as a slow week for dictation, which it
+        /// was not. `nil`, never `0`, when nothing measurable delivered this
+        /// week — a bilingual user who only dictated one day still gets a
+        /// real number for that day, not a blank.
+        let averageTranscribeEndToEndLatency: TimeInterval?
+        /// The headline wait, `ask` sessions only, same rule and same source
+        /// spans. `agent` is deliberately absent from both per-mode figures —
+        /// see `averageResponseLatency`'s doc comment above for why an agent
+        /// run's duration does not belong in any "how long did I wait"
+        /// figure at all.
+        let averageAskEndToEndLatency: TimeInterval?
         /// Seven rolling 24-hour buckets, oldest first, for the bar strip.
         ///
         /// Rolling rather than calendar days so this sums to `wordsDictated`
@@ -99,6 +115,8 @@ enum UsageStats {
             correctionsPerHundredWords: 0,
             averageEndToEndLatency: nil,
             averageResponseLatency: nil,
+            averageTranscribeEndToEndLatency: nil,
+            averageAskEndToEndLatency: nil,
             dailyWords: Array(repeating: 0, count: UsageStats.bucketCount),
             dailyCorrectionsPerHundredWords: Array(
                 repeating: nil,
@@ -262,6 +280,14 @@ enum UsageStats {
         var corrections = 0
         var endToEndSpans: [TimeInterval] = []
         var responseSpans: [TimeInterval] = []
+        // Per-mode subsets of `endToEndSpans`, collected at the same point
+        // below rather than in a second pass — see (c) in this file's
+        // header. Each span that qualifies for the headline is appended to
+        // exactly one of these two as well (or to neither, for `agent`),
+        // which is what keeps a single-mode week's per-mode figure equal to
+        // the headline bit-for-bit.
+        var transcribeEndToEndSpans: [TimeInterval] = []
+        var askEndToEndSpans: [TimeInterval] = []
         var dailyWords = Array(repeating: 0, count: bucketCount)
         // The trend's two other columns. Deliveries are counted per bucket as
         // well as per week because they are what tells a day with a genuine
@@ -352,6 +378,15 @@ enum UsageStats {
                // `averageResponseLatency` is where an agent run's duration
                // belongs, and it keeps it.
                mode != .agent,
+               // A Review session the user committed — with or without a
+               // correction round — is human reading/deciding time in the
+               // panel, not the system's. `variant` is only ever stamped on a
+               // `transcribe` `.completed` event, so this guard is a no-op
+               // for `ask`/`agent`. `nil` (every row written before this
+               // field existed) is deliberately *not* excluded here — see
+               // `ImmutableAuditEvent.variant`'s doc comment — only a row
+               // explicitly labelled `"review"` is.
+               completed.variant != TranscribeVariant.review.rawValue,
                // A correction round *before* delivery means the user was
                // editing in the Review panel, so the span is human time rather
                // than the system's. A correction *after* delivery (P0-3's
@@ -360,10 +395,19 @@ enum UsageStats {
                !correctionRounds.contains(where: {
                    $0.createdAt < completed.createdAt
                }) {
-                append(
-                    completed.createdAt.timeIntervalSince(recordingEndedAt),
-                    to: &endToEndSpans
-                )
+                let span = completed.createdAt.timeIntervalSince(recordingEndedAt)
+                append(span, to: &endToEndSpans)
+                // Same span, filed into its mode's own column too — see (c)
+                // above. `agent` is already excluded by the guard this `if`
+                // sits inside, so it never reaches either column.
+                switch mode {
+                case .transcribe:
+                    append(span, to: &transcribeEndToEndSpans)
+                case .ask:
+                    append(span, to: &askEndToEndSpans)
+                default:
+                    break
+                }
             }
 
             if let recognized, mode == .ask || mode == .agent {
@@ -390,6 +434,8 @@ enum UsageStats {
                 : 0,
             averageEndToEndLatency: average(endToEndSpans),
             averageResponseLatency: average(responseSpans),
+            averageTranscribeEndToEndLatency: average(transcribeEndToEndSpans),
+            averageAskEndToEndLatency: average(askEndToEndSpans),
             dailyWords: dailyWords,
             // Same three cases as the weekly figures, held apart per day: a day
             // that delivered nothing has no rate (`nil`, drawn as a gap), a day

@@ -4,6 +4,7 @@ import {
   probeMcpServer as defaultProbeMcpServer,
   type McpConnectionReport,
   type McpProbeResult,
+  type McpServerConfig,
   type McpServerConnectionStatus,
 } from "./mcpClient";
 import {
@@ -78,12 +79,44 @@ export interface McpConfigRouteDeps {
    * `lastStartupError` rather than every row carrying an invented one.
    */
   connectionReport?: () => McpConnectionReport;
+  /**
+   * Fired after a write (`POST`/`PUT`/`DELETE`) actually commits, with the
+   * post-write **enabled** server list -- what makes a saved config change
+   * take effect immediately (`main()` wires this to a
+   * `createReloadableMcpToolSet(...).reload(...)`, see `mcpClient.ts` and
+   * `mcpReload.test.ts`) instead of only at the next sidecar start.
+   *
+   * Two things about this seam are load-bearing:
+   *
+   *  - It fires only once the store write has actually committed, never
+   *    merely once the request body has passed shape validation. A
+   *    duplicate-name rejection, for instance, is a 400 thrown from *inside*
+   *    `store.addServer`/`updateServer`'s own uniqueness check, one call
+   *    after the body already cleared `candidateFrom` -- firing on body
+   *    validity alone would fire this callback on a save that never
+   *    happened.
+   *  - It is typed as returning `void`, not `void | Promise<void>`, and the
+   *    handlers below never `await` it. A reload can involve a real MCP
+   *    handshake that takes up to `MCP_CONNECT_TIMEOUT_MS` per server, or
+   *    hang indefinitely against an unreachable one -- awaiting it here would
+   *    turn every MCP save into a potential multi-second (or infinite) stall,
+   *    which is `1245eb7`'s original boot-hang bug ("the panel that would let
+   *    you fix a bad server is served by the process that cannot start")
+   *    reappearing at save-time instead of boot-time, including on the very
+   *    save meant to undo the mistake.
+   *
+   * Optional, same as `connectionReport`: unwired, a write simply has no
+   * live effect beyond the next restart, matching every pre-existing call
+   * site and test.
+   */
+  onServersChanged?: (servers: McpServerConfig[]) => void;
 }
 
 const defaultDeps: McpConfigRouteDeps = {
   probeMcpServer: defaultProbeMcpServer,
   envJson: undefined,
   connectionReport: undefined,
+  onServersChanged: undefined,
 };
 
 function maskMap(
@@ -277,7 +310,20 @@ export function buildMcpConfigRoutes(
   store: McpConfigStore,
   deps: Partial<McpConfigRouteDeps> = {},
 ): Route[] {
-  const { probeMcpServer, envJson, connectionReport } = { ...defaultDeps, ...deps };
+  const { probeMcpServer, envJson, connectionReport, onServersChanged } = {
+    ...defaultDeps,
+    ...deps,
+  };
+
+  /**
+   * Notifies `onServersChanged` with the current enabled server list, and
+   * only that -- see the dep's own doc comment for why this is a bare call,
+   * never `await`ed, and why it belongs strictly after the store write it
+   * follows at each call site.
+   */
+  function notifyServersChanged(): void {
+    onServersChanged?.(resolveMcpServers(store, envJson).servers);
+  }
 
   return [
     {
@@ -319,6 +365,7 @@ export function buildMcpConfigRoutes(
         try {
           // No stored record on a create, so nothing to resolve masks against.
           const created = store.addServer(candidateFrom(body, undefined));
+          notifyServersChanged();
           return Response.json({ server: maskServer(created) });
         } catch (error) {
           return badRequest(error);
@@ -369,6 +416,7 @@ export function buildMcpConfigRoutes(
         }
         try {
           const updated = store.updateServer(name, candidateFrom(body, stored));
+          notifyServersChanged();
           return Response.json({ server: maskServer(updated) });
         } catch (error) {
           return badRequest(error);
@@ -383,6 +431,7 @@ export function buildMcpConfigRoutes(
         if (!store.removeServer(name)) {
           return Response.json({ error: `No MCP server named "${name}"` }, { status: 404 });
         }
+        notifyServersChanged();
         return Response.json({ deleted: true });
       },
     },

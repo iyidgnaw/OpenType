@@ -596,6 +596,10 @@ private func recordEpisodicEvent(_ body: EpisodicEventBody) {
 
 **顺序要求**：ask/agent 两处必须在拿到答案之后调用（放在 `recordAuditEvent(.completed)` 之后），绝不能提到分发入口——否则模型会在下一轮的注入块里读到它当时正在回答的那个问题。
 
+**取消的运行不得写入**（2026-08-25 补）：`sidecar/test/agent/cancelRoute.test.ts` 原本用一对正负对照钉住这条规则——取消 → 0 行、正常 → 1 行，注释写明理由：「从用户放弃的工作里学习会污染记忆层，那是没人接受过的结果」。路由不再写入之后，这对断言双双失去意义（负例会变成永远不可能失败的空转），已在 Task 3 移除。**规则本身没有消失，它转移到了 Swift**：`/memory/events` 只在交付完成那一刻发，取消走的是另一条路。
+
+本 Task 必须有一个测试钉住它：**一次被取消的 agent 运行不发 `POST /memory/events`**。目前这条规则在任何地方都没有覆盖——它正是这种批次里最容易蒸发的那类规则：没有测试证明它「还在」，只有原地的一句注释解释它为什么在，而那段代码正在被删除。
+
 - [ ] **Step 4: 跑测试确认绿**
 
 Run: `swift test --filter EpisodicEventRecorderTests && swift build`

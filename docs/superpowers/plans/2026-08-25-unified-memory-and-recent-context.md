@@ -1156,12 +1156,17 @@ const recentActivity = buildRecentActivityContext(
 );
 ```
 
-`agent/routes.ts` 同样，`includeIds: true`。两处共用一个导出常量：
+`agent/routes.ts` 同样，`includeIds: true`。两处共用 Task 9 已经落地的那个常量：
 
 ```ts
-// sidecar/src/memory/recentActivity.ts
-export const RECENT_ACTIVITY_EXCLUDED_MODES: readonly string[] = ["transcribe"];
+// sidecar/src/memory/recentActivity.ts —— 已存在，不要改它
+export const RECENT_ACTIVITY_EXCLUDED_MODES: readonly string[] = [];
 ```
+
+⚠️ **本 Task 不得修改这个常量。** 它是空数组，因为三个模式全部注入、不留开关——
+这是产品负责人 2026-08-25 在完整了解代价（推翻一条已发布的对外承诺）后的决定。
+本文档此处一度残留 `["transcribe"]` 的旧值，照抄会**静默地撤销那个决定**，
+而且看上去完全像是在照计划执行。Task 9 落地的实现是对的，以代码为准。
 
 - [ ] **Step 4: 跑测试确认绿**
 

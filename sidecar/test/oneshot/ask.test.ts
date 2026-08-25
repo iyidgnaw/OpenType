@@ -96,6 +96,25 @@ describe("POST /oneshot/ask", () => {
     expect(body.result.length).toBeGreaterThan(0);
   });
 
+  // Not about episodic events -- this used to be covered incidentally by
+  // "records nothing when the model call fails" in the now-deleted
+  // test/oneshot/episodicEvent.test.ts (removed as part of plan Task 3,
+  // design §3.2's single-write-point move). That was the only test anywhere
+  // proving the route surfaces a chat failure as a 500 rather than
+  // swallowing it or answering 200 with a broken body, so it gets its own
+  // standalone home here rather than disappearing with the file that
+  // happened to contain it.
+  test("propagates a chat failure as a 500, rather than swallowing it or answering 200", async () => {
+    const chat: OneShotChatFn = async () => {
+      throw new Error("provider is down");
+    };
+    const router = createRouter(buildOneShotRoutes(makeStore(), makeConversations(), chat, captureContextLog().writer));
+
+    const response = await router(post({ question: "what is 2+2" }));
+
+    expect(response.status).toBe(500);
+  });
+
   test("includes matching known memory terms as light context", async () => {
     const store = makeStore();
     const now = Date.now();

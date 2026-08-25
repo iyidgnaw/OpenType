@@ -1,9 +1,26 @@
 import { clearContextUsageLog } from "../oneshot/contextDebugLog";
 import { ApiError, type Route } from "../router";
-import type { EntityCategory, EntityTermPatch, MemoryStore } from "./MemoryStore";
+import type {
+  EntityCategory,
+  EntityTermPatch,
+  MemoryStore,
+  RecordEpisodicEventInput,
+} from "./MemoryStore";
 import { rollbackRun, runConsolidation, upsertEntityTerm, type CallLLM } from "./consolidator";
 
 const ENTITY_CATEGORIES: EntityCategory[] = ["person", "project", "term", "org"];
+
+/**
+ * The three modes today (design §3.2). Mirrors `ENTITY_CATEGORIES` above:
+ * not validation for its own sake, but because this is now the one choke
+ * point every episodic write passes through, so a typo or a future
+ * Swift-side refactor sending a wrong mode string is caught here instead of
+ * writing silently and only surfacing downstream (the recent-activity
+ * renderer, or a consolidation pass) with no link back to the write that
+ * caused it.
+ */
+const EPISODIC_MODES = ["transcribe", "ask", "agent"] as const;
+type EpisodicMode = (typeof EPISODIC_MODES)[number];
 
 /**
  * Parses an `:id` segment of a `/memory/*<...>/:id<...>` path, counting back
@@ -74,6 +91,50 @@ export function buildMemoryRoutes(
   contextLogPath?: string
 ): Route[] {
   return [
+    {
+      // The single write point for episodic events (design §3.2). Swift
+      // calls this once, at delivery time, once mode/frontmost-app/final-
+      // delivered-text are all known -- facts no sidecar route can
+      // reconstruct on its own. This replaces three former writers
+      // (`/asr/transcribe`, `/oneshot/ask`, `/agent/run`), each of which only
+      // ever knew half of what a row needs; see
+      // `test/memory/episodicWiring.test.ts` for the proof those three no
+      // longer write.
+      method: "POST",
+      path: "/memory/events",
+      handler: async (req) => {
+        const body = (await req.json()) as Partial<RecordEpisodicEventInput>;
+
+        if (typeof body.mode !== "string" || !EPISODIC_MODES.includes(body.mode as EpisodicMode)) {
+          throw new ApiError("invalid_mode", 400);
+        }
+        // Inherited from `recordDictation`, the writer this endpoint
+        // replaces (asr/routes.ts, now deleted): an accidental hotkey press
+        // produces a silent recording with nothing learnable in it, and five
+        // of them would otherwise satisfy `shouldConsolidate`'s gate and
+        // burn a real LLM consolidation call on nothing. The guard now lives
+        // here rather than in any one caller, because this is the single
+        // path every write passes through -- a guard placed in a caller has
+        // to be re-remembered by every future caller; a guard placed here
+        // cannot be forgotten by any of them.
+        if (typeof body.rawTranscript !== "string" || body.rawTranscript.trim().length === 0) {
+          throw new ApiError("raw_transcript_is_required", 400);
+        }
+
+        const eventId = store.recordEpisodicEvent({
+          mode: body.mode,
+          rawTranscript: body.rawTranscript,
+          correctedTranscript: body.correctedTranscript ?? body.rawTranscript,
+          effectiveInput: body.effectiveInput ?? null,
+          selectedContext: body.selectedContext ?? null,
+          result: body.result ?? null,
+          applicationName: body.applicationName ?? "Unknown",
+          origin: body.origin ?? "owner",
+          conversationId: body.conversationId ?? null,
+        });
+        return Response.json({ eventId });
+      },
+    },
     {
       method: "GET",
       path: "/memory/terms",

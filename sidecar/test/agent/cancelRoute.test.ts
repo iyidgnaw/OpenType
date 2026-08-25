@@ -51,7 +51,7 @@ describe("POST /agent/cancel/:runId", () => {
     let cancelResponse: Response | undefined;
     // The model call is where the run parks; cancel from inside it so the
     // cancellation lands mid-flight rather than before the run starts.
-    const { router, store } = routerWith(async () => {
+    const { router } = routerWith(async () => {
       cancelResponse ??= await router(cancelRequest(runId));
       return {
         content: null,
@@ -67,9 +67,15 @@ describe("POST /agent/cancel/:runId", () => {
     expect(await cancelResponse!.json()).toEqual({ cancelled: true });
     expect(response.status).toBe(499);
 
-    // A cancelled run is not a completed task: teaching the memory layer from
-    // work the user abandoned would poison it with results nobody accepted.
-    expect(store.db.query("SELECT * FROM episodic_events").all().length).toBe(0);
+    // The rule that used to be asserted here -- "a cancelled run is not a
+    // completed task: teaching the memory layer from work the user
+    // abandoned would poison it with results nobody accepted" -- did not go
+    // away, it moved. `/agent/run` no longer writes `episodic_events` at all
+    // (plan Task 3, design §3.2): writing happens only when Swift POSTs to
+    // `POST /memory/events` at delivery time, and a cancelled run never
+    // reaches delivery. So the suppression is now a property of the Swift
+    // caller, not of this route -- see the requirement added to Task 5 to
+    // pin "a cancelled agent run does not POST /memory/events" on that side.
   });
 
   test("the run reports a cancelled status, not a failed one", async () => {
@@ -87,13 +93,18 @@ describe("POST /agent/cancel/:runId", () => {
     expect(((await progress.json()) as { status: string }).status).toBe("cancelled");
   });
 
-  test("a normal run is unaffected and still records its episodic event", async () => {
-    const { router, store } = routerWith(async () => ({ content: "all done" }));
+  // Was "a normal run is unaffected and still records its episodic event" --
+  // renamed because it no longer checks that (see the comment on the
+  // cancelled-run test above for where that half of the pair went). What
+  // stays true, and is still worth a dedicated assertion here, is the other
+  // half of the pair: cancellation only affects a run that was actually
+  // cancelled, not every run through this route.
+  test("a normal run is unaffected by the cancel route's existence and still completes with 200", async () => {
+    const { router } = routerWith(async () => ({ content: "all done" }));
 
     const response = await router(runRequest({ task: "quick", runId: "run-ok" }));
 
     expect(response.status).toBe(200);
-    expect(store.db.query("SELECT * FROM episodic_events").all().length).toBe(1);
   });
 
   test("cancelling an already-finished run reports nothing to cancel", async () => {

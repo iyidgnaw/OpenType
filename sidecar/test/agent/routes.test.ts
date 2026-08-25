@@ -53,39 +53,20 @@ describe("POST /agent/run", () => {
     expect(body.steps.length).toBeGreaterThan(0);
   });
 
-  test("records an episodic event with origin 'agent' after running", async () => {
-    const chat: AgentChatFn = async () => ({ content: "done" });
-    const store = makeStore();
-    const router = createRouter(buildAgentRoutes(store, makeConversations(), chat, noTools(), captureContextLog().writer));
-
-    await router(post({ task: "summarize my notes", context: "note text here" }));
-
-    const rows = store.db.query("SELECT * FROM episodic_events").all() as Array<
-      Record<string, unknown>
-    >;
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.mode).toBe("agent");
-    expect(rows[0]?.origin).toBe("agent");
-    expect(rows[0]?.rawTranscript).toBe("summarize my notes");
-    expect(rows[0]?.correctedTranscript).toBe("summarize my notes");
-    expect(rows[0]?.effectiveInput).toBe("summarize my notes");
-    expect(rows[0]?.selectedContext).toBe("note text here");
-    expect(rows[0]?.result).toBe("done");
-    expect(rows[0]?.applicationName).toBe("OpenType Agent");
-  });
-
-  test("records selectedContext as null when no context is provided", async () => {
-    const chat: AgentChatFn = async () => ({ content: "done" });
-    const store = makeStore();
-    const router = createRouter(buildAgentRoutes(store, makeConversations(), chat, noTools(), captureContextLog().writer));
-
-    await router(post({ task: "just a task" }));
-
-    const rows = store.db.query("SELECT * FROM episodic_events").all() as Array<
-      Record<string, unknown>
-    >;
-    expect(rows[0]?.selectedContext).toBeNull();
-  });
+  // The two tests that used to live here ("records an episodic event with
+  // origin 'agent' after running", "records selectedContext as null when no
+  // context is provided") pinned `/agent/run`'s direct
+  // `store.recordEpisodicEvent({...})` write -- removed by plan Task 3
+  // (design §3.2): writing moved to the single `POST /memory/events`
+  // endpoint that Swift calls at delivery time, so `/agent/run` no longer
+  // touches `episodic_events` at all (see
+  // `test/memory/episodicWiring.test.ts`'s "an agent run through the
+  // assembled app leaves episodic_events empty"). The field-mapping rules
+  // those two tests pinned (rawTranscript/correctedTranscript/effectiveInput
+  // all equal to `task`, selectedContext equal to `context` or null when
+  // omitted, origin "agent") moved to
+  // `test/memory/routes.test.ts`'s "every field the caller sends round-trips
+  // independently, including non-null effectiveInput and selectedContext".
 
   test("passes the connected tools' openAiTools through to the chat call", async () => {
     let capturedTools: unknown;

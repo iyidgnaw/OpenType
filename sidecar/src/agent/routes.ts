@@ -231,22 +231,6 @@ async function handleAgentRun(
 
   conversations.appendMessage(conversationId, "assistant", loopResult.result);
 
-  // Per design spec §4: the first real write with origin "agent" (distinct
-  // from the owner's own dictation), so agent-produced content can be told
-  // apart from the owner's words once it flows through consolidation. Keeps
-  // recording the caller's original `context` (not `combinedContext`), so
-  // this stays a faithful record of what was actually selected on screen.
-  store.recordEpisodicEvent({
-    mode: "agent",
-    rawTranscript: task,
-    correctedTranscript: task,
-    effectiveInput: task,
-    selectedContext: context ?? null,
-    result: loopResult.result,
-    applicationName: "OpenType Agent",
-    origin: "agent",
-  });
-
   return Response.json({ result: loopResult.result, steps: loopResult.steps, conversationId });
 }
 

@@ -1195,3 +1195,401 @@ describe("DELETE /memory/context-log", () => {
     }
   });
 });
+
+/**
+ * Design §3.2 / plan Task 3: the single write path into `episodic_events`,
+ * replacing the three sidecar-side writers (`/asr/transcribe`,
+ * `/oneshot/ask`, `/agent/run`) that each knew only part of the truth.
+ * Swift calls this at delivery time, when it actually knows the mode, the
+ * frontmost app, the final delivered text, and the right `origin` -- so this
+ * route's whole job is to accept exactly what the caller sends and store it
+ * unchanged, not to infer or default away any of the facts that motivated
+ * the move (see `test/memory/episodicWiring.test.ts` for the other half:
+ * proving the three old writers no longer write).
+ */
+describe("POST /memory/events", () => {
+  test("records exactly one row and returns the new row's eventId", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        mode: "transcribe",
+        rawTranscript: "原文",
+        correctedTranscript: "改写后",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "交付出去的文本",
+        applicationName: "WeChat",
+        origin: "owner",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { eventId: number };
+    expect(body.eventId).toBeGreaterThan(0);
+
+    // Read back through the same read path the recent-activity injection
+    // uses, not a raw SELECT -- this is what proves the caller's facts
+    // arrived intact, which is the entire point of this endpoint existing.
+    const rows = store.recentEvents(10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).toBe(body.eventId);
+    expect(rows[0]!.applicationName).toBe("WeChat");
+    expect(rows[0]!.mode).toBe("transcribe");
+    // rawTranscript/correctedTranscript are deliberately given DIFFERENT
+    // values here and both asserted: this is the field-mapping rule that
+    // used to live in test/asr/episodicEvent.test.ts ("rawTranscript is the
+    // pre-correction ASR text, correctedTranscript the delivered text") --
+    // the endpoint must keep the pair distinct, never collapse or overwrite
+    // one with the other.
+    expect(rows[0]!.rawTranscript).toBe("原文");
+    expect(rows[0]!.correctedTranscript).toBe("改写后");
+    expect(rows[0]!.result).toBe("交付出去的文本");
+    expect(rows[0]!.conversationId).toBeNull();
+  });
+
+  test("every field the caller sends round-trips independently, including non-null effectiveInput and selectedContext", async () => {
+    // Moves the field-mapping rule pinned by test/agent/routes.test.ts's now-
+    // removed "records an episodic event with origin 'agent'" test: an
+    // agent-shaped payload carries a non-null effectiveInput (the task as fed
+    // to the model) and a non-null selectedContext (what was selected on
+    // screen), and both must survive unchanged, not just the headline
+    // mode/result/applicationName fields already covered above.
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        mode: "agent",
+        rawTranscript: "summarize my notes",
+        correctedTranscript: "summarize my notes",
+        effectiveInput: "summarize my notes",
+        selectedContext: "note text here",
+        result: "done",
+        applicationName: "Notes",
+        origin: "agent",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const row = store.recentEvents(10)[0]!;
+    expect(row.mode).toBe("agent");
+    expect(row.rawTranscript).toBe("summarize my notes");
+    expect(row.correctedTranscript).toBe("summarize my notes");
+    expect(row.effectiveInput).toBe("summarize my notes");
+    expect(row.selectedContext).toBe("note text here");
+    expect(row.result).toBe("done");
+    expect(row.applicationName).toBe("Notes");
+    expect(row.origin).toBe("agent");
+  });
+
+  // Moves the field-mapping rule pinned by test/agent/routes.test.ts's now-
+  // removed "records selectedContext as null when no context is provided"
+  // test: transcribe (and any mode with no LLM stage) sends `null` for both
+  // `effectiveInput` and `selectedContext`, and the endpoint must store real
+  // SQL NULL, not silently coerce it into `""` or a stringified `"null"`.
+  // The earlier round-trip test above only sends non-null values for these
+  // two fields, so without this nothing would catch an implementation doing
+  // e.g. `effectiveInput: body.effectiveInput ?? ""`.
+  test("null effectiveInput and selectedContext round-trip as null, not coerced to empty string or 'null'", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    await router(
+      post("/memory/events", {
+        mode: "transcribe",
+        rawTranscript: "hello world",
+        correctedTranscript: "hello world",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "hello world",
+        applicationName: "TextEdit",
+        origin: "owner",
+      })
+    );
+
+    const row = store.recentEvents(10)[0]!;
+    expect(row.effectiveInput).toBeNull();
+    expect(row.selectedContext).toBeNull();
+  });
+
+  // Pins the reference handler's three defaults (design §3.2's step-3 sketch:
+  // `applicationName ?? "Unknown"`, `correctedTranscript ?? rawTranscript`,
+  // `origin ?? "owner"`), each of which no existing test exercises while
+  // still supplying the two required fields (`mode`, `rawTranscript`).
+  // Omitting a field here must default it, not 400 -- only `mode` and
+  // `rawTranscript` are required (see the "missing X returns 400" tests
+  // above).
+  test("omitting applicationName, correctedTranscript, and origin fills in the documented defaults", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        mode: "transcribe",
+        rawTranscript: "hello world",
+        effectiveInput: null,
+        selectedContext: null,
+        result: null,
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const row = store.recentEvents(10)[0]!;
+    expect(row.applicationName).toBe("Unknown");
+    // Defaults to the rawTranscript itself, not to an empty string or null --
+    // an omitted correction means "nothing was rewritten", which the
+    // caller expresses by leaving the field out rather than repeating it.
+    expect(row.correctedTranscript).toBe("hello world");
+    expect(row.origin).toBe("owner");
+  });
+
+  test("omitted conversationId stores NULL", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    await router(
+      post("/memory/events", {
+        mode: "ask",
+        rawTranscript: "what is 2+2",
+        correctedTranscript: "what is 2+2",
+        effectiveInput: "what is 2+2",
+        selectedContext: null,
+        result: "Four.",
+        applicationName: "OpenType",
+        origin: "agent",
+      })
+    );
+
+    const rows = store.recentEvents(10);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.conversationId).toBeNull();
+  });
+
+  test("a supplied conversationId is stored as sent", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    await router(
+      post("/memory/events", {
+        mode: "agent",
+        rawTranscript: "summarize my notes",
+        correctedTranscript: "summarize my notes",
+        effectiveInput: "summarize my notes",
+        selectedContext: "note text",
+        result: "done",
+        applicationName: "OpenType",
+        origin: "agent",
+        conversationId: 42,
+      })
+    );
+
+    const rows = store.recentEvents(10);
+    expect(rows[0]!.conversationId).toBe(42);
+  });
+
+  test("origin 'agent' is honoured as sent -- ask/agent turns need it to gate consolidation's owner-facts source", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    await router(
+      post("/memory/events", {
+        mode: "ask",
+        rawTranscript: "what is 2+2",
+        correctedTranscript: "what is 2+2",
+        effectiveInput: "what is 2+2",
+        selectedContext: null,
+        result: "Four.",
+        applicationName: "OpenType",
+        origin: "agent",
+      })
+    );
+
+    expect(store.recentEvents(10)[0]!.origin).toBe("agent");
+  });
+
+  test("origin 'owner' is honoured as sent -- a dictation turn is the owner's own words, no model in the loop", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    await router(
+      post("/memory/events", {
+        mode: "transcribe",
+        rawTranscript: "hello world",
+        correctedTranscript: "hello world",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "hello world",
+        applicationName: "TextEdit",
+        origin: "owner",
+      })
+    );
+
+    expect(store.recentEvents(10)[0]!.origin).toBe("owner");
+  });
+
+  test("missing mode returns 400 and writes nothing", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        rawTranscript: "hello world",
+        correctedTranscript: "hello world",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "hello world",
+        applicationName: "TextEdit",
+        origin: "owner",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.recentEvents(10)).toEqual([]);
+  });
+
+  // This is now the one choke point every memory write passes through, which
+  // is exactly why a boundary check here actually holds: a typo or a future
+  // Swift-side refactor that sends a wrong mode string would otherwise write
+  // silently, and the mismatch would only surface downstream (the JSONL
+  // recent-activity renderer, or a consolidation pass) with no link back to
+  // the write that caused it. Mirrors the `ENTITY_CATEGORIES` /
+  // `invalid_category` guard already in this file for entity terms.
+  test("an unknown mode string returns 400 and writes nothing", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        mode: "polish",
+        rawTranscript: "hello world",
+        correctedTranscript: "hello world",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "hello world",
+        applicationName: "TextEdit",
+        origin: "owner",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.recentEvents(10)).toEqual([]);
+  });
+
+  // The failure mode a guard can introduce is worse than the one it
+  // prevents: a check that accidentally rejects a real mode would silently
+  // stop recording one whole mode's history, and nothing downstream would
+  // report it (the caller is best-effort and swallows the failure). All
+  // three of today's actual modes must keep passing.
+  test.each(["transcribe", "ask", "agent"] as const)(
+    "mode %p is accepted, not rejected by the mode guard",
+    async (mode) => {
+      const store = makeStore();
+      const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+      const response = await router(
+        post("/memory/events", {
+          mode,
+          rawTranscript: "hello world",
+          correctedTranscript: "hello world",
+          effectiveInput: null,
+          selectedContext: null,
+          result: "hello world",
+          applicationName: "TextEdit",
+          origin: "owner",
+        })
+      );
+
+      expect(response.status).toBe(200);
+      expect(store.recentEvents(10)).toHaveLength(1);
+    }
+  );
+
+  test("missing rawTranscript returns 400 and writes nothing", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        mode: "transcribe",
+        correctedTranscript: "hello world",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "hello world",
+        applicationName: "TextEdit",
+        origin: "owner",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.recentEvents(10)).toEqual([]);
+  });
+
+  test("an entirely empty body returns 400 and writes nothing", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(post("/memory/events", {}));
+
+    expect(response.status).toBe(400);
+    expect(store.recentEvents(10)).toEqual([]);
+  });
+
+  // The silent-recording guard that used to live in `asr/routes.ts`'s
+  // `recordDictation` ("if (rawTranscript.trim() === '') return;"). An
+  // accidental hotkey press produces a transcript with nothing learnable in
+  // it, and five of them would otherwise satisfy `shouldConsolidate`'s
+  // `>= 5 unconsolidated events` gate and burn a real LLM consolidation call
+  // on nothing. Now that writing moved out of `/asr/transcribe` (the one
+  // caller that used to own this check) into this single shared endpoint,
+  // the guard has to live HERE: a check that lived in the old caller would
+  // have to be re-remembered by every future caller of this endpoint, and a
+  // guard the one shared write path enforces cannot be forgotten by any of
+  // them. Answering 400 rather than silently accepting-and-ignoring, because
+  // every call into this endpoint is already best-effort from the Swift side
+  // (failures are swallowed there and never surface to the user) -- a clear
+  // rejection costs the caller nothing and is far easier to debug than a 200
+  // that quietly wrote nothing.
+  test("an empty rawTranscript returns 400 and writes nothing -- a silent recording has nothing learnable in it", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        mode: "transcribe",
+        rawTranscript: "",
+        correctedTranscript: "",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "",
+        applicationName: "TextEdit",
+        origin: "owner",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.recentEvents(10)).toEqual([]);
+  });
+
+  test("a whitespace-only rawTranscript returns 400 and writes nothing -- same silent-recording guard, not just the exact-empty-string case", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+
+    const response = await router(
+      post("/memory/events", {
+        mode: "transcribe",
+        rawTranscript: "  \n\t ",
+        correctedTranscript: "  \n\t ",
+        effectiveInput: null,
+        selectedContext: null,
+        result: "  \n\t ",
+        applicationName: "TextEdit",
+        origin: "owner",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.recentEvents(10)).toEqual([]);
+  });
+});

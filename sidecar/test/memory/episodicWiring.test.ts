@@ -1,18 +1,41 @@
 /**
- * P1-7 (补), wiring half: the episodic-event seams must actually be connected
- * in the assembled app, not just exist.
+ * P1-7 (补), wiring half -- INVERTED for plan Task 3 (design §3.2).
  *
- * The whole reason P1-7 exists is that this repo grew a memory layer whose read
- * side had zero production callers — a seam nobody wired. `/asr/transcribe`'s
- * recorder is an OPTIONAL member of `AsrRouteDeps` (so pre-existing call sites
- * keep compiling), which means the route-level tests in
- * `test/asr/episodicEvent.test.ts` would pass just as happily if `buildApp`
- * forgot to pass it. This file closes that hole by driving the real assembled
- * router against a real `:memory:` store and asserting rows land, so "wired"
- * is a tested property rather than a hope.
+ * ## What this file used to pin
  *
- * `/agent/run` is already wired (it takes the store directly and has recorded
- * events since the memory-v1 batch), so it is not re-covered here.
+ * Before Task 3, `/asr/transcribe`, `/oneshot/ask` and `/agent/run` were each
+ * their own writer of `episodic_events`, and this file drove the real
+ * assembled router (via `buildApp`) against a real `:memory:` store to prove
+ * all three were actually wired up -- not just that `buildAsrRoutes` etc.
+ * individually accepted a `recordEpisodicEvent` callback, which the
+ * route-level tests already covered, but that `buildApp` actually passed one
+ * through. "wired" was the property under test, and every assertion checked
+ * that a row landed after exercising a route.
+ *
+ * ## What this file pins now
+ *
+ * The single-write-point redesign (design §3.2) moves that responsibility
+ * out of the sidecar entirely: Swift now calls `POST /memory/events` itself,
+ * at delivery time, once it knows the mode, the frontmost app, and the final
+ * delivered text -- facts no sidecar route can reconstruct on its own (see
+ * `test/memory/routes.test.ts`'s "POST /memory/events" suite for that new
+ * write path). The three old writers are removed, not merely made harder to
+ * reach, so this file now proves the opposite of what it proved before: that
+ * exercising each of the three routes through the same assembled `buildApp`
+ * leaves `episodic_events` untouched. This is the same invariant --
+ * "is the episodic-event seam wired the way the current design says it
+ * should be" -- read from its other side, which is why the file keeps its
+ * name and its harness rather than being replaced outright.
+ *
+ * The harness (the `assemble` helper, the `emptyTools` stub, the `events`
+ * raw-SQL reader) is unchanged from before; only the assertions invert. An
+ * `/agent/run` case is added here for the first time -- previously out of
+ * scope for this file ("already wired... not re-covered here") because
+ * `/agent/run` wrote directly via `store.recordEpisodicEvent` rather than
+ * through an optional deps seam, so there was nothing "wiring"-shaped left
+ * to prove about it. Now that all three routes are supposed to write
+ * *nothing*, leaving it out would mean the third of three writers is
+ * untested here.
  */
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
@@ -61,8 +84,8 @@ function events(store: MemoryStore): Array<Record<string, unknown>> {
     .all() as Array<Record<string, unknown>>;
 }
 
-describe("buildApp wires episodic recording into every mode", () => {
-  test("a transcription through the assembled app lands an episodic event", async () => {
+describe("buildApp no longer writes episodic events from any route -- writing moved to POST /memory/events", () => {
+  test("a transcription through the assembled app leaves episodic_events empty", async () => {
     const { app, store } = assemble("unused", "帮我记一下这段话");
 
     const response = await app(
@@ -73,13 +96,13 @@ describe("buildApp wires episodic recording into every mode", () => {
     );
 
     expect(response.status).toBe(200);
-    const rows = events(store);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.mode).toBe("transcribe");
-    expect(rows[0]!.correctedTranscript).toBe("帮我记一下这段话");
+    // Before Task 3 this was `toHaveLength(1)` with `mode: "transcribe"`.
+    // Recording now happens only when Swift POSTs to `/memory/events`, which
+    // this request never does.
+    expect(events(store)).toHaveLength(0);
   });
 
-  test("an answered question through the assembled app lands an episodic event", async () => {
+  test("an answered question through the assembled app leaves episodic_events empty", async () => {
     const { app, store } = assemble("Four.", "unused");
 
     const response = await app(
@@ -90,17 +113,41 @@ describe("buildApp wires episodic recording into every mode", () => {
     );
 
     expect(response.status).toBe(200);
-    const rows = events(store);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.mode).toBe("ask");
-    expect(rows[0]!.result).toBe("Four.");
+    // Before Task 3 this was `toHaveLength(1)` with `mode: "ask"` and
+    // `result: "Four."`. `/oneshot/ask` no longer knows the frontmost app
+    // (it hardcoded "OpenType Ask") and is exactly the kind of half-truth
+    // write §3.2 removes.
+    expect(events(store)).toHaveLength(0);
   });
 
-  test("both modes feed the same consolidation gate", async () => {
+  test("an agent run through the assembled app leaves episodic_events empty", async () => {
+    const { app, store } = assemble("done", "unused");
+
+    const response = await app(
+      new Request("http://sidecar/agent/run", {
+        method: "POST",
+        body: JSON.stringify({ task: "summarize my notes", context: "note text here" }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    // `/agent/run` wrote directly via `store.recordEpisodicEvent` (no
+    // optional deps seam to omit), so before Task 3 this route was not even
+    // covered by this file -- it needed no "is it wired" test. It is
+    // included now because all three writers are gone, not just the two
+    // that went through an optional callback.
+    expect(events(store)).toHaveLength(0);
+  });
+
+  test("none of the three modes feed the consolidation gate on their own anymore", async () => {
     const { app, store } = assemble("Four.", "一段听写");
 
-    // Three dictations and two questions: five unconsolidated events, none of
-    // which came from `/agent/run`. Before P1-7 this count would be zero.
+    // Same shape of exercise as the pre-Task-3 version of this test (three
+    // dictations, two questions) -- before Task 3 this asserted
+    // `unconsolidatedEventCount() === 5`. With every writer removed, running
+    // the same five requests now produces zero unconsolidated events, because
+    // there is nothing in `episodic_events` at all until Swift starts calling
+    // `POST /memory/events` at delivery time.
     for (let i = 0; i < 3; i++) {
       await app(
         new Request("http://sidecar/asr/transcribe", {
@@ -118,6 +165,6 @@ describe("buildApp wires episodic recording into every mode", () => {
       );
     }
 
-    expect(store.unconsolidatedEventCount()).toBe(5);
+    expect(store.unconsolidatedEventCount()).toBe(0);
   });
 });

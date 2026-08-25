@@ -143,12 +143,12 @@ export function buildApp(
     ...buildConversationRoutes(conversations),
     // P0-1: the entity dictionary feeds back into recognition -- read per
     // request (not captured once) so a term taught mid-session applies to the
-    // very next utterance. See `asr/dictionaryBias.ts`. P1-7 adds the other
-    // direction: each successful dictation appends an episodic event, so
-    // consolidation's raw material is no longer agent tasks alone.
+    // very next utterance. See `asr/dictionaryBias.ts`. Episodic-event writing
+    // no longer happens here (design §3.2): Swift now calls
+    // `POST /memory/events` itself, once, at delivery time -- see
+    // `memory/routes.ts`.
     ...buildAsrRoutes(transcribe, {
       listTerms: () => store.allTerms(),
-      recordEpisodicEvent: (input) => store.recordEpisodicEvent(input),
     }),
     ...buildTranscribeRoutes(chat, { store }),
     ...buildProviderConfigRoutes(providerConfigStore),

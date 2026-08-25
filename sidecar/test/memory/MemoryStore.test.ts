@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { openDatabase } from "../../src/memory/db";
-import { MemoryStore } from "../../src/memory/MemoryStore";
+import { MemoryStore, type RecordEpisodicEventInput } from "../../src/memory/MemoryStore";
 
 function makeStore() {
   const db = openDatabase(":memory:");
@@ -527,5 +527,144 @@ describe("MemoryStore.listConsolidationRuns", () => {
     for (const run of runs) {
       expect(run).not.toHaveProperty("snapshotBeforeJSON");
     }
+  });
+});
+
+describe("MemoryStore.recentEvents", () => {
+  function episodicInput(
+    patch: Partial<RecordEpisodicEventInput> & { conversationId?: number | null }
+  ): RecordEpisodicEventInput {
+    return {
+      mode: "ask",
+      rawTranscript: "r",
+      correctedTranscript: "c",
+      effectiveInput: null,
+      selectedContext: null,
+      result: null,
+      applicationName: "App",
+      ...patch,
+    };
+  }
+
+  /**
+   * Records via the real write path, then pins `createdAt` to an explicit
+   * value with a direct UPDATE. Two `recordEpisodicEvent` calls back-to-back
+   * inside a test can land in the same millisecond (Date.now() has only
+   * millisecond resolution), which would make an ordering assertion pass or
+   * fail depending on wall-clock luck rather than on `recentEvents`'
+   * behaviour. Pinning `createdAt` explicitly removes that luck; the
+   * dedicated tie-break test below additionally proves the ORDER BY's `id
+   * DESC` secondary key, by giving two rows the *same* pinned `createdAt` on
+   * purpose.
+   */
+  function recordAt(
+    store: MemoryStore,
+    patch: Partial<RecordEpisodicEventInput> & { conversationId?: number | null },
+    createdAt: number
+  ): number {
+    const id = store.recordEpisodicEvent(episodicInput(patch));
+    store.db.run("UPDATE episodic_events SET createdAt = ? WHERE id = ?", [createdAt, id]);
+    return id;
+  }
+
+  test("returns rows oldest-first, and by default excludes no mode", () => {
+    const store = makeStore();
+    recordAt(store, { mode: "transcribe", rawTranscript: "一" }, 1000);
+    recordAt(store, { mode: "ask", rawTranscript: "二" }, 2000);
+    recordAt(store, { mode: "agent", rawTranscript: "三" }, 3000);
+
+    const rows = store.recentEvents(10);
+
+    expect(rows.map((r) => r.rawTranscript)).toEqual(["一", "二", "三"]);
+    expect(rows.map((r) => r.mode)).toEqual(["transcribe", "ask", "agent"]);
+  });
+
+  test("ties in createdAt are broken by insertion order (id), not left ambiguous", () => {
+    const store = makeStore();
+    const first = recordAt(store, { rawTranscript: "先" }, 5000);
+    const second = recordAt(store, { rawTranscript: "后" }, 5000);
+    expect(first).toBeLessThan(second);
+
+    const rows = store.recentEvents(10);
+
+    expect(rows.map((r) => r.rawTranscript)).toEqual(["先", "后"]);
+  });
+
+  test("returns only the most recent `limit` rows, not the first ones recorded", () => {
+    const store = makeStore();
+    recordAt(store, { rawTranscript: "一" }, 1000);
+    recordAt(store, { rawTranscript: "二" }, 2000);
+    recordAt(store, { rawTranscript: "三" }, 3000);
+    recordAt(store, { rawTranscript: "四" }, 4000);
+
+    expect(store.recentEvents(2).map((r) => r.rawTranscript)).toEqual(["三", "四"]);
+  });
+
+  test("opts.excludeModes filters out the named modes; the default is to exclude nothing", () => {
+    const store = makeStore();
+    recordAt(store, { mode: "transcribe", rawTranscript: "一" }, 1000);
+    recordAt(store, { mode: "ask", rawTranscript: "二" }, 2000);
+    recordAt(store, { mode: "agent", rawTranscript: "三" }, 3000);
+
+    const rows = store.recentEvents(10, { excludeModes: ["transcribe", "agent"] });
+
+    expect(rows.map((r) => r.rawTranscript)).toEqual(["二"]);
+  });
+
+  test("excludeModes is applied before limit, not after -- excluded rows must not consume the limit budget", () => {
+    const store = makeStore();
+    // Oldest to newest: ask, ask, transcribe, transcribe, transcribe. The two
+    // most recent rows are both transcribe. A filter-after-limit
+    // implementation (LIMIT 2, then drop excluded modes in a subquery or in
+    // JS) would take those two transcribe rows, filter them both out, and
+    // return []  -- silently reporting no data when two matching rows exist.
+    // Filtering in the WHERE clause before LIMIT is applied is the only way
+    // to get the two ask rows back.
+    recordAt(store, { mode: "ask", rawTranscript: "问一" }, 1000);
+    recordAt(store, { mode: "ask", rawTranscript: "问二" }, 2000);
+    recordAt(store, { mode: "transcribe", rawTranscript: "听一" }, 3000);
+    recordAt(store, { mode: "transcribe", rawTranscript: "听二" }, 4000);
+    recordAt(store, { mode: "transcribe", rawTranscript: "听三" }, 5000);
+
+    const rows = store.recentEvents(2, { excludeModes: ["transcribe"] });
+
+    expect(rows.map((r) => r.rawTranscript)).toEqual(["问一", "问二"]);
+  });
+
+  test("conversationId round-trips through recordEpisodicEvent and recentEvents; unset comes back null", () => {
+    const store = makeStore();
+    recordAt(store, { mode: "ask", rawTranscript: "有会话", conversationId: 17 }, 1000);
+    recordAt(store, { mode: "transcribe", rawTranscript: "无会话" }, 2000);
+
+    const rows = store.recentEvents(10);
+
+    expect(rows[0]?.conversationId).toBe(17);
+    expect(rows[1]?.conversationId).toBeNull();
+  });
+
+  test("is unaffected by consolidatedAt -- a fully-consolidated store still returns every row", () => {
+    const store = makeStore();
+    recordAt(store, { mode: "transcribe", rawTranscript: "听写" }, 1000);
+    recordAt(store, { mode: "ask", rawTranscript: "问答" }, 2000);
+
+    // Mark every row consolidated. If recentEvents were built on top of
+    // consolidationCandidates (or shared its predicate), this would empty it
+    // out -- that is exactly the merge spec §3.4 forbids.
+    store.db.run("UPDATE episodic_events SET consolidatedAt = ?", [Date.now()]);
+
+    expect(store.recentEvents(10).map((r) => r.rawTranscript)).toEqual(["听写", "问答"]);
+    expect(store.consolidationCandidates(10)).toHaveLength(0);
+  });
+
+  test("on a fresh, unconsolidated store, consolidationCandidates still omits transcribe while recentEvents includes it", () => {
+    const store = makeStore();
+    recordAt(store, { mode: "transcribe", rawTranscript: "听写" }, 1000);
+    recordAt(store, { mode: "ask", rawTranscript: "问答" }, 2000);
+
+    const recent = store.recentEvents(10).map((r) => r.rawTranscript);
+    const candidates = store.consolidationCandidates(10) as Array<{ rawTranscript: string }>;
+
+    expect(recent).toEqual(["听写", "问答"]);
+    expect(candidates.map((c) => c.rawTranscript)).toEqual(["问答"]);
   });
 });

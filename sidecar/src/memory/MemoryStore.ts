@@ -52,6 +52,29 @@ export interface RecordEpisodicEventInput {
   result: string | null;
   applicationName: string;
   origin?: EventOrigin;
+  conversationId?: number | null;
+}
+
+/**
+ * The full shape of one `episodic_events` row, as read back by
+ * `recentEvents`. Mirrors the table exactly -- including `conversationId`
+ * (added alongside `recordEpisodicEvent`'s optional input field) and
+ * `consolidatedAt`, which callers of `recentEvents` need to be able to see is
+ * irrelevant to that method (see its doc comment) rather than take on faith.
+ */
+export interface EpisodicEventRow {
+  id: number;
+  createdAt: number;
+  mode: string;
+  rawTranscript: string;
+  correctedTranscript: string;
+  effectiveInput: string | null;
+  selectedContext: string | null;
+  result: string | null;
+  applicationName: string;
+  origin: EventOrigin;
+  conversationId: number | null;
+  consolidatedAt: number | null;
 }
 
 export interface EntityTerm {
@@ -147,8 +170,8 @@ export class MemoryStore {
     const now = Date.now();
     const result = this.db.run(
       `INSERT INTO episodic_events
-        (createdAt, mode, rawTranscript, correctedTranscript, effectiveInput, selectedContext, result, applicationName, origin)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (createdAt, mode, rawTranscript, correctedTranscript, effectiveInput, selectedContext, result, applicationName, origin, conversationId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         now,
         input.mode,
@@ -159,6 +182,7 @@ export class MemoryStore {
         input.result,
         input.applicationName,
         origin,
+        input.conversationId ?? null,
       ]
     );
     return Number(result.lastInsertRowid);
@@ -362,6 +386,67 @@ export class MemoryStore {
          ORDER BY createdAt DESC LIMIT ?`
       )
       .all(limit);
+  }
+
+  /**
+   * The most recent `limit` episodic events, returned **oldest-first**. This
+   * is the read path for immediate context injection (recent activity folded
+   * into an `ask`/`agent` prompt, spec §3.4) -- a different consumer from
+   * `consolidationCandidates` with a different shape of trust in the result.
+   *
+   * Oldest-first is deliberate, not incidental: a model reads "the last line
+   * in the block is the most recent one" far more reliably than it infers an
+   * implicit reverse-chronological order, so the rows are queried
+   * newest-first (to get the right *N*) and then reversed before returning,
+   * rather than asking SQLite for `ORDER BY createdAt ASC LIMIT ?` directly
+   * -- that would hand back the oldest `limit` rows in the whole table, not
+   * the most recent ones.
+   *
+   * Ties in `createdAt` are broken by `id DESC` (in the newest-first query,
+   * so still oldest-first once reversed). `Date.now()` only has millisecond
+   * resolution and this project's own event volume makes same-millisecond
+   * rows an ordinary occurrence, not a rare edge case -- leaving the tie
+   * unresolved would make the returned order depend on SQLite's unspecified
+   * tie-breaking rather than on insertion order.
+   *
+   * This is deliberately **its own query**, not `consolidationCandidates`
+   * with an extra flag, and does not reuse `CONSOLIDATION_CANDIDATE_PREDICATE`
+   * in any form: `consolidationCandidates` selects material for a real LLM
+   * call that produces long-term memory, and must keep excluding dictation
+   * (`CONSOLIDATION_EXCLUDED_MODES`) no matter what; `recentEvents` selects
+   * material for immediate, per-request context injection, with its own
+   * (currently empty) set of boundaries. Sharing one query with a flag would
+   * let a future change to either caller's needs silently widen the other's
+   * scope -- e.g. a tweak meant only to loosen what consolidation reads
+   * quietly loosening what gets injected into the next prompt too. Keeping
+   * them separate means each can change its own filtering without touching
+   * the other's guarantee, and this method is intentionally unaffected by
+   * `consolidatedAt` -- a fully consolidated store still returns every row.
+   *
+   * `excludeModes` is filtered in the SQL `WHERE` clause, before `LIMIT` is
+   * applied, not on the result set afterward: filtering after limiting can
+   * silently return fewer rows than exist, or none, when the most recent
+   * rows happen to be excluded ones. It is not currently used to keep
+   * anything out by default (all three modes feed context with no opt-out,
+   * per current product decision) -- it exists as the seam a future
+   * per-app or time-window narrowing would be built on, so that narrowing
+   * doesn't require a new method or a change to this one's contract.
+   */
+  recentEvents(limit: number, opts?: { excludeModes?: readonly string[] }): EpisodicEventRow[] {
+    const excludeModes = opts?.excludeModes ?? [];
+    const exclusionClause =
+      excludeModes.length > 0
+        ? `WHERE mode NOT IN (${excludeModes.map(() => "?").join(", ")})`
+        : "";
+    const rows = this.db
+      .query(
+        `SELECT * FROM episodic_events
+         ${exclusionClause}
+         ORDER BY createdAt DESC, id DESC
+         LIMIT ?`
+      )
+      .all(...excludeModes, limit) as EpisodicEventRow[];
+    return rows.reverse();
   }
 
   hoursSinceLastConsolidation(): number | null {

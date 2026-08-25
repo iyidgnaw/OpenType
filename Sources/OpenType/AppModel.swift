@@ -89,17 +89,27 @@ final class AppModel: ObservableObject {
     /// is a deliberate user action, so a failed one must say so rather than
     /// look like nothing happened.
     @Published private(set) var memoryEditError: String?
-    /// Last failure from the sidecar half of `resetHistory()` (`DELETE
-    /// /memory/context-log`), shown on the 清除本地数据 page next to the button
-    /// that triggered it. `history.clear()` itself cannot fail (it's a local
-    /// JSON-file write), so this only ever reports the context-log leg. A
-    /// success clears this to `nil` so a stale failure doesn't linger past
-    /// it; overlapping resets aren't ordered against each other, so in
-    /// principle a slow first failure could still land after a fast second
-    /// success, but that window is narrow — the confirm button disables
-    /// itself the instant `history.clear()` empties the list, so reopening
-    /// it needs a fresh dictation to land mid-flight.
+    /// Last failure from either leg of `resetHistory()` (`DELETE
+    /// /memory/events` or `DELETE /memory/context-log`), shown on the
+    /// 清除本地数据 page next to the button that triggered it. A success clears
+    /// this to `nil` so a stale failure doesn't linger past it; overlapping
+    /// resets aren't ordered against each other, so in principle a slow first
+    /// failure could still land after a fast second success, but that window
+    /// is narrow — the confirm button disables itself the instant
+    /// `historyEntries` empties, so reopening it needs a fresh dictation to
+    /// land mid-flight.
     @Published private(set) var historyResetError: String?
+    /// Source of truth for the 听写 history page (Task 7, design §3.7): the
+    /// sidecar's `episodic_events` table, fetched via `refreshHistory()` —
+    /// the local `history.json` `HistoryStore` that used to serve this page
+    /// is gone (Task 8). `.notYetLoaded` / `.loaded` / `.unavailable`
+    /// distinguish "never fetched" from "genuinely empty" from "a fetch
+    /// failed" — see `HistoryLoadState`.
+    @Published private(set) var historyLoadState: HistoryLoadState = .notYetLoaded
+    /// Forwards onto `historyLoadState.entries` so every existing caller
+    /// (`DictationViews`, `SettingsViews2`) keeps reading one name, and
+    /// nothing can update one half without the other by construction.
+    var historyEntries: [HistoryEntry] { historyLoadState.entries }
     /// Set when an append to the immutable audit trail throws. The audit log is
     /// the app's local "source of truth"; a failed write must not be silent, so
     /// this surfaces a small warning in the Home / menubar status area. It stays
@@ -265,8 +275,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var whisperConfigSummary: WhisperConfigSummary?
 
     let configuration: AppConfiguration
-    let history: HistoryStore
-    let agentMemory: AgentMemoryStore
     /// 开机自启 (§A). Not private and not republished through `AppModel`: the
     /// Settings row observes it directly, because the switch's position *is*
     /// `status` read off the registrar, and a copy kept here would be one more
@@ -332,13 +340,21 @@ final class AppModel: ObservableObject {
     private func recordEpisodicEvent(for status: AuditEventStatus, _ body: EpisodicEventBody) {
         guard EpisodicEventRecorder.shouldRecord(for: status) else { return }
         let client = sidecarClient
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
             struct Ack: Decodable { let eventId: Int }
-            _ = try? await client.request(
+            let ack: Ack? = try? await client.request(
                 method: "POST",
                 path: "/memory/events",
                 body: body
-            ) as Ack
+            )
+            // One of the two refresh points design §3.7 calls for (the other
+            // is the dictation page's own `.task` on open): a row that just
+            // landed should show up without the user having to leave and
+            // reopen the page. Only on success — a failed write recorded
+            // nothing new to show.
+            if ack != nil {
+                await self?.refreshHistory()
+            }
         }
     }
 
@@ -573,13 +589,6 @@ final class AppModel: ObservableObject {
 
     init() {
         self.configuration = AppConfiguration()
-        self.history = HistoryStore()
-        self.agentMemory = AgentMemoryStore()
-        self.agentMemory.importHistoryIfNeeded(self.history.entries)
-        self.agentMemory.refreshOwnerProfileIfNeeded(
-            enabled: self.configuration.agentMemoryEnabled
-                && self.configuration.automaticOwnerProfileUpdates
-        )
         self.overlay.onRequestDismiss = { [weak self] in
             self?.dismissVoiceSurface()
         }
@@ -1382,12 +1391,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func changeAutomaticOwnerProfileUpdates(_ enabled: Bool) {
-        configuration.automaticOwnerProfileUpdates = enabled
-        guard enabled, configuration.agentMemoryEnabled else { return }
-        agentMemory.refreshOwnerProfileIfNeeded(enabled: true)
-    }
-
     func copyLastResult() {
         guard !lastResult.isEmpty else { return }
         contextBridge.copyToClipboard(lastResult)
@@ -1425,48 +1428,130 @@ final class AppModel: ObservableObject {
         path: "/memory/context-log"
     )
 
-    /// Clears local input history, then best-effort clears the sidecar's
-    /// context-debug log so 「重置输入历史」 actually removes both halves of what
-    /// it promises: the local record the 会话 list reads, and the first-200-
-    /// characters-of-every-ask/agent-input log the sidecar keeps alongside it
-    /// (`sidecar/src/oneshot/contextDebugLog.ts`). `history.clear()` runs
-    /// first, synchronous and unconditional — the confirmation dialog has
-    /// already told the user the local clear happened, so it is never gated
-    /// on, nor rolled back by, the sidecar call. That call is fired from a
-    /// detached Task so this method stays synchronous and
-    /// `ClearLocalDataPage`'s button action keeps calling it directly —
-    /// `refreshUsageStats()` above is the same shape. A failure is recorded
-    /// to `historyResetError` rather than dropped, and cleared on the next
-    /// successful reset so a stale failure can't misreport a later good one.
-    func resetHistory() {
-        history.clear()
+    /// The HTTP method/path shape shared by every `/memory/events` call the
+    /// dictation history page makes now that it reads the sidecar's
+    /// `episodic_events` table instead of the local `history.json`
+    /// (Task 7, design §3.7). Same discipline as `ContextLogResetRequest`
+    /// above: pulled out as its own value so a test can pin the exact
+    /// method/path without constructing a live `AppModel`
+    /// (`HistoryEventsRequestTests`), and each constant is its one reader.
+    struct HistoryEventsRequest: Equatable {
+        let method: String
+        let path: String
+    }
+    /// `EVENTS_LIMIT_CEILING` in `sidecar/src/memory/routes.ts` is 200 — the
+    /// history page wants everything the sidecar will hand back in one page,
+    /// not the smaller default a caller that omitted `limit` would get.
+    nonisolated static let historyEventsFetchRequest = HistoryEventsRequest(
+        method: "GET",
+        path: "/memory/events?limit=200"
+    )
+    /// A function, not a constant, because unlike the fetch/reset requests
+    /// the path is per-row.
+    nonisolated static func historyEventsDeleteRequest(id: Int) -> HistoryEventsRequest {
+        HistoryEventsRequest(method: "DELETE", path: "/memory/events/\(id)")
+    }
+    nonisolated static let historyEventsResetRequest = HistoryEventsRequest(
+        method: "DELETE",
+        path: "/memory/events"
+    )
 
-        let request = Self.contextLogResetRequest
+    /// Fetches the dictation history page's data from the sidecar's
+    /// `episodic_events` table and folds the result into `historyLoadState`
+    /// via `HistoryLoadState.afterFetch` — a failed fetch degrades to
+    /// `.unavailable` rather than silently becoming an empty list. Best-
+    /// effort, like every other memory read in this file: `try?` swallows
+    /// the specific error, since `afterFetch`/`.unavailable` is what carries
+    /// the failure forward for the UI to react to.
+    func refreshHistory() async {
+        struct Body: Decodable { let events: [EpisodicEventDTO] }
+        let request = Self.historyEventsFetchRequest
+        let body: Body? = try? await sidecarClient.request(
+            method: request.method,
+            path: request.path
+        )
+        let fetched = body.map { $0.events.map(HistoryEntry.init(from:)) }
+        historyLoadState = .afterFetch(fetched, previous: historyLoadState)
+    }
+
+    /// Deletes one row from the sidecar's `episodic_events` table (the
+    /// context menu's "删除" action), then re-fetches so the list reflects
+    /// the change — there is no local mutation to apply optimistically,
+    /// since `historyLoadState` only ever holds what the sidecar last
+    /// confirmed.
+    func deleteHistoryEntry(id: Int) async {
+        let request = Self.historyEventsDeleteRequest(id: id)
+        _ = try? await sidecarClient.request(
+            method: request.method,
+            path: request.path
+        ) as MemoryDeletionResponseBody
+        await refreshHistory()
+    }
+
+    /// Best-effort clears the sidecar's `episodic_events` table and its
+    /// context-debug log so 「重置输入历史」 actually removes every store it
+    /// promises: the sidecar rows the 听写 history page reads (Task 7, design
+    /// §3.7 — the local `history.json` this used to also clear is gone along
+    /// with `HistoryStore` itself, Task 8), and the
+    /// first-200-characters-of-every-ask/agent-input log the sidecar keeps
+    /// alongside them (`sidecar/src/oneshot/contextDebugLog.ts`). Both
+    /// sidecar calls fire from a detached Task so this method stays
+    /// synchronous and `ClearLocalDataPage`'s button action keeps calling it
+    /// directly — `refreshUsageStats()` above is the same shape. A failure
+    /// from either leg is recorded to `historyResetError` rather than
+    /// dropped, and cleared on the next successful reset so a stale failure
+    /// can't misreport a later good one. The events request is additive
+    /// alongside the existing context-log request, not a replacement for it
+    /// — dropping the context-log call would silently stop clearing that
+    /// log.
+    func resetHistory() {
+        let eventsRequest = Self.historyEventsResetRequest
+        let contextLogRequest = Self.contextLogResetRequest
         let client = sidecarClient
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
+            var failureMessage: String?
+
             do {
                 let _: MemoryDeletionResponseBody = try await client.request(
-                    method: request.method,
-                    path: request.path
+                    method: eventsRequest.method,
+                    path: eventsRequest.path
                 )
-                await MainActor.run { [weak self] in self?.historyResetError = nil }
             } catch {
-                let message = ErrorMessagePresenter.message(for: error)
-                await MainActor.run { [weak self] in self?.historyResetError = message }
+                failureMessage = ErrorMessagePresenter.message(for: error)
             }
+
+            do {
+                let _: MemoryDeletionResponseBody = try await client.request(
+                    method: contextLogRequest.method,
+                    path: contextLogRequest.path
+                )
+            } catch {
+                failureMessage = ErrorMessagePresenter.message(for: error)
+            }
+
+            // Re-bound to a non-optional `let` before crossing back into
+            // the two `await`s below — referencing the weak-optional `self`
+            // itself from two different concurrently-scheduled continuations
+            // is exactly what trips the Swift 6 Sendable-closure-capture
+            // diagnostic.
+            guard let self else { return }
+            let message = failureMessage
+            await MainActor.run { self.historyResetError = message }
+            await self.refreshHistory()
         }
     }
 
-    func resetAgentMemory() {
-        agentMemory.clear()
-    }
-
     func reuse(_ entry: HistoryEntry) {
-        lastResult = entry.result
+        // A row that recorded but never delivered (`entry.result == nil`)
+        // has nothing of its own to reuse — the transcript is the closest
+        // available stand-in, same as `EpisodicEventDTO`'s "corrected, not
+        // raw" choice elsewhere in this migration.
+        let text = entry.result ?? entry.transcript
+        lastResult = text
         lastTranscript = entry.transcript
         lastApplication = entry.applicationName
         lastResultWasPractice = false
-        contextBridge.copyToClipboard(entry.result)
+        contextBridge.copyToClipboard(text)
     }
 
     func quit() {
@@ -2394,20 +2479,6 @@ final class AppModel: ObservableObject {
                 completionState = .copied
             }
             self.contextBridge.copyToClipboard(finalText)
-
-            if self.configuration.keepHistory {
-                self.history.add(
-                    HistoryEntry(
-                        mode: .transcribe,
-                        applicationName: session.capturedContext.applicationName,
-                        transcript: panelState.originalTranscript,
-                        result: finalText,
-                        contextPreview: session.capturedContext.selectedText.map {
-                            String($0.prefix(240))
-                        }
-                    )
-                )
-            }
 
             self.recordAuditEvent(
                 ImmutableAuditEvent(
@@ -3856,37 +3927,6 @@ final class AppModel: ObservableObject {
             // or undid has been said already.
             overlay.learningNote = nil
 
-            if configuration.agentMemoryEnabled, !practice {
-                agentMemory.record(
-                    MemoryEvent(
-                        mode: mode,
-                        applicationName: capturedContext.applicationName,
-                        bundleIdentifier: capturedContext.bundleIdentifier,
-                        rawTranscript: rawTranscript,
-                        effectiveInput: transcript,
-                        selectedContext: capturedContext.selectedText,
-                        result: result
-                    )
-                )
-                agentMemory.refreshOwnerProfileIfNeeded(
-                    enabled: configuration.automaticOwnerProfileUpdates
-                )
-            }
-
-            if configuration.keepHistory, !practice {
-                history.add(
-                    HistoryEntry(
-                        mode: mode,
-                        applicationName: capturedContext.applicationName,
-                        transcript: transcript,
-                        result: result,
-                        contextPreview: capturedContext.selectedText.map {
-                            String($0.prefix(240))
-                        }
-                    )
-                )
-            }
-
             var completionState: ProcessingState = .success
             var insertSucceeded = false
             let deliveryStrategy = OutputDeliveryPolicy.strategy(
@@ -4352,36 +4392,6 @@ final class AppModel: ObservableObject {
             lastResultWasPractice = practice
             lastDeliveryNotice = nil
 
-            if configuration.agentMemoryEnabled, !practice {
-                agentMemory.record(
-                    MemoryEvent(
-                        mode: .ask,
-                        applicationName: context.applicationName,
-                        bundleIdentifier: context.bundleIdentifier,
-                        rawTranscript: transcript,
-                        effectiveInput: transcript,
-                        selectedContext: context.selectedText,
-                        result: result
-                    )
-                )
-                agentMemory.refreshOwnerProfileIfNeeded(
-                    enabled: configuration.automaticOwnerProfileUpdates
-                )
-            }
-            if configuration.keepHistory, !practice {
-                history.add(
-                    HistoryEntry(
-                        mode: .ask,
-                        applicationName: context.applicationName,
-                        transcript: transcript,
-                        result: result,
-                        contextPreview: context.selectedText.map {
-                            String($0.prefix(240))
-                        }
-                    )
-                )
-            }
-
             // Ask answers are clipboard-only (never auto-inserted — see
             // `OutputDeliveryPolicy.strategy(for: .ask, ...)`).
             contextBridge.copyToClipboard(result)
@@ -4727,36 +4737,6 @@ final class AppModel: ObservableObject {
             lastResult = response.result
             lastApplication = context.applicationName
             lastResultWasPractice = practice
-
-            if configuration.agentMemoryEnabled, !practice {
-                agentMemory.record(
-                    MemoryEvent(
-                        mode: .agent,
-                        applicationName: context.applicationName,
-                        bundleIdentifier: context.bundleIdentifier,
-                        rawTranscript: transcript,
-                        effectiveInput: transcript,
-                        selectedContext: context.selectedText,
-                        result: response.result
-                    )
-                )
-                agentMemory.refreshOwnerProfileIfNeeded(
-                    enabled: configuration.automaticOwnerProfileUpdates
-                )
-            }
-            if configuration.keepHistory, !practice {
-                history.add(
-                    HistoryEntry(
-                        mode: .agent,
-                        applicationName: context.applicationName,
-                        transcript: transcript,
-                        result: response.result,
-                        contextPreview: context.selectedText.map {
-                            String($0.prefix(240))
-                        }
-                    )
-                )
-            }
 
             contextBridge.copyToClipboard(response.result)
         } catch {

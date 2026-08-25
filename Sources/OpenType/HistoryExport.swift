@@ -107,7 +107,7 @@ enum HistoryExport {
 
         ### Result
 
-        \(entry.result)
+        \(entry.result ?? "—")
         """
         if let contextPreview = entry.contextPreview {
             section += "\n\n### Context\n\n\(contextPreview)"

@@ -68,19 +68,6 @@ final class AppConfiguration: ObservableObject {
         didSet { defaults.set(keepHistory, forKey: Keys.keepHistory) }
     }
 
-    @Published var agentMemoryEnabled: Bool {
-        didSet { defaults.set(agentMemoryEnabled, forKey: Keys.agentMemoryEnabled) }
-    }
-
-    @Published var automaticOwnerProfileUpdates: Bool {
-        didSet {
-            defaults.set(
-                automaticOwnerProfileUpdates,
-                forKey: Keys.automaticOwnerProfileUpdates
-            )
-        }
-    }
-
     @Published var playFeedbackSounds: Bool {
         didSet { defaults.set(playFeedbackSounds, forKey: Keys.playFeedbackSounds) }
     }
@@ -208,10 +195,6 @@ final class AppConfiguration: ObservableObject {
             forKey: Keys.retainClipboardAfterInsert
         ) as? Bool ?? false
         keepHistory = defaults.object(forKey: Keys.keepHistory) as? Bool ?? true
-        agentMemoryEnabled = defaults.object(forKey: Keys.agentMemoryEnabled) as? Bool ?? true
-        automaticOwnerProfileUpdates = defaults.object(
-            forKey: Keys.automaticOwnerProfileUpdates
-        ) as? Bool ?? true
         playFeedbackSounds = defaults.object(forKey: Keys.playFeedbackSounds) as? Bool ?? true
         liveCaptionsEnabled = defaults.object(forKey: Keys.liveCaptionsEnabled) as? Bool ?? true
         launchAtLogin = defaults.object(forKey: Keys.launchAtLogin) as? Bool ?? false
@@ -250,8 +233,6 @@ final class AppConfiguration: ObservableObject {
         static let automaticallyInsert = "automaticallyInsert"
         static let retainClipboardAfterInsert = "retainClipboardAfterInsert"
         static let keepHistory = "keepHistory"
-        static let agentMemoryEnabled = "agentMemoryEnabled"
-        static let automaticOwnerProfileUpdates = "automaticOwnerProfileUpdates"
         static let playFeedbackSounds = "playFeedbackSounds"
         static let liveCaptionsEnabled = "liveCaptionsEnabled"
         static let launchAtLogin = "launchAtLogin"

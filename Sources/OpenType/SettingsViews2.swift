@@ -38,7 +38,6 @@ import SwiftUI
 struct SettingsColumn: View {
     @ObservedObject var model: AppModel
     @ObservedObject var configuration: AppConfiguration
-    @ObservedObject var agentMemory: AgentMemoryStore
     /// Observed directly rather than read through `model`: the login item's
     /// state is the system's, not ours, and this is the object that re-reads
     /// it. See `LaunchAtLogin.swift`.
@@ -52,7 +51,6 @@ struct SettingsColumn: View {
     init(model: AppModel) {
         self.model = model
         configuration = model.configuration
-        agentMemory = model.agentMemory
         launchAtLogin = model.launchAtLogin
     }
 
@@ -565,35 +563,6 @@ struct SettingsColumn: View {
         SettingsGroup(OpenTypeL10n.text("数据", english: "Data")) {
             SettingsRow(
                 divided: false,
-                title: OpenTypeL10n.text("本地长期记忆", english: "Local long-term memory"),
-                subtitle: OpenTypeL10n.text(
-                    "听写内容不参与整理，也不发给模型",
-                    english: "Dictation is never consolidated and never sent to a model"
-                )
-            ) {
-                SettingsSwitch(isOn: $configuration.agentMemoryEnabled)
-                    .accessibilityLabel(
-                        OpenTypeL10n.text("本地长期记忆", english: "Local long-term memory")
-                    )
-            }
-
-            SettingsRow(
-                title: OpenTypeL10n.text("每 100 条更新已学到的偏好", english: "Relearn preferences every 100 records"),
-                subtitle: automaticProfileUpdateDescription
-            ) {
-                SettingsSwitch(
-                    isOn: Binding(
-                        get: { configuration.automaticOwnerProfileUpdates },
-                        set: { model.changeAutomaticOwnerProfileUpdates($0) }
-                    )
-                )
-                .accessibilityLabel(
-                    OpenTypeL10n.text("每 100 条更新已学到的偏好", english: "Relearn preferences every 100 records")
-                )
-            }
-            .disabled(!configuration.agentMemoryEnabled)
-
-            SettingsRow(
                 title: OpenTypeL10n.text("保留本地输入历史", english: "Keep local input history"),
                 subtitle: OpenTypeL10n.text(
                     "关闭后不再写入听写记录；审计记录不受影响",
@@ -740,24 +709,6 @@ struct SettingsColumn: View {
         }
     }
 
-    private var automaticProfileUpdateDescription: String {
-        guard configuration.automaticOwnerProfileUpdates else {
-            return OpenTypeL10n.text(
-                "已暂停自动更新；已有内容会保留。",
-                english: "Automatic updates are paused; existing content is kept."
-            )
-        }
-        if agentMemory.automaticProfileUpdateDue {
-            return OpenTypeL10n.text(
-                "已达到更新条件，下次启动或完成输入时将更新。",
-                english: "Ready to update on the next launch or completed input."
-            )
-        }
-        return OpenTypeL10n.text(
-            "已记录 \(agentMemory.eventCount) 条；到 \(agentMemory.nextAutomaticProfileEventCount) 条时更新。",
-            english: "\(agentMemory.eventCount) recorded; the next update lands at \(agentMemory.nextAutomaticProfileEventCount)."
-        )
-    }
 }
 
 // MARK: - The pushed sub-pages
@@ -911,8 +862,10 @@ private struct AuditLogPage: View {
     }
 }
 
-/// 清除本地数据: the two resettable local stores, each with its own
-/// confirmation.
+/// 清除本地数据: the resettable local store, with its own confirmation. Used to
+/// list two stores (input history and the now-deleted local long-term
+/// `AgentMemoryStore`) — the second one and its "重新学习" reset went with it
+/// (Task 8, design §3.7's HistoryStore/AgentMemoryStore removal).
 ///
 /// A page rather than a `DisclosureGroup`. The twisty made a destructive
 /// action feel like a detail of the section above it; a page you have to
@@ -920,14 +873,11 @@ private struct AuditLogPage: View {
 /// to live that is not a popover over a settings list.
 private struct ClearLocalDataPage: View {
     @ObservedObject var model: AppModel
-    @ObservedObject var agentMemory: AgentMemoryStore
 
     @State private var confirmingHistoryReset = false
-    @State private var confirmingMemoryReset = false
 
     init(model: AppModel) {
         self.model = model
-        agentMemory = model.agentMemory
     }
 
     var body: some View {
@@ -958,8 +908,8 @@ private struct ClearLocalDataPage: View {
                     divided: false,
                     title: OpenTypeL10n.text("输入历史", english: "Input history"),
                     subtitle: OpenTypeL10n.text(
-                        "\(model.history.entries.count) 条本地记录",
-                        english: "\(model.history.entries.count) local records"
+                        "\(model.historyEntries.count) 条本地记录",
+                        english: "\(model.historyEntries.count) local records"
                     )
                 ) {
                     SmallButton(
@@ -968,34 +918,7 @@ private struct ClearLocalDataPage: View {
                     ) {
                         confirmingHistoryReset = true
                     }
-                    .disabled(model.history.entries.isEmpty)
-                }
-
-                SettingsRow(
-                    title: OpenTypeL10n.text("长期记忆", english: "Long-term memory"),
-                    subtitle: OpenTypeL10n.text(
-                        "\(agentMemory.eventCount) 条学习记录",
-                        english: "\(agentMemory.eventCount) learned records"
-                    )
-                ) {
-                    SmallButton(
-                        OpenTypeL10n.text("重新学习", english: "Relearn"),
-                        destructive: true
-                    ) {
-                        confirmingMemoryReset = true
-                    }
-                    .disabled(agentMemory.eventCount == 0)
-                }
-
-                SettingsRow(
-                    title: OpenTypeL10n.text("记忆数据库", english: "Memory database"),
-                    mono: agentMemory.databaseURL.lastPathComponent,
-                    statusDot: agentMemory.databaseReady ? DS.Colour.ok : DS.Colour.warning
-                ) {
-                    SmallButton(OpenTypeL10n.text("在访达中显示", english: "Show in Finder")) {
-                        NSWorkspace.shared.activateFileViewerSelecting([agentMemory.databaseURL])
-                    }
-                    .disabled(!agentMemory.databaseReady)
+                    .disabled(model.historyEntries.isEmpty)
                 }
             }
             .dsCard()
@@ -1013,21 +936,6 @@ private struct ClearLocalDataPage: View {
             Text(OpenTypeL10n.text(
                 "本机保存的输入记录会被移除。此操作不可撤销，建议先保存重要信息。",
                 english: "Locally stored input records are removed. This cannot be undone — save anything you need first."
-            ))
-        }
-        .confirmationDialog(
-            OpenTypeL10n.text("重新学习偏好？", english: "Relearn preferences?"),
-            isPresented: $confirmingMemoryReset,
-            titleVisibility: .visible
-        ) {
-            Button(OpenTypeL10n.text("确认重新学习", english: "Relearn"), role: .destructive) {
-                model.resetAgentMemory()
-            }
-            Button(OpenTypeL10n.text("取消", english: "Cancel"), role: .cancel) {}
-        } message: {
-            Text(OpenTypeL10n.text(
-                "本地任务记录和系统推断会被移除。此操作不可撤销，建议先保存重要信息。",
-                english: "Local task records and inferred preferences are removed. This cannot be undone — save anything you need first."
             ))
         }
     }

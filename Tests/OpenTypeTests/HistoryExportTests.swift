@@ -192,6 +192,52 @@ final class HistoryExportMarkdownTests: XCTestCase {
         )
     }
 
+    /// `HistoryEntry.result` became `String?` in Task 7 of
+    /// `docs/superpowers/plans/2026-08-25-unified-memory-and-recent-context.md`
+    /// (a row can now be "recorded, nothing delivered" —
+    /// `HistoryEntryMappingTests.swift` pins that `nil` stays `nil` rather
+    /// than echoing the transcript). `entrySection`'s `\(entry.result)`
+    /// interpolation compiles unchanged against an `Optional<String>` — Swift
+    /// does not error on that — so nothing before this test would have caught
+    /// it printing the string `Optional("…")`, or bare `nil`, straight into a
+    /// file a user opens in a text editor.
+    ///
+    /// Chosen rendering: keep the `### Result` heading present — an omitted
+    /// section would be ambiguous between "nothing delivered" and "exported
+    /// by an older build that had no such row", the same shape of ambiguity
+    /// decision 4 above already rules out for the identical-to-transcript
+    /// case — and render the body as a bare em dash rather than an empty
+    /// string. Empty was rejected because it is reachable for a real,
+    /// non-nil result too (e.g. a `tidy` rewrite that trims a transcript down
+    /// to nothing), so an empty `### Result` body would be confusable with
+    /// "delivered the empty string" instead of unambiguously meaning
+    /// "nothing was delivered".
+    func testANilResultRendersAsAnExplicitPlaceholderNotSwiftsOptionalDescription() {
+        let markdown = HistoryExport.markdown(
+            entries: [entry(result: nil)],
+            exportedAt: exportedAt
+        )
+
+        // Two assertions below that look redundant are not — keep both.
+        //  - The bare-`nil` check is the one that actually fails without the
+        //    fix: `\(entry.result)` for a genuinely-nil `Optional<String>`
+        //    interpolates as the literal text "nil", never "Optional(nil)".
+        //  - The `Optional(` check is vacuous on *this* nil-result input —
+        //    nothing here would ever produce that text — but it stays as
+        //    the guard against a *different* regression: a non-nil result
+        //    getting double-wrapped upstream (e.g. `String??`). That shape
+        //    of bug is otherwise only caught by `testHistoryMarkdownSnapshot`'s
+        //    exact-string comparison over a *non-nil* result, so removing
+        //    this line as "redundant" would quietly drop coverage for the
+        //    nil-result path of that same failure mode.
+        XCTAssertFalse(markdown.contains("### Result\n\nnil"), "must not print the bare word nil")
+        XCTAssertFalse(markdown.contains("Optional("), "must not leak Swift's Optional description")
+        XCTAssertTrue(
+            markdown.contains("### Result\n\n—"),
+            "expected the heading to stay present with an em-dash placeholder body"
+        )
+    }
+
     func testTheContextSectionIsOmittedWhenThereIsNoContext() {
         let markdown = HistoryExport.markdown(
             entries: [entry(contextPreview: nil)],
@@ -407,12 +453,19 @@ final class HistoryExportMarkdownTests: XCTestCase {
 
     // MARK: - Fixtures
 
+    // `result` became `String?` in Task 7 of `docs/superpowers/plans/
+    // 2026-08-25-unified-memory-and-recent-context.md` (a row can now be
+    // "recorded, nothing delivered") — widened here from `String` so
+    // `testANilResultRendersAsAnExplicitPlaceholderNotSwiftsOptionalDescription`
+    // below can pass `nil`. Every other call site keeps passing a plain
+    // `String` literal, which still compiles unchanged (implicit promotion to
+    // the optional parameter).
     private func entry(
         createdAt: Date = Date(timeIntervalSince1970: 1_755_000_000),
         mode: InputMode = .transcribe,
         applicationName: String = "Xcode",
         transcript: String = "把这段话记下来",
-        result: String = "把这段话记下来。",
+        result: String? = "把这段话记下来。",
         contextPreview: String? = nil
     ) -> HistoryEntry {
         HistoryEntry(
@@ -527,6 +580,38 @@ final class HistoryExportJSONTests: XCTestCase {
 
         XCTAssertEqual(document.entries.first?.transcript.count, 20_000)
         XCTAssertEqual(document.entries.first?.transcript, transcript)
+    }
+
+    /// Companion to the Markdown placeholder test above: JSON is the archive
+    /// format (decision 3), so the em-dash rendering chosen for Markdown must
+    /// stay purely cosmetic and never leak into the round-trippable format.
+    /// `HistoryEntry` is a plain `Codable` struct, so a `nil` `result` is
+    /// expected to already round-trip correctly via `encodeIfPresent` with no
+    /// extra code — this test exists to prove that expectation rather than
+    /// leave it assumed, the same way `testMigratedRowsKeepTheirFieldsIncludingAnAbsentContextPreview`
+    /// in `HistoryStoreDeleteTests.swift` proves it for `contextPreview`.
+    func testJSONResultRoundTripsAsNilRatherThanThePlaceholder() throws {
+        // Spelled out in full rather than calling `entry(...)` — that helper
+        // is `private` to the sibling `HistoryExportMarkdownTests` class,
+        // scoped to its enclosing type (not the file), so it is not visible
+        // here; this class's other tests already build `HistoryEntry`
+        // directly for the same reason.
+        let entries = [
+            HistoryEntry(
+                createdAt: Date(timeIntervalSince1970: 1_755_000_000),
+                mode: .transcribe,
+                applicationName: "Xcode",
+                transcript: "把这段话记下来",
+                result: nil,
+                contextPreview: nil
+            ),
+        ]
+
+        let document = try HistoryExport.decodeHistory(
+            HistoryExport.json(entries: entries, exportedAt: exportedAt)
+        )
+
+        XCTAssertNil(document.entries.first?.result)
     }
 
     func testAnEmptyHistoryExportsAsAValidEmptyDocument() throws {

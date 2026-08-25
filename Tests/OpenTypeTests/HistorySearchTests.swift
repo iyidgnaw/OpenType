@@ -270,22 +270,29 @@ final class HistorySearchMatchingTests: XCTestCase {
 
     // MARK: - Fixtures
 
+    // `id` is `Int` as of Task 7 of `docs/superpowers/plans/
+    // 2026-08-25-unified-memory-and-recent-context.md` (it is now the
+    // sidecar's `eventId`) — only these construction sites change; every
+    // assertion above matches on `.transcript`/`.result`/`.applicationName`
+    // and is untouched, exactly as that plan's Task 7 requires ("断言不变").
+    // The old `uuid(_:)` fixture helper is gone with it; a plain `Int` needs
+    // no formatting helper of its own.
     private func sampleEntries() -> [HistoryEntry] {
         [
             entry(
-                id: uuid(1),
+                id: 1,
                 applicationName: "Xcode",
                 transcript: "把发布计划整理成三条",
                 result: "1. …"
             ),
             entry(
-                id: uuid(2),
+                id: 2,
                 applicationName: "微信",
                 transcript: "晚点聊",
                 result: "晚点聊"
             ),
             entry(
-                id: uuid(3),
+                id: 3,
                 applicationName: "Safari",
                 transcript: "灰度发布的范围是多少",
                 result: "先放 5%"
@@ -294,7 +301,7 @@ final class HistorySearchMatchingTests: XCTestCase {
     }
 
     private func entry(
-        id: UUID = UUID(),
+        id: Int = 0,
         applicationName: String,
         transcript: String,
         result: String,
@@ -309,10 +316,6 @@ final class HistorySearchMatchingTests: XCTestCase {
             result: result,
             contextPreview: contextPreview
         )
-    }
-
-    private func uuid(_ index: Int) -> UUID {
-        UUID(uuidString: "00000000-0000-0000-0000-\(String(format: "%012d", index))")!
     }
 }
 

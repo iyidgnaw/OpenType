@@ -1281,22 +1281,28 @@ struct CapturedContext {
     var bundleIdentifier: String?
 }
 
+/// As of Task 7 of `docs/superpowers/plans/
+/// 2026-08-25-unified-memory-and-recent-context.md` this is fed from the
+/// sidecar's `episodic_events` table (`GET /memory/events`, via
+/// `EpisodicEventDTO`) rather than the local `history.json` — `id` is now the
+/// sidecar's `eventId`, and `result` is optional because a recorded episode
+/// may never have been delivered. See `HistoryEntry.init(from:)` below.
 struct HistoryEntry: Codable, Identifiable, Equatable {
-    let id: UUID
+    let id: Int
     let createdAt: Date
     let mode: InputMode
     let applicationName: String
     let transcript: String
-    let result: String
+    let result: String?
     let contextPreview: String?
 
     init(
-        id: UUID = UUID(),
+        id: Int = 0,
         createdAt: Date = Date(),
         mode: InputMode,
         applicationName: String,
         transcript: String,
-        result: String,
+        result: String?,
         contextPreview: String?
     ) {
         self.id = id
@@ -1309,180 +1315,103 @@ struct HistoryEntry: Codable, Identifiable, Equatable {
     }
 }
 
-struct AgentTaskMemory: Codable, Identifiable, Equatable {
-    let id: UUID
-    let createdAt: Date
-    let request: String
-    let outcome: String
-    let applicationName: String
-    let referencePreview: String?
-
-    init(
-        id: UUID = UUID(),
-        createdAt: Date = Date(),
-        request: String,
-        outcome: String,
-        applicationName: String,
-        referencePreview: String?
-    ) {
-        self.id = id
-        self.createdAt = createdAt
-        self.request = request
-        self.outcome = outcome
-        self.applicationName = applicationName
-        self.referencePreview = referencePreview
-    }
-
-    var estimatedPromptCharacters: Int {
-        min(request.count, 900)
-            + min(outcome.count, 2_400)
-            + min(referencePreview?.count ?? 0, 600)
-            + applicationName.count
-            + 120
-    }
-}
-
-struct MemoryEvent: Identifiable, Equatable {
-    let id: UUID
-    let createdAt: Date
-    let mode: InputMode
-    let applicationName: String
-    let bundleIdentifier: String?
+/// One row of the sidecar's `GET /memory/events` response — a raw
+/// `SELECT * FROM episodic_events` (`sidecar/src/memory/routes.ts`,
+/// `sidecar/src/memory/MemoryStore.ts`'s `EpisodicEventRow`). `createdAt` is
+/// milliseconds since epoch (the sidecar's SQLite convention); an unmapped
+/// wire field such as `consolidatedAt` is simply ignored by `Decodable`.
+struct EpisodicEventDTO: Decodable {
+    let id: Int
+    let createdAt: Int
+    let mode: String
     let rawTranscript: String
-    let effectiveInput: String
+    let correctedTranscript: String
+    let effectiveInput: String?
     let selectedContext: String?
-    let result: String
+    let result: String?
+    let applicationName: String
+    let origin: String
+    let conversationId: Int?
+}
 
-    init(
-        id: UUID = UUID(),
-        createdAt: Date = Date(),
-        mode: InputMode,
-        applicationName: String,
-        bundleIdentifier: String?,
-        rawTranscript: String,
-        effectiveInput: String,
-        selectedContext: String?,
-        result: String
-    ) {
-        self.id = id
-        self.createdAt = createdAt
-        self.mode = mode
-        self.applicationName = applicationName
-        self.bundleIdentifier = bundleIdentifier
-        self.rawTranscript = rawTranscript
-        self.effectiveInput = effectiveInput
-        self.selectedContext = selectedContext
-        self.result = result
+extension HistoryEntry {
+    /// Maps one sidecar episodic-event row onto the view model
+    /// `HistorySearch`/`HistoryExport`/`DictationViews` already know how to
+    /// render. Design §3.7 pins the specifics: `transcript` comes from
+    /// `correctedTranscript` (the entity-dictionary-corrected reading the
+    /// dictation list has always shown), `result` maps straight through
+    /// without ever being backfilled from the transcript (a row with nothing
+    /// delivered must stay visibly distinct from one that delivered the
+    /// original text verbatim), and `contextPreview` re-truncates the wire's
+    /// full `selectedContext` to 240 characters — the same cut every
+    /// pre-migration call site applied before storing, since the field
+    /// renders inside a list row.
+    init(from dto: EpisodicEventDTO) {
+        self.init(
+            id: dto.id,
+            createdAt: Date(timeIntervalSince1970: TimeInterval(dto.createdAt) / 1000),
+            mode: InputMode(rawValue: dto.mode) ?? .transcribe,
+            applicationName: dto.applicationName,
+            transcript: dto.correctedTranscript,
+            result: dto.result,
+            contextPreview: dto.selectedContext.map { String($0.prefix(240)) }
+        )
     }
 }
 
-enum ProfileLanguagePreference: String, CaseIterable, Codable, Identifiable {
-    case followInput
-    case chinese
-    case english
+/// What the dictation history page knows about its own data, beyond the list
+/// of entries itself — specifically, whether the list on screen can be
+/// trusted as "genuinely empty" or merely "could not be confirmed right now".
+///
+/// `[HistoryEntry]` alone cannot distinguish "never fetched", "fetched and
+/// found nothing", and "the last fetch failed" — and collapsing all three to
+/// `[]` makes a briefly-down sidecar tell the user their history is gone.
+/// `.unavailable(lastKnown:)` exists precisely to keep a failed refresh from
+/// blanking a list already on screen: it carries forward whatever was last
+/// successfully loaded (`[]` if nothing ever was), so a transient failure
+/// degrades to "can't confirm, showing what I last had" rather than "empty".
+/// A successful empty fetch, by contrast, is real information and is trusted
+/// as `.loaded([])`.
+enum HistoryLoadState: Equatable {
+    case notYetLoaded
+    case loaded([HistoryEntry])
+    case unavailable(lastKnown: [HistoryEntry])
 
-    var id: String { rawValue }
-
-    var title: String {
+    /// `[]` for `.notYetLoaded`; otherwise whatever this state is carrying.
+    var entries: [HistoryEntry] {
         switch self {
-        case .followInput:
-            return OpenTypeL10n.text(
-                "跟随当前模式与输入",
-                english: "Follow the current mode and input"
-            )
-        case .chinese:
-            return OpenTypeL10n.text(
-                "中文（仅在未指定时）",
-                english: "Chinese (only when unspecified)"
-            )
-        case .english:
-            return OpenTypeL10n.text(
-                "English（仅在未指定时）",
-                english: "English (only when unspecified)"
-            )
+        case .notYetLoaded: return []
+        case .loaded(let entries): return entries
+        case .unavailable(let lastKnown): return lastKnown
         }
     }
-}
 
-struct OwnerProfile: Codable, Equatable {
-    var identityAndWork: String
-    var communicationStyle: String
-    var importantTerms: String
-    var preferredLanguage: ProfileLanguagePreference
-    var updatedAt: Date?
-
-    init(
-        identityAndWork: String,
-        communicationStyle: String,
-        importantTerms: String,
-        preferredLanguage: ProfileLanguagePreference = .followInput,
-        updatedAt: Date? = nil
-    ) {
-        self.identityAndWork = identityAndWork
-        self.communicationStyle = communicationStyle
-        self.importantTerms = importantTerms
-        self.preferredLanguage = preferredLanguage
-        self.updatedAt = updatedAt
+    /// True only for a successful load that genuinely found zero rows — never
+    /// for `.notYetLoaded` (nothing has been confirmed yet) and never for
+    /// `.unavailable` (a failed fetch proves nothing about whether history is
+    /// empty, however it happens to have last known it).
+    var isConfirmedEmpty: Bool {
+        if case .loaded(let entries) = self { return entries.isEmpty }
+        return false
     }
 
-    static let empty = OwnerProfile(
-        identityAndWork: "",
-        communicationStyle: "",
-        importantTerms: "",
-        preferredLanguage: .followInput,
-        updatedAt: nil
-    )
-
-    var isEmpty: Bool {
-        let textFieldsAreEmpty = [
-            identityAndWork,
-            communicationStyle,
-            importantTerms
-        ].allSatisfy {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// Folds one fetch result into the previous state. `fetchedEntries ==
+    /// nil` means the fetch failed and moves to `.unavailable`, carrying
+    /// forward `previous`'s own entries rather than dropping to `[]` — two
+    /// failures in a row must not compound into losing the last
+    /// *successfully* loaded list a second time. A non-nil result — including
+    /// an empty array — always wins and becomes `.loaded`.
+    static func afterFetch(
+        _ fetchedEntries: [HistoryEntry]?,
+        previous: HistoryLoadState
+    ) -> HistoryLoadState {
+        guard let fetchedEntries else {
+            return .unavailable(lastKnown: previous.entries)
         }
-        return textFieldsAreEmpty && preferredLanguage == .followInput
+        return .loaded(fetchedEntries)
     }
 }
 
-struct MemoryInsights: Codable, Equatable {
-    let observedTaskCount: Int
-    let commonTerms: [String]
-    let taskDomains: [String]
-    let languagePattern: String?
-    let stylePreferences: [String]
-    let updatedAt: Date
-
-    static let empty = MemoryInsights(
-        observedTaskCount: 0,
-        commonTerms: [],
-        taskDomains: [],
-        languagePattern: nil,
-        stylePreferences: [],
-        updatedAt: .distantPast
-    )
-
-    var isEmpty: Bool {
-        commonTerms.isEmpty
-            && taskDomains.isEmpty
-            && languagePattern == nil
-            && stylePreferences.isEmpty
-    }
-}
-
-struct MemoryProfileContext: Equatable {
-    let ownerProfile: OwnerProfile
-    let insights: MemoryInsights
-
-    static let empty = MemoryProfileContext(
-        ownerProfile: .empty,
-        insights: .empty
-    )
-
-    var isEmpty: Bool {
-        ownerProfile.isEmpty && insights.isEmpty
-    }
-}
 
 enum OpenTypeError: LocalizedError {
     case missingCredential

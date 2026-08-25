@@ -13,9 +13,10 @@ import SwiftUI
 /// are a summary *of* this list, so they belong at the top of it rather than
 /// somewhere you have to remember to look.
 ///
-/// Everything here is derived. `HistoryStore.entries` is the list;
-/// `UsageStats.Summary` is the band. Nothing on this screen is stored for the
-/// sake of being shown.
+/// Everything here is derived. `AppModel.historyEntries` (Task 7, design
+/// §3.7: the sidecar's `episodic_events` table, not the local
+/// `history.json`) is the list; `UsageStats.Summary` is the band. Nothing on
+/// this screen is stored for the sake of being shown.
 
 // MARK: - The page
 
@@ -27,10 +28,6 @@ import SwiftUI
 /// window's breakpoint is a different question with a different answer.
 struct DictationColumn: View {
     @ObservedObject var model: AppModel
-    /// `HistoryStore` is its own `ObservableObject`; observing it (not just
-    /// `model`) is what makes `entries` changes re-render — `model` never
-    /// republishes when the store's `@Published entries` mutates.
-    @ObservedObject var history: HistoryStore
 
     @State private var query = ""
     @State private var source: String?
@@ -66,18 +63,39 @@ struct DictationColumn: View {
                             now: now
                         )
 
-                        if history.entries.isEmpty {
-                            emptyState(
-                                symbol: "clock.arrow.circlepath",
-                                title: OpenTypeL10n.text(
-                                    "还没有听写记录",
-                                    english: "No dictation yet"
-                                ),
-                                subtitle: OpenTypeL10n.text(
-                                    "完成一次语音输入后会出现在这里",
-                                    english: "Your first dictation will show up here"
+                        if model.historyEntries.isEmpty {
+                            // `entries.isEmpty` alone cannot tell "genuinely
+                            // no history" from "the sidecar didn't answer" —
+                            // that is exactly what `isConfirmedEmpty` is for
+                            // (`HistoryLoadState`). An unavailable fetch must
+                            // never render as "no history yet": that reads as
+                            // data loss to a user whose sidecar merely hasn't
+                            // answered a refresh yet.
+                            if model.historyLoadState.isConfirmedEmpty {
+                                emptyState(
+                                    symbol: "clock.arrow.circlepath",
+                                    title: OpenTypeL10n.text(
+                                        "还没有听写记录",
+                                        english: "No dictation yet"
+                                    ),
+                                    subtitle: OpenTypeL10n.text(
+                                        "完成一次语音输入后会出现在这里",
+                                        english: "Your first dictation will show up here"
+                                    )
                                 )
-                            )
+                            } else {
+                                emptyState(
+                                    symbol: "exclamationmark.triangle",
+                                    title: OpenTypeL10n.text(
+                                        "无法读取历史记录",
+                                        english: "Couldn't load history"
+                                    ),
+                                    subtitle: OpenTypeL10n.text(
+                                        "记录可能仍然存在，稍后会重新尝试",
+                                        english: "Your history may still be there — this will retry shortly"
+                                    )
+                                )
+                            }
                         } else if groups.isEmpty {
                             emptyState(
                                 symbol: "magnifyingglass",
@@ -114,11 +132,17 @@ struct DictationColumn: View {
         // never opened that page would otherwise be told the dictionary has
         // learned nothing (D-3).
         .task { await model.refreshMemoryTerms() }
-        // Keyed on the newest entry's identity, not on `entries.count`:
-        // `HistoryStore` caps at 100 and drops the oldest, so past that cap the
-        // count never changes again and a count-watch would silently stop
+        // One of the two refresh points design §3.7 calls for (the other is
+        // `AppModel.recordEpisodicEvent`'s post-success refresh) — this page
+        // reads the sidecar now, not a local file that was always available,
+        // so opening it must actively fetch rather than trust whatever
+        // `historyLoadState` happened to hold from the last time it ran.
+        .task { await model.refreshHistory() }
+        // Keyed on the newest entry's identity, not on `entries.count`: the
+        // sidecar's episodic-events table can shrink and grow past whatever
+        // count was last seen, so a count-watch would silently stop
         // refreshing for exactly the users who dictate most.
-        .onChange(of: history.entries.first?.id) { _ in
+        .onChange(of: model.historyEntries.first?.id) { _ in
             now = Date()
             model.refreshUsageStats()
         }
@@ -295,7 +319,7 @@ struct DictationColumn: View {
     /// choices that can return something.
     private var sources: [String] {
         var seen = Set<String>()
-        return history.entries
+        return model.historyEntries
             .map(\.applicationName)
             .filter { !$0.isEmpty && seen.insert($0).inserted }
             .sorted()
@@ -309,16 +333,16 @@ struct DictationColumn: View {
     /// "export" means "export what I am looking at".
     private var filtered: [HistoryEntry] {
         let bySource = source.map { source in
-            history.entries.filter { $0.applicationName == source }
-        } ?? history.entries
+            model.historyEntries.filter { $0.applicationName == source }
+        } ?? model.historyEntries
         return HistorySearch.filter(bySource, query: query)
     }
 
     private var displayedCount: Int { filtered.count }
 
-    /// `filtered`, cut into calendar days, newest day first. `HistoryStore`
-    /// already stores newest-first, so the rows inside a day keep that order
-    /// without a second sort.
+    /// `filtered`, cut into calendar days, newest day first. `GET
+    /// /memory/events` already returns newest-first, so the rows inside a
+    /// day keep that order without a second sort.
     private var groups: [DictationDay] {
         var order: [Date] = []
         var buckets: [Date: [HistoryEntry]] = [:]
@@ -427,6 +451,12 @@ private struct DictationRow: View {
     @State private var hovering = false
     @State private var showingDeleteConfirmation = false
 
+    /// `entry.result` is optional as of Task 7 — a row can be recorded
+    /// without ever having delivered anything. The transcript is the closest
+    /// available stand-in for "what this row was about", the same fallback
+    /// `AppModel.reuse(_:)` uses for the same case.
+    private var displayText: String { entry.result ?? entry.transcript }
+
     var body: some View {
         HStack(alignment: .top, spacing: DS.Space.content) {
             VStack(alignment: .leading, spacing: 3) {
@@ -441,7 +471,7 @@ private struct DictationRow: View {
             .frame(width: 64, alignment: .leading)
             .padding(.top, 1)
 
-            Text(entry.result)
+            Text(displayText)
                 .font(DS.Text.body())
                 // 13pt at a 1.6 line box: SwiftUI's `lineSpacing` is the extra
                 // gap, not the box, so ~5 rather than ~21.
@@ -456,7 +486,7 @@ private struct DictationRow: View {
                     label: OpenTypeL10n.text("复制", english: "Copy"),
                     rowHovering: hovering
                 ) {
-                    model.copy(entry.result)
+                    model.copy(displayText)
                 }
                 DictationRowAction(
                     symbol: "arrow.counterclockwise",
@@ -487,7 +517,7 @@ private struct DictationRow: View {
             titleVisibility: .visible
         ) {
             Button(OpenTypeL10n.text("确认删除", english: "Delete"), role: .destructive) {
-                model.history.delete(id: entry.id)
+                Task { await model.deleteHistoryEntry(id: entry.id) }
             }
         } message: {
             Text(OpenTypeL10n.text("删除后无法恢复。", english: "This cannot be undone."))

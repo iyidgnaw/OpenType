@@ -56,7 +56,11 @@ enum HistorySearch {
     /// The fields of an entry a query is matched against, joined.
     /// `contextPreview` is deliberately excluded — see the type doc.
     static func searchableText(_ entry: HistoryEntry) -> String {
-        [entry.transcript, entry.result, entry.applicationName].joined(separator: "\n")
+        // `entry.result` is optional as of Task 7 (a row can be recorded
+        // without ever having delivered) — a nil contributes nothing to the
+        // searchable text rather than being coerced into a literal string
+        // that would itself become matchable.
+        [entry.transcript, entry.result ?? "", entry.applicationName].joined(separator: "\n")
     }
 
     static func matches(_ entry: HistoryEntry, query: String) -> Bool {

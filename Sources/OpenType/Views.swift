@@ -59,7 +59,7 @@ struct RootView: View {
         case .sessions:
             SessionsListColumn(model: model)
         case .dictation:
-            DictationColumn(model: model, history: model.history)
+            DictationColumn(model: model)
         case .memory:
             MemoryColumn(model: model)
         case .settings:

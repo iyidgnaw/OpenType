@@ -155,7 +155,7 @@ private struct SidebarColumn: View {
             let count = model.sessionConversations.count
             return count > 0 ? "\(count)" : nil
         case .dictation:
-            let count = model.history.entries.count
+            let count = model.historyEntries.count
             return count > 0 ? "\(count)" : nil
         case .memory, .settings:
             return nil

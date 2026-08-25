@@ -896,3 +896,349 @@ describe("POST /config/mcp/test", () => {
     expect(text).not.toContain("realsecretvalue");
   });
 });
+
+// ---------------------------------------------------------------------------
+// STAGE-1 (red): PUT /config/mcp/:name triggers a live MCP reload
+// ---------------------------------------------------------------------------
+//
+// The gap: MCP connections are established once, at sidecar boot
+// (`server.ts`, `startMcpConnections(resolvedMcpServers.servers)`). A change
+// saved through this panel is persisted but has no effect until the next
+// start. `buildMcpConfigRoutes` gains an injected `onServersChanged?:
+// (servers: McpServerConfig[]) => void` dep -- same shape as the existing
+// `connectionReport?: () => McpConnectionReport` dep above, injected rather
+// than imported for the same testability reason -- and the PUT handler calls
+// it with the newly saved, *enabled* server list after a successful save.
+//
+// `main()` wires `onServersChanged` to the reloadable MCP tool set's
+// `reload(...)` (see `test/agent/mcpReload.test.ts`); these tests only pin
+// the route's side of that seam, with a plain recording spy standing in for
+// the real reload function.
+describe("PUT /config/mcp/:name triggers onServersChanged", () => {
+  beforeEach(() => {
+    store.addServer({
+      name: "filesystem",
+      transport: "stdio",
+      command: "npx",
+      args: [],
+    });
+  });
+
+  test("fires once, with the newly saved server reflected in the list", async () => {
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(
+      app,
+      "PUT",
+      "/config/mcp/filesystem",
+      stdioBody({ command: "bun" })
+    );
+
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    const [servers] = calls;
+    expect(servers).toEqual([
+      expect.objectContaining({ name: "filesystem", command: "bun" }),
+    ]);
+  });
+
+  test("does not fire when the save is rejected as an invalid body (400)", async () => {
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(
+      app,
+      "PUT",
+      "/config/mcp/filesystem",
+      stdioBody({ command: "" })
+    );
+
+    expect(status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  /**
+   * `stdioBody({ command: "" })` above fails inside `candidateFrom`
+   * (`normalizeMcpServer` rejects the shape) before the handler ever reaches
+   * `store.updateServer`. A duplicate name is different: the body is
+   * perfectly well-formed and passes `candidateFrom` cleanly -- the rejection
+   * only happens one call later, *inside* `store.updateServer`'s own
+   * uniqueness check. A wrong implementation that calls `onServersChanged`
+   * right after `candidateFrom` succeeds (reasoning "the body validated, this
+   * must be a save") rather than after `store.updateServer` actually persists
+   * would fire here even though the request ends in a 400 -- this is the one
+   * of the two 400 shapes that can tell that ordering bug apart from a correct
+   * one, since the shape-only 400 above never reaches either call site.
+   */
+  test("does not fire when the save is rejected for a duplicate name (400 from the store, not from validation)", async () => {
+    store.addServer({
+      name: "linear",
+      transport: "http",
+      url: "https://mcp.linear.app/mcp",
+    });
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(
+      app,
+      "PUT",
+      "/config/mcp/linear",
+      httpBody({ name: "filesystem" })
+    );
+
+    expect(status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("does not fire when the addressed server does not exist (404)", async () => {
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(
+      app,
+      "PUT",
+      "/config/mcp/nope",
+      stdioBody({ name: "nope" })
+    );
+
+    expect(status).toBe(404);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("passes only the enabled servers, even when disabled ones exist in the saved config", async () => {
+    store.addServer({
+      name: "disabledOne",
+      transport: "stdio",
+      command: "npx",
+      args: [],
+      enabled: false,
+    });
+    store.addServer({
+      name: "linear",
+      transport: "http",
+      url: "https://mcp.linear.app/mcp",
+    });
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(
+      app,
+      "PUT",
+      "/config/mcp/filesystem",
+      stdioBody({ command: "bun" })
+    );
+
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    const names = (calls[0] as Array<{ name: string }>).map((s) => s.name).sort();
+    expect(names).toEqual(["filesystem", "linear"]);
+    expect(names).not.toContain("disabledOne");
+  });
+
+  /**
+   * The await hazard (found in stage-2 review). `onServersChanged` is a
+   * fire-and-forget notification, never something the PUT handler awaits
+   * before responding -- a reload swap can involve a real MCP server
+   * handshake (`createReloadableMcpToolSet(...).reload(...)`, see
+   * `mcpReload.test.ts`), which can itself take up to
+   * `MCP_CONNECT_TIMEOUT_MS` (12s) per server, or hang indefinitely against an
+   * unreachable one if a wrong implementation `await`s it. That is
+   * `1245eb7`'s original boot-hang bug ("the Settings panel that would let
+   * you fix a bad server is served by the sidecar that cannot start")
+   * reappearing at save-time instead of boot-time: a saved MCP config change
+   * would make every future *save* hang too, including the one meant to undo
+   * the mistake.
+   *
+   * A callback that returns a promise this handler does await is exactly the
+   * natural-looking mistake to write here ("the save shouldn't report success
+   * until the reload actually took effect") -- every other test in this
+   * block uses a synchronously-resolving spy and cannot tell the two apart,
+   * since `handler(); respond()` and `await handler(); respond()` produce the
+   * same observable result when the callback settles instantly. This test
+   * uses a callback that never settles at all, so only a implementation that
+   * truly never awaits it can pass.
+   */
+  test("does not await onServersChanged before responding -- a hung reload must not hang the save", async () => {
+    const app = makeApp({
+      // Never resolves. If the handler awaited this, the request below would
+      // never settle either.
+      onServersChanged: () => new Promise<void>(() => {}),
+    });
+
+    const responded = call(app, "PUT", "/config/mcp/filesystem", stdioBody({ command: "bun" }));
+    const timedOut = new Promise<"timed-out">((resolve) =>
+      setTimeout(() => resolve("timed-out"), 200)
+    );
+
+    const outcome = await Promise.race([responded, timedOut]);
+
+    expect(outcome).not.toBe("timed-out");
+    expect((outcome as Awaited<typeof responded>).status).toBe(200);
+  });
+
+  test("with no onServersChanged wired, a save still succeeds (dep stays optional)", async () => {
+    const app = makeApp();
+
+    const { status } = await call(
+      app,
+      "PUT",
+      "/config/mcp/filesystem",
+      stdioBody({ command: "bun" })
+    );
+
+    expect(status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STAGE-1 (red): POST /config/mcp (create) also triggers a live MCP reload
+// ---------------------------------------------------------------------------
+//
+// A newly created server is a saved change exactly as much as an edited one
+// -- an agent task dispatched right after "Add server" + "Save" should be
+// able to use it without a sidecar restart.
+describe("POST /config/mcp triggers onServersChanged", () => {
+  test("fires once, with the newly created server reflected in the list", async () => {
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(app, "POST", "/config/mcp", stdioBody());
+
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    const [servers] = calls;
+    expect(servers).toEqual([
+      expect.objectContaining({ name: "filesystem", command: "npx" }),
+    ]);
+  });
+
+  test("does not fire when the create is rejected as an invalid body (400)", async () => {
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(app, "POST", "/config/mcp", stdioBody({ command: "" }));
+
+    expect(status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  // Same ordering hazard as the PUT duplicate-name test above: the body is
+  // well-formed and clears `candidateFrom`, and the rejection only happens
+  // one call later, inside `store.addServer`'s own uniqueness check.
+  test("does not fire when the create is rejected for a duplicate name (400 from the store, not from validation)", async () => {
+    store.addServer({ name: "filesystem", transport: "stdio", command: "npx", args: [] });
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(app, "POST", "/config/mcp", stdioBody());
+
+    expect(status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("passes only the enabled servers, even when disabled ones exist in the saved config", async () => {
+    store.addServer({
+      name: "disabledOne",
+      transport: "stdio",
+      command: "npx",
+      args: [],
+      enabled: false,
+    });
+    store.addServer({
+      name: "linear",
+      transport: "http",
+      url: "https://mcp.linear.app/mcp",
+    });
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(app, "POST", "/config/mcp", stdioBody());
+
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    const names = (calls[0] as Array<{ name: string }>).map((s) => s.name).sort();
+    expect(names).toEqual(["filesystem", "linear"]);
+    expect(names).not.toContain("disabledOne");
+  });
+
+  test("with no onServersChanged wired, a create still succeeds (dep stays optional)", async () => {
+    const app = makeApp();
+
+    const { status } = await call(app, "POST", "/config/mcp", stdioBody());
+
+    expect(status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STAGE-1 (red): DELETE /config/mcp/:name also triggers a live MCP reload
+// ---------------------------------------------------------------------------
+//
+// The worst of the three cases if this is missed: a user who *removes* a
+// broken/compromised MCP server keeps talking to it until they quit the app.
+describe("DELETE /config/mcp/:name triggers onServersChanged", () => {
+  beforeEach(() => {
+    store.addServer({ name: "filesystem", transport: "stdio", command: "npx", args: [] });
+    store.addServer({
+      name: "linear",
+      transport: "http",
+      url: "https://mcp.linear.app/mcp",
+    });
+  });
+
+  test("fires once, and the deleted server is absent from the list it receives", async () => {
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(app, "DELETE", "/config/mcp/filesystem");
+
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    // Asserting absence, not merely that the callback fired -- fired-with the
+    // pre-delete snapshot would satisfy a weaker "did it fire" assertion
+    // while still leaving the agent talking to a server the user just removed.
+    const names = (calls[0] as Array<{ name: string }>).map((s) => s.name);
+    expect(names).not.toContain("filesystem");
+    expect(names).toEqual(["linear"]);
+  });
+
+  test("does not fire when the addressed server does not exist (404)", async () => {
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(app, "DELETE", "/config/mcp/nope");
+
+    expect(status).toBe(404);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("passes only the enabled servers that remain, even when a disabled one remains too", async () => {
+    store.addServer({
+      name: "disabledOne",
+      transport: "stdio",
+      command: "npx",
+      args: [],
+      enabled: false,
+    });
+    const calls: unknown[][] = [];
+    const app = makeApp({ onServersChanged: (servers) => calls.push(servers) });
+
+    const { status } = await call(app, "DELETE", "/config/mcp/linear");
+
+    expect(status).toBe(200);
+    expect(calls).toHaveLength(1);
+    const names = (calls[0] as Array<{ name: string }>).map((s) => s.name).sort();
+    expect(names).toEqual(["filesystem"]);
+    expect(names).not.toContain("disabledOne");
+    expect(names).not.toContain("linear");
+  });
+
+  test("with no onServersChanged wired, a delete still succeeds (dep stays optional)", async () => {
+    const app = makeApp();
+
+    const { status } = await call(app, "DELETE", "/config/mcp/filesystem");
+
+    expect(status).toBe(200);
+  });
+});

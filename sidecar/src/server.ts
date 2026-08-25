@@ -3,7 +3,11 @@ import { dirname, join } from "node:path";
 import { buildAgentRoutes } from "./agent/routes";
 import { withApproval, yoloApprovalPolicy } from "./agent/approval";
 import type { AgentChatFn } from "./agent/loop";
-import { startMcpConnections, type McpConnectionReport } from "./agent/mcpClient";
+import {
+  createReloadableMcpToolSet,
+  type McpConnectionReport,
+  type McpServerConfig,
+} from "./agent/mcpClient";
 import { McpConfigStore, resolveMcpServers } from "./agent/mcpConfigStore";
 import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
@@ -86,6 +90,18 @@ export function buildApp(
    */
   mcpConnectionReport?: () => McpConnectionReport,
   /**
+   * Fires a live MCP reload after a `/config/mcp` write commits -- `main()`
+   * passes `mcpTools.reload` (the `ReloadableMcpToolSet` created above it).
+   * Threaded through positionally, same as `mcpConnectionReport`, rather than
+   * imported here, so this file stays free of a dependency on which MCP tool
+   * set implementation the caller happens to be using. Optional so every
+   * pre-existing test call site (none of which pass this far) keeps
+   * compiling and simply gets a `/config/mcp` write with no live effect
+   * beyond the next restart -- see `McpConfigRouteDeps.onServersChanged`'s
+   * own doc comment for why it is never awaited.
+   */
+  mcpOnServersChanged?: (servers: McpServerConfig[]) => void,
+  /**
    * `OPENTYPE_WHISPER_MODEL`, when set -- the fallback `/config/whisper-model`
    * reports as `source: "env"`. Passed in rather than read from `process.env`
    * here, following `mcpEnvJson`: one explicit wiring decision, made in
@@ -147,6 +163,7 @@ export function buildApp(
       ? buildMcpConfigRoutes(mcpConfigStore, {
           envJson: mcpEnvJson,
           connectionReport: mcpConnectionReport,
+          onServersChanged: mcpOnServersChanged,
         })
       : []),
   ]);
@@ -201,8 +218,9 @@ async function main() {
   // the SQLite DB, same data-directory convention as `provider-config.json`.
   //
   // Connections are established once, here, for this process's lifetime: a
-  // server added or edited through the API applies from the next sidecar
-  // start, not mid-run.
+  // server added, edited, enabled, disabled or deleted through the API is
+  // applied live -- see `onServersChanged` below -- rather than only from the
+  // next sidecar start.
   const mcpConfigStore = new McpConfigStore(
     join(dirname(env.dbPath), "mcp-servers.json")
   );
@@ -220,7 +238,12 @@ async function main() {
   // usable immediately and fills in as servers answer, each bounded by its own
   // budget. `mcpBootResilience.test.ts` reads this file and fails if an await
   // ever reappears above `Bun.serve`.
-  const mcpTools = startMcpConnections(resolvedMcpServers.servers);
+  //
+  // `createReloadableMcpToolSet` rather than `startMcpConnections`: behaves
+  // identically up to this point (same synchronous-construction contract
+  // `mcpBootResilience.test.ts` pins), but also exposes `reload(...)`, which
+  // is what lets a config-route write below apply without a restart.
+  const mcpTools = createReloadableMcpToolSet(resolvedMcpServers.servers);
   const builtInTools = createBuiltInTools({ store, callLLM });
   const coreTools = createCoreTools({});
   // The approval seam wraps the *merged* set so built-in memory tools, core
@@ -357,6 +380,13 @@ async function main() {
     // skip is just a silent failure one layer along. `status` is a closure over
     // that report rather than a method, so passing it unbound is safe.
     mcpTools.status,
+    // Same closure-not-method reasoning as `mcpTools.status` above: `reload`
+    // closes over this `mcpTools` instance's own state rather than reading
+    // `this`, so passing it unbound is safe. Fires-and-returns immediately --
+    // `reload` itself is synchronous (see its doc comment) and nothing here
+    // awaits it or its `.ready`, which is exactly what
+    // `McpConfigRouteDeps.onServersChanged`'s contract requires.
+    mcpTools.reload,
     process.env.OPENTYPE_WHISPER_MODEL,
     {
       // Read per request: the user can save a remote-Whisper config at any

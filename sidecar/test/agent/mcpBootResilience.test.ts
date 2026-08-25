@@ -900,6 +900,12 @@ describe("server.ts boots before it connects", () => {
 
     expect(beforeServe).not.toMatch(/await\s+connectConfiguredMcpServers/);
     expect(beforeServe).not.toMatch(/await\s+startMcpConnections/);
+    // `main()`'s boot construction is `createReloadableMcpToolSet(...)`, not
+    // `startMcpConnections(...)` directly -- the line above stopped being
+    // able to fail the moment that rename landed, and nothing guarded the
+    // new name. Same hazard, same fix: forbid awaiting the actual symbol
+    // `main()` calls today.
+    expect(beforeServe).not.toMatch(/await\s+createReloadableMcpToolSet/);
     expect(beforeServe).not.toMatch(/await\s+\w*[Mm]cp\w*\s*\.\s*ready/);
   });
 });

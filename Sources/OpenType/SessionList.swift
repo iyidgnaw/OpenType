@@ -194,6 +194,7 @@ enum SettingsRoute: String, Identifiable, Equatable {
     case speechRecognition
     case languageModel
     case agentTools
+    case skillsAndAgents
     case auditLog
     case clearLocalData
 
@@ -204,6 +205,7 @@ enum SettingsRoute: String, Identifiable, Equatable {
         case .speechRecognition: return OpenTypeL10n.text("语音识别", english: "Speech recognition")
         case .languageModel: return OpenTypeL10n.text("AI 模型", english: "AI model")
         case .agentTools: return OpenTypeL10n.text("Agent 工具", english: "Agent tools")
+        case .skillsAndAgents: return OpenTypeL10n.text("Skill 与 Agent", english: "Skills and agents")
         case .auditLog: return OpenTypeL10n.text("审计记录", english: "Audit log")
         case .clearLocalData: return OpenTypeL10n.text("清除本地数据", english: "Clear local data")
         }

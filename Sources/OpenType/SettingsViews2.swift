@@ -388,6 +388,12 @@ struct SettingsColumn: View {
                 model: model
             )
 
+            SettingsRow(
+                title: SettingsRoute.skillsAndAgents.title,
+                pushes: .skillsAndAgents,
+                model: model
+            )
+
             // Renamed from 「转写语言」 in the 2026-08-15 batch (§C), when the
             // setting stopped being a live-caption-only preference and started
             // reaching Whisper — the old name was true of neither recogniser
@@ -757,6 +763,8 @@ struct SettingsDetailColumn: View {
             SettingsPageScroll { LLMProviderSetupContent(model: model) }
         case .agentTools:
             AgentToolsPage(model: model) { model.settingsRoute = nil }
+        case .skillsAndAgents:
+            SkillAgentPage(model: model) { model.settingsRoute = nil }
         case .auditLog:
             AuditLogPage()
         case .clearLocalData:

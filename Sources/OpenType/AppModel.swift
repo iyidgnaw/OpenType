@@ -3398,6 +3398,164 @@ final class AppModel: ObservableObject {
         return name.addingPercentEncoding(withAllowedCharacters: allowed) ?? name
     }
 
+    // MARK: - Skill / Agent definitions (Pipeline C)
+    //
+    // Thin wrappers around `SidecarClient`'s dedicated `/skills*`/
+    // `/agent/definitions*` methods, in the same call/refresh shape as the
+    // MCP server section above: refresh-on-appear, an in-place edit error the
+    // sheet renders beside its own Save button, and a follow-up list refresh
+    // after every successful write (the sidecar invalidates its discovery
+    // cache on write, so the very next GET already reflects the change —
+    // design §3's "生效即时").
+
+    /// Last `GET /skills`. `nil` means "not fetched yet" (the page shows a
+    /// loading state) as distinct from "fetched, no skills" (`[]`).
+    @Published private(set) var skills: [SkillSummary]?
+    /// Last `GET /agent/definitions`. Same `nil`-means-loading contract.
+    @Published private(set) var agentDefinitions: [AgentDefinitionSummary]?
+    /// Last failure from a Skill/Agent editor sheet save/delete, shown
+    /// in-place and cleared by the next successful one — same contract as
+    /// `mcpEditError`.
+    @Published private(set) var skillAgentEditError: String?
+
+    /// Injected into `SkillAgentSource.bucket`/`SkillListBuilder`/
+    /// `AgentListBuilder`/the name-validation calls from
+    /// `SkillAgentViews.swift`, rather than each call site reading
+    /// `NSHomeDirectory()` itself — mirrors how the pure bucketing function
+    /// takes `homeDirectory` as an explicit parameter (decision A-2) so the
+    /// view layer stays as testable as the model layer it calls into.
+    let skillAgentHomeDirectory: String = NSHomeDirectory()
+
+    func clearSkillAgentEditError() {
+        skillAgentEditError = nil
+    }
+
+    /// The `{ error }` envelope every `/skills*`/`/agent/definitions*` route
+    /// answers a 400/403/404/409 with — same shape as `McpErrorEnvelope`,
+    /// worth decoding rather than falling back to a generic message since the
+    /// sidecar's validation errors name exactly the field to fix.
+    private struct SkillAgentErrorEnvelope: Decodable { let error: String }
+
+    /// Refreshes the Settings "Skill 与 Agent" page's SKILL column. Backs a
+    /// convenience display rather than the recording path, so a sidecar
+    /// hiccup leaves the last-known list on screen and logs, instead of
+    /// throwing or blanking the page.
+    func refreshSkills() async {
+        do {
+            let envelope = try await sidecarClient.fetchSkills()
+            skills = envelope.skills
+        } catch {
+            print("OpenType: failed to fetch skills from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// Refreshes the page's AGENT column.
+    func refreshAgentDefinitions() async {
+        do {
+            agentDefinitions = try await sidecarClient.fetchAgentDefinitions()
+        } catch {
+            print("OpenType: failed to fetch agent definitions from sidecar: \(error.localizedDescription)")
+        }
+    }
+
+    /// Fetches one skill's full record (with `body`) for 8B/8C, which the
+    /// list alone can't supply. `root` opens a specific (possibly shadowed)
+    /// copy rather than the default active one.
+    func fetchSkillDetail(name: String, root: String? = nil) async -> SkillDetail? {
+        do {
+            return try await sidecarClient.fetchSkillDetail(name: name, root: root)
+        } catch {
+            skillAgentEditError = Self.skillAgentFailureMessage(error)
+            return nil
+        }
+    }
+
+    /// Fetches one agent definition's full record (with `body`) for 8C/8D.
+    func fetchAgentDefinitionDetail(name: String, root: String? = nil) async -> AgentDefinitionDetail? {
+        do {
+            return try await sidecarClient.fetchAgentDefinitionDetail(name: name, root: root)
+        } catch {
+            skillAgentEditError = Self.skillAgentFailureMessage(error)
+            return nil
+        }
+    }
+
+    /// Saves 8B's form: `POST /skills` in create mode, `PUT /skills/:name` in
+    /// edit mode. Refreshes the list on success so a shadow badge / new count
+    /// reflects the write immediately.
+    @discardableResult
+    func saveSkill(_ state: SkillEditorFormState) async -> Bool {
+        do {
+            if state.mode == .create {
+                _ = try await sidecarClient.createSkill(state.savePayload)
+            } else {
+                _ = try await sidecarClient.updateSkill(name: state.name, state.savePayload)
+            }
+            skillAgentEditError = nil
+            await refreshSkills()
+            return true
+        } catch {
+            skillAgentEditError = Self.skillAgentFailureMessage(error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteSkill(name: String) async -> Bool {
+        do {
+            try await sidecarClient.deleteSkill(name: name)
+            skillAgentEditError = nil
+            await refreshSkills()
+            return true
+        } catch {
+            skillAgentEditError = Self.skillAgentFailureMessage(error)
+            return false
+        }
+    }
+
+    /// Saves 8D's form: `POST /agent/definitions` in create mode,
+    /// `PUT /agent/definitions/:name` in edit mode.
+    @discardableResult
+    func saveAgentDefinition(_ state: AgentEditorFormState) async -> Bool {
+        do {
+            if state.mode == .create {
+                _ = try await sidecarClient.createAgentDefinition(state.savePayload)
+            } else {
+                _ = try await sidecarClient.updateAgentDefinition(name: state.name, state.savePayload)
+            }
+            skillAgentEditError = nil
+            await refreshAgentDefinitions()
+            return true
+        } catch {
+            skillAgentEditError = Self.skillAgentFailureMessage(error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func deleteAgentDefinition(name: String) async -> Bool {
+        do {
+            try await sidecarClient.deleteAgentDefinition(name: name)
+            skillAgentEditError = nil
+            await refreshAgentDefinitions()
+            return true
+        } catch {
+            skillAgentEditError = Self.skillAgentFailureMessage(error)
+            return false
+        }
+    }
+
+    /// The user-facing message for a failed `/skills*`/`/agent/definitions*`
+    /// call — same decoding strategy as `mcpFailureMessage`.
+    nonisolated static func skillAgentFailureMessage(_ error: Error) -> String {
+        if case SidecarClientError.responseDecodingFailed(_, _, let body) = error,
+           let data = body.data(using: .utf8),
+           let envelope = try? JSONDecoder().decode(SkillAgentErrorEnvelope.self, from: data) {
+            return envelope.error
+        }
+        return ErrorMessagePresenter.message(for: error)
+    }
+
     // MARK: - Provider configuration (Whisper / LLM)
     //
     // Thin wrappers around the sidecar's `/config/*` endpoints

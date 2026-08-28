@@ -697,6 +697,121 @@ final class SidecarClient {
         let delivered: Bool
     }
 
+    // MARK: - Skills and agent definitions (Pipeline C)
+    //
+    // `sidecar/src/skills/skillRoutes.ts` / `sidecar/src/agent/agentDefinitionRoutes.ts`
+    // (docs/superpowers/specs/2026-08-28-skill-agent-ui-and-step-log-persistence.md
+    // §1.2/§1.3/§3). Dedicated per-endpoint methods (rather than the bare
+    // `request(method:path:)` calls the MCP config section above uses inline
+    // from `AppModel`) so the `?root=` query-building and path-escaping live
+    // in exactly one place each.
+
+    /// `GET /skills` — `{ skills: [...] }`, including shadowed rows.
+    func fetchSkills() async throws -> SkillListEnvelope {
+        try await request(method: "GET", path: "/skills")
+    }
+
+    /// `GET /skills/:name`. `root` (when given) asks for that exact root's
+    /// copy — active or shadowed — rather than the default active one, which
+    /// is how 8A's "被覆盖的「我的」条目也要能点开看" opens a shadowed user copy.
+    func fetchSkillDetail(name: String, root: String? = nil) async throws -> SkillDetail {
+        try await request(method: "GET", path: Self.skillPath(name: name, root: root))
+    }
+
+    /// `POST /skills`.
+    func createSkill(_ payload: SkillEditorSavePayload) async throws -> SkillDetail {
+        try await request(method: "POST", path: "/skills", body: payload)
+    }
+
+    /// `PUT /skills/:name` — user-root only; the name in `payload` (if any) is
+    /// ignored server-side (E1: immutable in edit mode).
+    func updateSkill(name: String, _ payload: SkillEditorSavePayload) async throws -> SkillDetail {
+        try await request(method: "PUT", path: "/skills/\(Self.pathComponent(name))", body: payload)
+    }
+
+    /// `DELETE /skills/:name` — user-root only.
+    @discardableResult
+    func deleteSkill(name: String) async throws -> Bool {
+        let response: SkillAgentDeletionResponse = try await request(
+            method: "DELETE",
+            path: "/skills/\(Self.pathComponent(name))"
+        )
+        return response.deleted
+    }
+
+    /// `GET /agent/definitions` — a **bare array**, unlike `fetchSkills()`'s
+    /// envelope (upstream asymmetry, not a typo here — see
+    /// `AgentDefinitionSummary`'s doc comment).
+    func fetchAgentDefinitions() async throws -> [AgentDefinitionSummary] {
+        try await request(method: "GET", path: "/agent/definitions")
+    }
+
+    /// `GET /agent/definitions/:name`. `root` behaves like `fetchSkillDetail`'s.
+    func fetchAgentDefinitionDetail(name: String, root: String? = nil) async throws -> AgentDefinitionDetail {
+        try await request(method: "GET", path: Self.agentDefinitionPath(name: name, root: root))
+    }
+
+    /// `POST /agent/definitions`. `payload` has no `model` field to send (B2).
+    func createAgentDefinition(_ payload: AgentEditorSavePayload) async throws -> AgentDefinitionDetail {
+        try await request(method: "POST", path: "/agent/definitions", body: payload)
+    }
+
+    /// `PUT /agent/definitions/:name` — user-root only. The sidecar preserves
+    /// any unmanaged frontmatter key already on the file (e.g. an existing
+    /// `model:` line) that this payload never mentions.
+    func updateAgentDefinition(name: String, _ payload: AgentEditorSavePayload) async throws -> AgentDefinitionDetail {
+        try await request(method: "PUT", path: "/agent/definitions/\(Self.pathComponent(name))", body: payload)
+    }
+
+    /// `DELETE /agent/definitions/:name` — user-root only.
+    @discardableResult
+    func deleteAgentDefinition(name: String) async throws -> Bool {
+        let response: SkillAgentDeletionResponse = try await request(
+            method: "DELETE",
+            path: "/agent/definitions/\(Self.pathComponent(name))"
+        )
+        return response.deleted
+    }
+
+    private struct SkillAgentDeletionResponse: Decodable { let deleted: Bool }
+
+    /// Percent-encodes a name for use as a `:name` path segment. Names are
+    /// already charset-safe (`^[A-Za-z0-9][A-Za-z0-9-]*$`), same as
+    /// `AppModel.mcpPathComponent` — escaped anyway rather than assuming the
+    /// server-side validation always ran first.
+    nonisolated private static func pathComponent(_ name: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/")
+        return name.addingPercentEncoding(withAllowedCharacters: allowed) ?? name
+    }
+
+    /// Percent-encodes a `root` value for the `?root=` query string — a real
+    /// filesystem path (decision A-2), which can contain `/` and other
+    /// characters `.urlQueryAllowed` alone wouldn't escape out of a query
+    /// component (`&`/`=`/`?` in particular, none of which a path is expected
+    /// to contain but none of which should be trusted to be absent either).
+    nonisolated private static func queryComponent(_ value: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=?")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    nonisolated private static func skillPath(name: String, root: String?) -> String {
+        var path = "/skills/\(pathComponent(name))"
+        if let root {
+            path += "?root=\(queryComponent(root))"
+        }
+        return path
+    }
+
+    nonisolated private static func agentDefinitionPath(name: String, root: String?) -> String {
+        var path = "/agent/definitions/\(pathComponent(name))"
+        if let root {
+            path += "?root=\(queryComponent(root))"
+        }
+        return path
+    }
+
     /// Generic request helper: shells out to `curl --unix-socket`, then
     /// decodes stdout as JSON into `Response`. More endpoints beyond
     /// `/health` will be added to the sidecar later; this method doesn't

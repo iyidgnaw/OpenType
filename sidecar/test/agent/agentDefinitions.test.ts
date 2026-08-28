@@ -600,3 +600,120 @@ describe("createAgentDefinitionStore against the real shipped sidecar/agents/ di
     expect(store.list().some((entry) => entry.name.toLowerCase() === "readme")).toBe(false);
   });
 });
+
+/**
+ * Stage-1 TDD (red) for Pipeline A §1.1/§1.3
+ * (docs/superpowers/specs/2026-08-28-skill-agent-ui-and-step-log-persistence.md):
+ * `createAgentDefinitionStore`'s returned `AgentDefinitionStore` must grow
+ * `listAll()` (every entry across every root, shadowed copies included, each
+ * tagged `active`/`shadowedBy` -- mirroring `resourceStore.ts`'s own
+ * `listAll()`, but re-deriving the agent-specific `tools`/`model`/
+ * `displayName` fields for EVERY entry, not just the active ones, since
+ * `GET /agent/definitions`'s extended row shape (design §1.3's first bullet:
+ * "每行扩展 displayName、model、path、active、shadowedBy") needs them on a
+ * shadowed row too) and `invalidate()` (clears the cache so a write endpoint
+ * can call it and have the change visible immediately, §1.1's "所有写端点成功
+ * 后调用").
+ *
+ * RED-STATE NOTE: today's `AgentDefinitionStore` only exposes `list()`, so
+ * `store.listAll`/`store.invalidate` are `undefined` -- calling either
+ * throws "is not a function", the correct red-state failure for a method
+ * that doesn't exist yet.
+ */
+/**
+ * `listAll()` doesn't exist on `AgentDefinitionStore` yet -- see
+ * `resourceStore.test.ts`'s identical `ResourceEntryWithStatus` comment for
+ * why call sites below cast to this local type (keeps downstream callback
+ * parameters explicitly typed instead of cascading into implicit `any`,
+ * while leaving the property-access itself as the genuine, expected
+ * red-state error).
+ */
+type AgentDefinitionWithStatus = AgentDefinition & { active: boolean; shadowedBy?: string };
+
+describe("createAgentDefinitionStore: listAll()/invalidate() (design doc 2026-08-28-skill-agent-ui-and-step-log-persistence.md §1.1/§1.3)", () => {
+  test("listAll() reports a shadowed user copy as active:false with shadowedBy set to the builtin root, tools/model/displayName still populated on the shadowed copy", () => {
+    const builtIn = mkTempDir();
+    const userRoot = mkTempDir();
+    writeAgentFile(
+      builtIn,
+      "writer.md",
+      agentFileContent({ name: "writer", description: "builtin writer" }, "BUILTIN BODY")
+    );
+    writeAgentFile(
+      userRoot,
+      "writer.md",
+      agentFileContent(
+        { name: "writer", description: "user writer", tools: "bash, grep", model: "opus", displayName: "写作助手" },
+        "USER BODY"
+      )
+    );
+
+    const store = createAgentDefinitionStore({ roots: [builtIn, userRoot] });
+    const copies = (store.listAll() as AgentDefinitionWithStatus[]).filter((e) => e.name === "writer");
+
+    expect(copies).toHaveLength(2);
+    const active = copies.find((e) => e.active);
+    const shadowed = copies.find((e) => !e.active);
+    expect(active?.root).toBe(builtIn);
+    expect(shadowed?.root).toBe(userRoot);
+    expect(shadowed?.shadowedBy).toBe(builtIn);
+    // The extra agent-specific fields must still be derived for the SHADOWED
+    // copy too -- an editor opening it via `?root=` needs its real tools/
+    // model/displayName, not blanks.
+    expect(shadowed?.tools).toBe("bash, grep");
+    expect(shadowed?.model).toBe("opus");
+    expect(shadowed?.displayName).toBe("写作助手");
+    expect(shadowed?.body).toBe("USER BODY");
+  });
+
+  test("no collision: every entry is active:true with no shadowedBy", () => {
+    const root = mkTempDir();
+    writeAgentFile(root, "solo.md", agentFileContent({ name: "solo", description: "d" }, "b"));
+
+    const store = createAgentDefinitionStore({ roots: [root] });
+    const all = store.listAll() as AgentDefinitionWithStatus[];
+
+    expect(all).toHaveLength(1);
+    expect(all[0]?.active).toBe(true);
+    expect(all[0]?.shadowedBy).toBeFalsy();
+  });
+
+  test("list() stays active-only and unaffected by listAll() existing", () => {
+    const builtIn = mkTempDir();
+    const userRoot = mkTempDir();
+    writeAgentFile(builtIn, "writer.md", agentFileContent({ name: "writer", description: "d" }, "BUILTIN"));
+    writeAgentFile(userRoot, "writer.md", agentFileContent({ name: "writer", description: "d" }, "USER"));
+
+    const store = createAgentDefinitionStore({ roots: [builtIn, userRoot] });
+
+    expect(store.list().map((e) => e.name)).toEqual(["writer"]);
+    expect(store.list().find((e) => e.name === "writer")?.body).toBe("BUILTIN");
+  });
+
+  test("invalidate() clears the cache so a file added after construction is visible on the very next list() call", () => {
+    const root = mkTempDir();
+    writeAgentFile(root, "first.md", agentFileContent({ name: "first", description: "d" }, "b"));
+
+    let now = 0;
+    const store = createAgentDefinitionStore({ roots: [root], ttlMs: 5_000, now: () => now });
+    expect(store.list().map((e) => e.name)).toEqual(["first"]);
+
+    writeAgentFile(root, "second.md", agentFileContent({ name: "second", description: "d" }, "b"));
+    // Still inside the TTL window -- invalidate() is what forces the rescan.
+    store.invalidate();
+    expect(store.list().map((e) => e.name).sort()).toEqual(["first", "second"]);
+  });
+
+  test("invalidate() also clears listAll()'s cache", () => {
+    const root = mkTempDir();
+    writeAgentFile(root, "first.md", agentFileContent({ name: "first", description: "d" }, "b"));
+
+    let now = 0;
+    const store = createAgentDefinitionStore({ roots: [root], ttlMs: 5_000, now: () => now });
+    expect((store.listAll() as AgentDefinitionWithStatus[]).map((e) => e.name)).toEqual(["first"]);
+
+    writeAgentFile(root, "second.md", agentFileContent({ name: "second", description: "d" }, "b"));
+    store.invalidate();
+    expect((store.listAll() as AgentDefinitionWithStatus[]).map((e) => e.name).sort()).toEqual(["first", "second"]);
+  });
+});

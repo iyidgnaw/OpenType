@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseFrontmatter } from "../resources/frontmatter";
-import { createResourceStore } from "../resources/resourceStore";
+import { createResourceStore, type ResourceEntry } from "../resources/resourceStore";
 import { filterToolSet, type ToolSet } from "./toolSets";
 
 /**
@@ -38,8 +38,24 @@ export interface AgentDefinitionStoreOptions {
   now?: () => number;
 }
 
+/** An `AgentDefinition` tagged with `listAll()`'s active/shadowedBy status (Pipeline A §1.1/§1.3). */
+export interface AgentDefinitionWithStatus extends AgentDefinition {
+  active: boolean;
+  shadowedBy?: string;
+}
+
 export interface AgentDefinitionStore {
   list(): AgentDefinition[];
+  /**
+   * Every agent definition across every root, shadowed copies included --
+   * unlike `SkillStore.listAll()`, this re-derives `tools`/`model`/
+   * `displayName` for EVERY entry (not just the active ones), since
+   * `GET /agent/definitions/:name?root=...` needs a shadowed copy's real
+   * fields, not blanks.
+   */
+  listAll(): AgentDefinitionWithStatus[];
+  /** Clears the shared scan cache so a write endpoint's very next read sees the change immediately, without waiting out the TTL. */
+  invalidate(): void;
 }
 
 /**
@@ -76,34 +92,58 @@ export function createAgentDefinitionStore(
     now: options.now,
   });
 
+  /**
+   * Re-reads and re-parses one resolved entry's own file to recover the
+   * agent-specific frontmatter fields `resourceStore` deliberately doesn't
+   * know about (shared with the skill store, which has none of these). Used
+   * by both `list()` (active entries only) and `listAll()` (every entry,
+   * shadowed copies included) so the two never drift on how a field is
+   * derived.
+   */
+  function enrich(entry: ResourceEntry): AgentDefinition {
+    let raw = "";
+    try {
+      raw = fs.readFileSync(entry.path, "utf8");
+    } catch {
+      // The entry existed when resourceStore scanned it moments ago; a
+      // file removed in the gap is simply an agent with no extra fields,
+      // not a reason to fail the whole list()/listAll() call.
+    }
+    const { attrs } = parseFrontmatter(raw);
+    const tools = attrs.tools?.trim() ? attrs.tools.trim() : undefined;
+    const model = attrs.model?.trim() ? attrs.model.trim() : undefined;
+    const displayName = attrs.displayName?.trim() ? attrs.displayName.trim() : undefined;
+    return {
+      name: entry.name,
+      description: entry.description,
+      body: entry.body,
+      root: entry.root,
+      path: entry.path,
+      tools,
+      model,
+      displayName,
+    };
+  }
+
   function list(): AgentDefinition[] {
-    return resourceStore.list().map((entry) => {
-      let raw = "";
-      try {
-        raw = fs.readFileSync(entry.path, "utf8");
-      } catch {
-        // The entry existed when resourceStore scanned it moments ago; a
-        // file removed in the gap is simply an agent with no extra fields,
-        // not a reason to fail the whole list() call.
+    return resourceStore.list().map(enrich);
+  }
+
+  function listAll(): AgentDefinitionWithStatus[] {
+    return resourceStore.listAll().map((entry) => {
+      const enriched = enrich(entry);
+      if (entry.active) {
+        return { ...enriched, active: true };
       }
-      const { attrs } = parseFrontmatter(raw);
-      const tools = attrs.tools?.trim() ? attrs.tools.trim() : undefined;
-      const model = attrs.model?.trim() ? attrs.model.trim() : undefined;
-      const displayName = attrs.displayName?.trim() ? attrs.displayName.trim() : undefined;
-      return {
-        name: entry.name,
-        description: entry.description,
-        body: entry.body,
-        root: entry.root,
-        path: entry.path,
-        tools,
-        model,
-        displayName,
-      };
+      return { ...enriched, active: false, shadowedBy: entry.shadowedBy };
     });
   }
 
-  return { list };
+  function invalidate(): void {
+    resourceStore.invalidate();
+  }
+
+  return { list, listAll, invalidate };
 }
 
 /**

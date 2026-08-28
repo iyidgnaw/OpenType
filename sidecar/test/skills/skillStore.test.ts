@@ -172,3 +172,66 @@ describe("createSkillStore", () => {
     });
   });
 });
+
+/**
+ * Stage-1 TDD (red) for Pipeline A §1.1/§1.2
+ * (docs/superpowers/specs/2026-08-28-skill-agent-ui-and-step-log-persistence.md):
+ * `createSkillStore`'s returned `SkillStore` must forward `listAll()` and
+ * `invalidate()` from the underlying `resourceStore`, the same way it
+ * already forwards `list()` -- `GET /skills` (design §1.2) needs the
+ * shadowed-copy/active/shadowedBy data `listAll()` carries, and the write
+ * endpoints (POST/PUT/DELETE `/skills`) need `invalidate()` so a write is
+ * visible on the very next read without waiting out the TTL.
+ *
+ * RED-STATE NOTE: `SkillStore` currently only exposes `list()`, so
+ * `store.listAll` / `store.invalidate` are `undefined` and calling either
+ * throws "is not a function" -- the correct red-state failure for a method
+ * that doesn't exist yet on this wrapper, distinct from the already-covered
+ * `createResourceStore`-level contract in `resourceStore.test.ts`.
+ */
+/**
+ * `listAll()` doesn't exist on `SkillStore` yet -- see
+ * `resourceStore.test.ts`'s identical `ResourceEntryWithStatus` comment for
+ * why call sites below cast to this local type (keeps downstream callback
+ * parameters explicitly typed instead of cascading into implicit `any`,
+ * while leaving the property-access itself as the genuine, expected
+ * red-state error).
+ */
+type SkillWithStatus = Skill & { active: boolean; shadowedBy?: string };
+
+describe("createSkillStore: listAll()/invalidate() forwarding (design doc 2026-08-28-skill-agent-ui-and-step-log-persistence.md §1.1/§1.2)", () => {
+  test("listAll() reports a shadowed user copy of a builtin-named skill as active:false with shadowedBy set to the builtin root", () => {
+    const builtIn = mkTempDir();
+    const userRoot = mkTempDir();
+    writeSkill(builtIn, "dictate", "dictate", "builtin desc", "BUILTIN BODY");
+    writeSkill(userRoot, "dictate", "dictate", "user desc", "USER BODY");
+
+    const store = createSkillStore({ roots: [builtIn, userRoot] });
+    const copies = (store.listAll() as SkillWithStatus[]).filter((s) => s.name === "dictate");
+
+    expect(copies).toHaveLength(2);
+    const active = copies.find((s) => s.active);
+    const shadowed = copies.find((s) => !s.active);
+    expect(active?.root).toBe(builtIn);
+    expect(shadowed?.root).toBe(userRoot);
+    expect(shadowed?.shadowedBy).toBe(builtIn);
+    // The shadowed copy's own body must still be readable -- the "copy to my
+    // Skill and rename" flow (design §1.5/E2) needs it, not just the winner's.
+    expect(shadowed?.body).toBe("USER BODY");
+  });
+
+  test("invalidate() clears the cache so a skill written to disk after construction is visible on the next list() call", () => {
+    const root = mkTempDir();
+    writeSkill(root, "first", "first", "d", "b");
+
+    let now = 0;
+    const store = createSkillStore({ roots: [root], ttlMs: 5_000, now: () => now });
+    expect(store.list().map((s) => s.name)).toEqual(["first"]);
+
+    writeSkill(root, "second", "second", "d", "b");
+    // Still inside the TTL window -- invalidate() is what forces the rescan,
+    // not the passage of time.
+    store.invalidate();
+    expect(store.list().map((s) => s.name).sort()).toEqual(["first", "second"]);
+  });
+});

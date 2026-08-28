@@ -51,8 +51,24 @@ export interface ResourceStoreOptions {
   now?: () => number;
 }
 
+/**
+ * A `ResourceEntry` as returned by `listAll()`: every discovered entry, not
+ * just the first-root-wins survivor. `active` is true for the winner;
+ * `shadowedBy` names the winner's `root` for every other (shadowed) entry of
+ * the same name, and is absent/falsy on the winner itself (Pipeline A §1.1,
+ * docs/superpowers/specs/2026-08-28-skill-agent-ui-and-step-log-persistence.md).
+ */
+export interface ResourceEntryWithStatus extends ResourceEntry {
+  active: boolean;
+  shadowedBy?: string;
+}
+
 export interface ResourceStore {
   list(): ResourceEntry[];
+  /** Every entry across every root, shadowed copies included -- see `ResourceEntryWithStatus`. Shares `list()`'s own scan + TTL cache. */
+  listAll(): ResourceEntryWithStatus[];
+  /** Clears the shared scan cache so the very next `list()`/`listAll()` call rescans, even inside the TTL window -- a write endpoint calls this right after a successful write. */
+  invalidate(): void;
 }
 
 /**
@@ -127,13 +143,18 @@ export function createResourceStore(options: ResourceStoreOptions): ResourceStor
   const ttlMs = options.ttlMs ?? 0;
   const now = options.now ?? (() => Date.now());
 
-  let cached: ResourceEntry[] | null = null;
+  // The cache holds the RAW scan -- every entry found, duplicates included,
+  // in root-then-directory-entry order -- so `list()` and `listAll()` share
+  // one scan + one TTL window rather than each walking the filesystem on its
+  // own. "First-root-wins" for a given name is simply "the first entry with
+  // that name in this list", which both `dedupe()` (list()) and the
+  // active/shadowedBy computation (listAll()) below derive from the same
+  // array.
+  let cachedRaw: ResourceEntry[] | null = null;
   let cachedAt = -Infinity;
 
-  function readAll(): ResourceEntry[] {
-    // First-root-wins: earlier roots populate this map first, and a later
-    // root's entry of the same name is simply never inserted.
-    const byName = new Map<string, ResourceEntry>();
+  function scanRaw(): ResourceEntry[] {
+    const entries: ResourceEntry[] = [];
     for (const root of options.roots) {
       let dirents: fs.Dirent[];
       try {
@@ -149,23 +170,57 @@ export function createResourceStore(options: ResourceStoreOptions): ResourceStor
           layout === "file"
             ? readFileEntry(root, dirent, entryExtension)
             : readDirectoryEntry(root, dirent, entryFileName);
-        if (!entry || byName.has(entry.name)) {
-          continue;
+        if (entry) {
+          entries.push(entry);
         }
+      }
+    }
+    return entries;
+  }
+
+  function ensureScanned(): ResourceEntry[] {
+    if (cachedRaw !== null && now() - cachedAt < ttlMs) {
+      return cachedRaw;
+    }
+    cachedRaw = scanRaw();
+    cachedAt = now();
+    return cachedRaw;
+  }
+
+  function list(): ResourceEntry[] {
+    const raw = ensureScanned();
+    // First-root-wins: earlier roots populate this map first, and a later
+    // root's entry of the same name is simply never inserted.
+    const byName = new Map<string, ResourceEntry>();
+    for (const entry of raw) {
+      if (!byName.has(entry.name)) {
         byName.set(entry.name, entry);
       }
     }
     return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  function list(): ResourceEntry[] {
-    if (cached !== null && now() - cachedAt < ttlMs) {
-      return cached;
+  function listAll(): ResourceEntryWithStatus[] {
+    const raw = ensureScanned();
+    const winnerRootByName = new Map<string, string>();
+    for (const entry of raw) {
+      if (!winnerRootByName.has(entry.name)) {
+        winnerRootByName.set(entry.name, entry.root);
+      }
     }
-    cached = readAll();
-    cachedAt = now();
-    return cached;
+    return raw.map((entry) => {
+      const winnerRoot = winnerRootByName.get(entry.name);
+      if (winnerRoot === entry.root) {
+        return { ...entry, active: true };
+      }
+      return { ...entry, active: false, shadowedBy: winnerRoot };
+    });
   }
 
-  return { list };
+  function invalidate(): void {
+    cachedRaw = null;
+    cachedAt = -Infinity;
+  }
+
+  return { list, listAll, invalidate };
 }

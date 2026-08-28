@@ -14,12 +14,21 @@ import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
 import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
-import { createSkillStore } from "./skills/skillStore";
+import { createSkillStore, type SkillStore } from "./skills/skillStore";
 import { resolveSkillRoots } from "./skills/skillRoots";
 import { createSkillTool } from "./skills/skillTool";
-import { createAgentDefinitionStore, loadGlobalInstructions } from "./agent/agentDefinitions";
+import { buildSkillRoutes, type SkillRouteDeps } from "./skills/skillRoutes";
+import {
+  createAgentDefinitionStore,
+  loadGlobalInstructions,
+  type AgentDefinitionStore,
+} from "./agent/agentDefinitions";
 import { resolveAgentRoots, resolveGlobalInstructionRoots } from "./agent/agentRoots";
 import type { AgentDefinitionsSource } from "./agent/routes";
+import {
+  buildAgentDefinitionRoutes,
+  type AgentDefinitionRouteDeps,
+} from "./agent/agentDefinitionRoutes";
 import { buildAsrRoutes, type TranscribeFn, type TranscribeOptions } from "./asr/routes";
 import { buildAsrStatusRoutes, type AsrStatusDeps, type LocalWhisperStatus } from "./asr/statusRoutes";
 import { buildWhisperModelRoutes } from "./asr/whisperModelRoutes";
@@ -164,7 +173,22 @@ export function buildApp(
    * compiling and this whole feature is skipped rather than guessing at a
    * boundary (see `AgentRouteOptions.homeDir`'s own doc comment).
    */
-  homeDir?: string
+  homeDir?: string,
+  /**
+   * Pipeline A (docs/superpowers/specs/2026-08-28-skill-agent-ui-and-step-log-persistence.md
+   * §1.2): backs the Settings "Skill 与 Agent" page's SKILL column. Optional,
+   * trailing, same reasoning as every other optional param above -- every
+   * pre-existing call site keeps compiling and simply serves no `/skills`
+   * routes at all.
+   */
+  skillRouteDeps?: SkillRouteDeps,
+  /**
+   * Pipeline A §1.3: backs the same page's AGENT column, and (decision A-1)
+   * the EXTENDED `GET /agent/definitions` that shadows `buildAgentRoutes`'s
+   * own minimal one below. Optional, trailing, same reasoning as
+   * `skillRouteDeps` above.
+   */
+  agentDefinitionRouteDeps?: AgentDefinitionRouteDeps
 ) {
   return createRouter([
     {
@@ -174,6 +198,18 @@ export function buildApp(
     },
     ...buildOneShotRoutes(store, conversations, chat, contextLogWriter, tools),
     ...buildMemoryRoutes(store, callLLM, contextLogPath),
+    ...(skillRouteDeps ? buildSkillRoutes(skillRouteDeps) : []),
+    // Registered BEFORE `buildAgentRoutes` below, deliberately (decision
+    // A-1): both this file's `GET /agent/definitions` and
+    // `buildAgentRoutes`'s own minimal one answer the same method+path, and
+    // `router.ts`'s `createRouter` returns the FIRST match -- so this
+    // extended handler (displayName/model/path/active/shadowedBy, plus the
+    // four write endpoints) wins, while `buildAgentRoutes`'s own handler is
+    // left completely in place beneath it, unreachable when this is wired
+    // but still exercised directly by `agent/routes.test.ts`. Safe to clean
+    // up later; not done now to avoid touching a file whose own tests must
+    // keep passing unmodified.
+    ...(agentDefinitionRouteDeps ? buildAgentDefinitionRoutes(agentDefinitionRouteDeps) : []),
     // §9.1: approval mode, the skill index source, and agent definitions all
     // land on `buildAgentRoutes` as one trailing options object rather than
     // three separate positional parameters -- see that function's own doc
@@ -297,12 +333,13 @@ async function main() {
   // logic; `createSkillStore` does the actual (TTL-cached) disk reads, on
   // demand from `agent/routes.ts`'s per-request `renderSkillIndex` call --
   // not read once here and frozen for the process lifetime.
-  const skillStore = createSkillStore({
-    roots: resolveSkillRoots({
-      homeDir: homedir(),
-      builtInSkillsDir: resolve(import.meta.dir, "..", "skills"),
-      env: process.env,
-    }),
+  const skillRoots = resolveSkillRoots({
+    homeDir: homedir(),
+    builtInSkillsDir: resolve(import.meta.dir, "..", "skills"),
+    env: process.env,
+  });
+  const skillStore: SkillStore = createSkillStore({
+    roots: skillRoots,
     // Design §5: "不做文件监听热重载" -- a short TTL substitutes for it. Without
     // this, `createResourceStore`'s `ttlMs` defaults to 0 (always re-read),
     // which would walk all three skill roots and re-parse every SKILL.md on
@@ -310,6 +347,18 @@ async function main() {
     ttlMs: 5_000,
   });
   const skillTool = createSkillTool({ store: skillStore });
+  // Pipeline A §1.2: the Settings "Skill 与 Agent" page's SKILL column reads
+  // and writes through this SAME store (and hence the same TTL cache) the
+  // agent loop's skill index above is built from -- `buildSkillRoutes` calls
+  // `store.invalidate()` after every write, so a newly saved skill is usable
+  // by the very next `/agent/run` call, not just visible on the settings
+  // page. `skillRoots[0]`/`[1]` are `resolveSkillRoots`'s own fixed
+  // [builtIn, user, claude] order.
+  const skillRouteDeps: SkillRouteDeps = {
+    store: skillStore,
+    userRoot: skillRoots[1]!,
+    builtInRoot: skillRoots[0]!,
+  };
   // Agent-definition discovery (design §4/§8/§9.4): same three-root,
   // first-root-wins shape as skills above, built on the SAME
   // `resources/resourceStore.ts` layer (`layout: "file"` instead of
@@ -325,12 +374,13 @@ async function main() {
   // root is "compat"; the exclusion is entirely this call site handing it
   // the shorter list.
   const builtInAgentsDir = resolve(import.meta.dir, "..", "agents");
-  const agentDefinitionStore = createAgentDefinitionStore({
-    roots: resolveAgentRoots({
-      homeDir: homedir(),
-      builtInAgentsDir,
-      env: process.env,
-    }),
+  const agentRoots = resolveAgentRoots({
+    homeDir: homedir(),
+    builtInAgentsDir,
+    env: process.env,
+  });
+  const agentDefinitionStore: AgentDefinitionStore = createAgentDefinitionStore({
+    roots: agentRoots,
     ttlMs: 5_000,
   });
   const globalInstructionRoots = resolveGlobalInstructionRoots({
@@ -340,6 +390,15 @@ async function main() {
   const agentDefinitions: AgentDefinitionsSource = {
     list: () => agentDefinitionStore.list(),
     globalInstructions: () => loadGlobalInstructions(globalInstructionRoots),
+  };
+  // Pipeline A §1.3: same "one store backs both the agent loop's selection
+  // and the settings page's CRUD" shape as `skillRouteDeps` above.
+  // `agentRoots[0]`/`[1]` are `resolveAgentRoots`'s own fixed
+  // [builtIn, user, claude] order.
+  const agentDefinitionRouteDeps: AgentDefinitionRouteDeps = {
+    store: agentDefinitionStore,
+    userRoot: agentRoots[1]!,
+    builtInRoot: agentRoots[0]!,
   };
   // The approval seam wraps the *merged* set so built-in memory tools, core
   // tools, and MCP tools all flow through the same gate. The policy here is
@@ -535,7 +594,9 @@ async function main() {
     env.agentApprovalMode,
     skillStore,
     agentDefinitions,
-    homedir()
+    homedir(),
+    skillRouteDeps,
+    agentDefinitionRouteDeps
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

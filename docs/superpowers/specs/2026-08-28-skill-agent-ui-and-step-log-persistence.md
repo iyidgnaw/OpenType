@@ -105,5 +105,7 @@
 - **A-4**：名称在任何根都不存在时 DELETE/PUT 返回 **404**；仅存在于 builtin/claude 时返回 403。
 - **A-5**：创建成功返回 **200**（本仓库 route 惯例，不用 201）。
 - **D-1**（2026-08-28）：D2 文案删除与 D3 窄轨图标并入 D1 的流水线一次实现、一次审查（E4 豁免测试部分）。
+- **A-7**（2026-08-29）：A4 审查发现并以 PoC 证实 frontmatter 键注入——`displayName`/`tools` 只 trim 未折叠单行，嵌入 `\n` 可在写出的 .md 里伪造任意键（含 `model:`，违反 B2；tools 省略时还可经 displayName 私设工具白名单）。修复：两字段与 `description` 走同一单行折叠后才进 `renderFrontmatter`；补 stage-1 回归测试；DELETE 两处补 `assertWithinRoot`（防御性一致，当前按构造安全）。
+- **A-6**（2026-08-29）：A3 实现期发现 stage-1 测试笔误（agentDefinitionRoutes.test.ts B2 PUT 测试：请求 `body: "new"` 但断言 `toContain("new body")`，任何正确实现都无法通过）。主 agent 裁决按测试自述意图修请求为 `body: "new body"`（增强而非削弱：保持「PUT 确实写入了 body」的非空洞断言）。实现方未动测试，符合规则。
 - **D-3**（2026-08-29）：D4 审查通过后随批记录——DictationViews 的「纠错一次就会记住」空态提示**保留**（仅词典为空时出现=状态门控）；McpBuiltInCatalog 注释漏提 builtInTools.ts 来源、`docs/tool-catalog.md` 仍写 10 个工具，两处并入收尾文档批修正。
 - **D-2**（2026-08-29）边界文案裁决：**删** 语音模型 titleHint（「更大的模型更准…」）与 界面语言 titleHint（系统对话框跟随系统语言）——与 8B 表单提示同类的静态机制说明；**留** 麦克风/辅助功能的 deniedNote（仅拒绝状态出现=状态反馈）、更新按钮的幂等提示（动作后果）、「Agent 工具」行副标题「内置工具与 MCP 服务器」（内容标签）、tooltip 类（按需出现，不算画面内常驻文案）。

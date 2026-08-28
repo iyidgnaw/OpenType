@@ -22,8 +22,18 @@ export interface SkillStoreOptions {
   now?: () => number;
 }
 
+/** A `Skill` tagged with `listAll()`'s active/shadowedBy status -- see `resources/resourceStore.ts`'s `ResourceEntryWithStatus`, which this is structurally identical to. */
+export interface SkillWithStatus extends Skill {
+  active: boolean;
+  shadowedBy?: string;
+}
+
 export interface SkillStore {
   list(): Skill[];
+  /** Every skill across every root, shadowed copies included (Pipeline A §1.1/§1.2). Forwards `resourceStore`'s own `listAll()` -- a `Skill` carries no fields beyond a bare `ResourceEntry`, so no re-derivation is needed here. */
+  listAll(): SkillWithStatus[];
+  /** Clears the shared scan cache so a write endpoint's very next read sees the change immediately, without waiting out the TTL. */
+  invalidate(): void;
 }
 
 /**
@@ -42,7 +52,11 @@ export function createSkillStore(options: SkillStoreOptions): SkillStore {
     ttlMs: options.ttlMs,
     now: options.now,
   });
-  return { list: () => store.list() };
+  return {
+    list: () => store.list(),
+    listAll: () => store.listAll(),
+    invalidate: () => store.invalidate(),
+  };
 }
 
 /** At most this many skills appear in the rendered index. */

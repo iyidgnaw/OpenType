@@ -2,6 +2,7 @@ import { AGENT_SYSTEM_PROMPT } from "../oneshot/prompts";
 import type { McpToolSet } from "./mcpClient";
 import { spillOrClamp } from "./spill";
 import type { RepeatGuard } from "./repeatGuard";
+import type { ProjectContextObserver } from "./projectContext";
 import { AgentCancelledError } from "./cancellation";
 
 /**
@@ -92,6 +93,21 @@ export interface RunAgentLoopInput {
    * would just be wasted context.
    */
   skills?: string;
+  /**
+   * Rendered project `AGENTS.md` block resolved at run start
+   * (`projectAgentsMd.ts`'s `renderProjectAgentsMd`, design §10.1/§10.4),
+   * from `workingDirectory` (or `homeDir` when omitted).
+   *
+   * Appended to the FINAL USER MESSAGE, after `skills`, for the same reason
+   * every other field in this list is there and not in the system message:
+   * it varies with where the agent is working, and per-request-varying
+   * content must never sit in the system message -- doing so would
+   * invalidate the whole KV-cache prefix on every call
+   * (`docs/model-context-inventory.md` §5). Distinct from the MID-run
+   * discovery path (`RunAgentLoopDeps.projectContext`, an observer invoked
+   * per tool call) -- this field is the one-time run-start resolution only.
+   */
+  projectAgentsMd?: string;
   /** System message content; defaults to `AGENT_SYSTEM_PROMPT`. */
   systemPrompt?: string;
   /**
@@ -124,6 +140,16 @@ export interface RunAgentLoopDeps {
    * never leak between runs. Omitted, the loop behaves exactly as before.
    */
   repeatGuard?: RepeatGuard;
+  /**
+   * Mid-run project-context discovery (design §10.1/§10.2,
+   * docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md):
+   * observed after every tool call, shaped identically to `repeatGuard`
+   * above (an `observe(...)` returning text to inject or `undefined`). One
+   * instance per run -- its per-project dedup state must never leak between
+   * runs, same rule as `repeatGuard`'s own chain state. Omitted, the loop
+   * behaves exactly as before (byte-identical message array).
+   */
+  projectContext?: ProjectContextObserver;
   /**
    * Cancellation for the whole run (T1): checked before every model call and
    * after every tool call, and handed to each tool so an in-flight subprocess
@@ -214,6 +240,9 @@ function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   if (input.skills) {
     userContentParts.push("", input.skills);
   }
+  if (input.projectAgentsMd) {
+    userContentParts.push("", input.projectAgentsMd);
+  }
 
   return [
     { role: "system", content: input.systemPrompt ?? AGENT_SYSTEM_PROMPT },
@@ -234,7 +263,7 @@ export async function runAgentLoop(
   input: RunAgentLoopInput,
   deps: RunAgentLoopDeps
 ): Promise<RunAgentLoopResult> {
-  const { chat, tools, onProgress, spill, repeatGuard, signal } = deps;
+  const { chat, tools, onProgress, spill, repeatGuard, projectContext, signal } = deps;
   const maxIterations = input.maxIterations ?? MAX_ITERATIONS;
   const messages = buildInitialMessages(input);
   const steps: AgentProgressEvent[] = [];
@@ -275,8 +304,15 @@ export async function runAgentLoop(
       });
 
       let toolResultContent: string;
+      // Hoisted out of the try block below (still assigned only inside it,
+      // catch semantics unchanged) so `projectContext.observe` -- called
+      // after the try/catch, same as `repeatGuard.observe` -- can see it.
+      // A parse failure leaves this `undefined`, which `projectContext`
+      // must tolerate: see its own doc comment for why that case is real,
+      // not defensive padding.
+      let parsedArgs: unknown;
       try {
-        const parsedArgs = toolCall.function.arguments
+        parsedArgs = toolCall.function.arguments
           ? JSON.parse(toolCall.function.arguments)
           : {};
         const toolResult = await tools.callTool(toolCall.function.name, parsedArgs, signal);
@@ -321,6 +357,18 @@ export async function runAgentLoop(
       if (reminder) {
         emit({ type: "thinking", detail: reminder });
         messages.push({ role: "user", content: reminder });
+      }
+
+      // Mid-run project-context discovery (design §10.1/§10.2): shaped and
+      // wired exactly like `repeatGuard` above -- its own message, strictly
+      // after the tool result, never a replacement for it. `parsedArgs` is
+      // the same hoisted value the tool call itself was invoked with (or
+      // `undefined` when arguments failed to parse), so `projectContext`
+      // sees precisely what the tool saw.
+      const projectContextBlock = projectContext?.observe(toolCall.function.name, parsedArgs);
+      if (projectContextBlock) {
+        emit({ type: "thinking", detail: projectContextBlock });
+        messages.push({ role: "user", content: projectContextBlock });
       }
     }
   }

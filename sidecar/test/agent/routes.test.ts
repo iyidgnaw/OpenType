@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { openDatabase } from "../../src/memory/db";
 import { MemoryStore } from "../../src/memory/MemoryStore";
 import { ConversationStore } from "../../src/memory/conversations";
@@ -946,5 +949,187 @@ describe("AGENTS.md global instructions (design §4.5)", () => {
     const globalIndex = systemMessage!.content!.indexOf("Always sign off with the owner's name, Diyi.");
     expect(bodyIndex).toBeGreaterThan(-1);
     expect(globalIndex).toBeGreaterThan(bodyIndex);
+  });
+});
+
+/**
+ * Run-start resolution of a PROJECT AGENTS.md (design §10.1/§10.4,
+ * docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md)
+ * -- distinct from the §4.5/§10.3 GLOBAL `INSTRUCTIONS.md` mechanism covered
+ * above and in `agentDefinitions.test.ts`. `POST /agent/run` grows an
+ * optional `workingDirectory` field; when it names a directory under a
+ * project with an `AGENTS.md`, that content must reach the model in the
+ * FINAL USER MESSAGE, and the SYSTEM message must stay byte-identical to
+ * what it is without it -- §10.4's "逐请求变化的内容绝不能进 system message"
+ * rule (this is a KV-cache-prefix-stability requirement, not a style
+ * choice; see `docs/model-context-inventory.md` §5).
+ *
+ * Coordination note (this batch's own choice, not dictated by the design
+ * doc, flagged in the report the same way the agentDefinitions/skills
+ * options were flagged in earlier stages of this same batch): resolving a
+ * project's AGENTS.md needs a `homeDir` boundary (§10.2's "stop at homeDir
+ * inclusive" rule), so `AgentRouteOptions` gains one more optional field,
+ * `homeDir?: string`, alongside `approvalMode`/`skills`/`agentDefinitions`.
+ * Every test below injects a temp dir as `homeDir` -- never the real `~`.
+ */
+describe("project AGENTS.md at run start via workingDirectory (design §10.1/§10.4)", () => {
+  function mkTempDir(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), "opentype-routes-projectagentsmd-"));
+  }
+
+  test("a workingDirectory under a project with AGENTS.md: content reaches the FINAL USER MESSAGE, source path included", async () => {
+    const homeDir = mkTempDir();
+    const projectRoot = path.join(homeDir, "myproject");
+    fs.mkdirSync(projectRoot, { recursive: true });
+    const agentsMdPath = path.join(projectRoot, "AGENTS.md");
+    fs.writeFileSync(agentsMdPath, "PROJECT CONVENTIONS: always use tabs, never spaces.");
+    const workingDirectory = path.join(projectRoot, "src");
+    fs.mkdirSync(workingDirectory, { recursive: true });
+
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { homeDir }
+      )
+    );
+
+    const response = await router(post({ task: "fix the failing test", workingDirectory }));
+
+    expect(response.status).toBe(200);
+    const userMessage = capturedMessages!.find((m) => m.role === "user");
+    expect(userMessage?.content).toContain("PROJECT CONVENTIONS: always use tabs, never spaces.");
+    // Provenance: the resolved AGENTS.md's own path must be traceable in
+    // what the model sees, per §10.5.
+    expect(userMessage?.content).toContain(agentsMdPath);
+  });
+
+  test("the SYSTEM message stays byte-identical to AGENT_SYSTEM_PROMPT regardless of a resolved project AGENTS.md", async () => {
+    const homeDir = mkTempDir();
+    const projectRoot = path.join(homeDir, "myproject");
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, "AGENTS.md"), "SOME PROJECT CONVENTIONS");
+
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { homeDir }
+      )
+    );
+
+    await router(post({ task: "do a thing", workingDirectory: projectRoot }));
+
+    const systemMessage = capturedMessages!.find((m) => m.role === "system");
+    // Per-request-varying content (the project's own path/content) must
+    // NEVER land here -- doing so would invalidate the KV-cache prefix on
+    // every single call that names a different workingDirectory.
+    expect(systemMessage?.content).toBe(AGENT_SYSTEM_PROMPT);
+    expect(systemMessage?.content).not.toContain("SOME PROJECT CONVENTIONS");
+  });
+
+  test("omitting workingDirectory produces today's behaviour exactly, even when a homeDir option is configured", async () => {
+    // §10.1 says workingDirectory defaults to `~` -- but a bare home
+    // directory essentially never has its own AGENTS.md in practice, so a
+    // caller (Swift) that never sends this new field at all must see
+    // EXACTLY the same request/response shape as before this feature
+    // existed. `homeDir` here deliberately has no AGENTS.md, modelling that
+    // common case.
+    const homeDir = mkTempDir(); // no AGENTS.md anywhere in it
+
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const routerWithHomeDir = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { homeDir }
+      )
+    );
+    const routerWithoutOptions = createRouter(
+      buildAgentRoutes(makeStore(), makeConversations(), chat, noTools(), captureContextLog().writer)
+    );
+
+    await routerWithHomeDir(post({ task: "just a normal task" }));
+    const withHomeDirUserMessage = capturedMessages!.find((m) => m.role === "user")?.content;
+
+    await routerWithoutOptions(post({ task: "just a normal task" }));
+    const withoutOptionsUserMessage = capturedMessages!.find((m) => m.role === "user")?.content;
+
+    // Byte-identical to a call with no options object at all (every
+    // pre-existing call site) -- not pinned to a literal string, since the
+    // user message already carries other per-request content today (e.g.
+    // `buildTimeContext()`'s "Current time: ..." line) unrelated to this
+    // feature; what matters is that adding a `homeDir` option with nothing
+    // to resolve changes NOTHING about it.
+    expect(withHomeDirUserMessage).toBe(withoutOptionsUserMessage);
+    expect(withHomeDirUserMessage).toContain("TASK:\njust a normal task");
+    expect(withHomeDirUserMessage).not.toContain("AGENTS.md");
+  });
+
+  // Design owner review, adjudication #3: the test above only pins the
+  // NEGATIVE case (a homeDir with no AGENTS.md in it). §10.2's boundary is
+  // "user home directory INCLUSIVE" -- an AGENTS.md placed directly at
+  // homeDir IS supposed to be found, not just tolerated as absent. Without
+  // this positive case, nothing distinguishes an implementation that
+  // correctly stops the upward walk AT homeDir (inclusive) from one that
+  // stops one level ABOVE it (exclusive, and so would never find this
+  // file) -- both would pass the test above identically.
+  test("no workingDirectory given, but homeDir itself HAS an AGENTS.md: it IS found and reaches the model (design §10.1 default ~, §10.2 inclusive boundary)", async () => {
+    const homeDir = mkTempDir();
+    const agentsMdPath = path.join(homeDir, "AGENTS.md");
+    fs.writeFileSync(agentsMdPath, "HOME-LEVEL CONVENTIONS -- FOUND VIA THE DEFAULT ~ WORKING DIRECTORY");
+
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { homeDir }
+      )
+    );
+
+    await router(post({ task: "just a normal task" }));
+
+    const userMessage = capturedMessages!.find((m) => m.role === "user")?.content;
+    expect(userMessage).toContain("HOME-LEVEL CONVENTIONS -- FOUND VIA THE DEFAULT ~ WORKING DIRECTORY");
+    expect(userMessage).toContain(agentsMdPath);
   });
 });

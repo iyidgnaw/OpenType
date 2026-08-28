@@ -42,6 +42,8 @@ import {
   resolveAgentFromTask,
   type AgentDefinition,
 } from "./agentDefinitions";
+import { findProjectAgentsMd, renderProjectAgentsMd } from "./projectAgentsMd";
+import { createProjectContextObserver } from "./projectContext";
 
 interface AgentRunRequestBody {
   task?: string;
@@ -63,6 +65,16 @@ interface AgentRunRequestBody {
    * and gets a different, or no, persona back would silently misfire.
    */
   agentName?: string;
+  /**
+   * Where in the filesystem this run is working (design §10.1) -- the seed
+   * for run-start project-`AGENTS.md` resolution. Defaults to `homeDir`
+   * (§10.1's "默认工作目录是家目录") when omitted, which in practice almost
+   * never has its own `AGENTS.md`, so an omitted field and a bare `~`
+   * resolve to the same "nothing found" outcome for a caller (Swift) that
+   * never sends this. Never resolved at all when this route was built
+   * without a `homeDir` option -- see `handleAgentRun`.
+   */
+  workingDirectory?: string;
 }
 
 async function readJsonBody<T>(req: Request): Promise<T> {
@@ -132,6 +144,18 @@ export interface AgentRouteOptions {
   skills?: SkillIndexSource;
   /** §4/§4.5: source for agent-name/voice-prefix selection and AGENTS.md global instructions. */
   agentDefinitions?: AgentDefinitionsSource;
+  /**
+   * §10.1/§10.2: the real user home directory, used as both the default
+   * `workingDirectory` and the upward-walk boundary for project `AGENTS.md`
+   * resolution (run-start AND mid-run, `projectAgentsMd.ts`/
+   * `projectContext.ts`). Omitted (every pre-existing call site), this
+   * entire feature is skipped -- no run-start resolution is attempted and no
+   * `projectContext` observer is constructed -- rather than falling back to
+   * some other boundary, since a wrong boundary here is a real security
+   * property (§10.2's "绝不读 /AGENTS.md 或 /Users/AGENTS.md"), not a
+   * cosmetic default worth guessing at.
+   */
+  homeDir?: string;
 }
 
 /**
@@ -174,7 +198,8 @@ async function handleAgentRun(
   runLog?: RunLog,
   approvalMode: "yolo" | "prompt" = "yolo",
   skillStore?: SkillIndexSource,
-  agentDefinitions?: AgentDefinitionsSource
+  agentDefinitions?: AgentDefinitionsSource,
+  homeDir?: string
 ): Promise<Response> {
   const body = await readJsonBody<AgentRunRequestBody>(req);
   const rawTask = body.task ?? "";
@@ -275,6 +300,31 @@ async function handleAgentRun(
   // simply omitted, matching today's behavior exactly.
   const skills = skillStore ? renderSkillIndex(skillStore.list()) : undefined;
 
+  // Project AGENTS.md (design §10.1/§10.2/§10.4) -- entirely skipped when
+  // this route was built with no `homeDir` (every pre-existing call site),
+  // since resolving a boundary-less walk-up is not something to guess a
+  // default for (see `AgentRouteOptions.homeDir`'s doc comment). When a
+  // `homeDir` IS configured: `workingDirectory` defaults to it (§10.1's
+  // "默认工作目录是家目录"), the nearest `AGENTS.md` up to and including
+  // `homeDir` is resolved ONCE at run start and rendered into the FINAL
+  // USER MESSAGE (never the system message -- §10.4, per-request-varying
+  // content must never sit where it would invalidate the KV-cache prefix on
+  // every call, `docs/model-context-inventory.md` §5), and a fresh
+  // `projectContext` observer is built for THIS run so the loop can also
+  // discover a *different* project mid-run (§10.1's "项目是在运行过程中被
+  // 发现的" case) -- one observer per run, its per-project dedup state never
+  // shared across runs, mirroring `repeatGuard`.
+  const workingDirectory =
+    typeof body.workingDirectory === "string" && body.workingDirectory.length > 0
+      ? body.workingDirectory
+      : homeDir;
+  const projectAgentsMd =
+    homeDir && workingDirectory
+      ? findProjectAgentsMd(workingDirectory, homeDir)
+      : undefined;
+  const projectAgentsMdBlock = projectAgentsMd ? renderProjectAgentsMd(projectAgentsMd) : undefined;
+  const projectContextObserver = homeDir ? createProjectContextObserver({ homeDir }) : undefined;
+
   // With a `runId`, the loop's (previously unused) `onProgress` hook feeds
   // the in-memory progress registry so `GET /agent/progress/:runId` can show
   // a live feed while this blocking call is still running. The run is marked
@@ -298,6 +348,7 @@ async function handleAgentRun(
         runtimeContext: buildTimeContext(),
         recentActivity,
         skills,
+        projectAgentsMd: projectAgentsMdBlock,
         // undefined when no agent was selected and no AGENTS.md exists --
         // `buildAgentSystemPrompt` returns `AGENT_SYSTEM_PROMPT` unchanged in
         // that case, and `runAgentLoop` defaults to the same constant when
@@ -360,6 +411,9 @@ async function handleAgentRun(
           : undefined,
         // One guard per run: chains must never leak between runs (T3).
         repeatGuard: createRepeatGuard(),
+        // One project-context observer per run, same reasoning (§10.1/§10.2)
+        // -- `undefined` when this route was built with no `homeDir`.
+        projectContext: projectContextObserver,
         signal,
       }
     );
@@ -480,6 +534,7 @@ export function buildAgentRoutes(
   const approvalMode = options?.approvalMode ?? "yolo";
   const skillStore = options?.skills;
   const agentDefinitions = options?.agentDefinitions;
+  const homeDir = options?.homeDir;
   const progressRegistry = createAgentProgressRegistry();
   const cancellations = createCancellationRegistry();
   const runLog = runLogRoot ? createRunLog(runLogRoot) : undefined;
@@ -503,7 +558,8 @@ export function buildAgentRoutes(
           runLog,
           approvalMode,
           skillStore,
-          agentDefinitions
+          agentDefinitions,
+          homeDir
         ),
     },
     {

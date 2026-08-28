@@ -66,7 +66,7 @@ its SQLite DB at `sidecar/.data/opentype.sqlite3`. Useful env vars (see
   `OPENTYPE_SKILLS_DIR` above — only the built-in root moves, the other two
   agent roots (`~/.opentype/agents`, `~/.claude/agents`) are never
   overridable, and it has no effect on the (separate, shorter) root list
-  `AGENTS.md` global instructions use — see `src/agent/agentRoots.ts`. Also
+  `INSTRUCTIONS.md` global instructions use — see `src/agent/agentRoots.ts`. Also
   set automatically for a packaged launch, same mechanism as
   `OPENTYPE_SKILLS_DIR` above.
 
@@ -353,15 +353,78 @@ narrows the tool set the same run sees, applied before the per-run
 harness-level escape hatch. `GET /agent/definitions` lists every discovered
 agent's name/description/source-root/tools for a future UI or for debugging.
 
-**`AGENTS.md` global instructions** (design §4.5) are a separate, unnamed,
-always-on mechanism: any root's `AGENTS.md`, if present, is appended after
-the agent body (or directly after the base prompt, if no agent was
-selected) — every root that has one, in root order, not first-root-wins.
-Crucially, this uses a **different, shorter** root list than agent discovery
-above (`resolveGlobalInstructionRoots`, `src/agent/agentRoots.ts`): built-in
-+ `~/.opentype` only — **`~/.claude` is deliberately excluded**. An agent or
-skill imported from `~/.claude` is opt-in (the model has to name it before
-it matters), but `AGENTS.md` is unnamed and always-on; including
-`~/.claude/AGENTS.md` here would silently inject the user's *coding*
-instructions (written for Claude Code) into every voice-dictation task. Same
-directory tree, two different consent models.
+**`INSTRUCTIONS.md` global instructions** (design §4.5, filename per §10.3)
+are a separate, unnamed, always-on mechanism: any root's
+`~/.opentype/INSTRUCTIONS.md` (or the built-in root's), if present, is
+appended after the agent body (or directly after the base prompt, if no
+agent was selected) — every root that has one, in root order, not
+first-root-wins. Crucially, this uses a **different, shorter** root list
+than agent discovery above (`resolveGlobalInstructionRoots`,
+`src/agent/agentRoots.ts`): built-in + `~/.opentype` only — **`~/.claude` is
+deliberately excluded**. An agent or skill imported from `~/.claude` is
+opt-in (the model has to name it before it matters), but this file is
+unnamed and always-on; including `~/.claude/INSTRUCTIONS.md` here would
+silently inject the user's *coding* instructions (written for Claude Code)
+into every voice-dictation task. Same directory tree, two different consent
+models. It lands in the **system message** — it is stable across requests
+within one configuration.
+
+This file used to be named `AGENTS.md` too, which collided with — and was
+originally confused for — the real agents.md standard described next; it was
+renamed the same batch that standard was implemented (§10.3), and
+`loadGlobalInstructions` no longer reads the old filename at all, with no
+migration path (the feature had shipped only hours earlier and never
+released).
+
+## Project `AGENTS.md` (the agents.md standard)
+
+Agent-mode-only (design §10,
+`docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md`).
+This is the actual, unmodified [agents.md](https://agents.md/) standard — a
+free-form markdown file at a **project's own root** (a monorepo may nest one
+per package) describing that project's conventions, distinct from the global
+`INSTRUCTIONS.md` above in every way that matters: per-project rather than
+per-user, discovered by walking up from wherever the agent is working rather
+than from a fixed root list, and injected into the **final user message**
+rather than the system message (it varies per request; see
+`docs/model-context-inventory.md` §5/§3.11 for why that placement is
+load-bearing for KV-cache stability, not a style choice).
+
+Resolution rule, taken literally from the standard: walking upward from a
+directory, the **first** `AGENTS.md` found wins outright — it is never
+merged with an ancestor's, even a repository root's. The walk stops at the
+user's home directory **inclusive**, or the filesystem root, whichever comes
+first — an `AGENTS.md` placed directly at `~` is found; one directory above
+`~` never is, on purpose (`src/agent/projectAgentsMd.ts`'s
+`findProjectAgentsMd`).
+
+Two entry points, because which project a task is about is often discovered
+*during* the run, not known when it starts (a user says "看看这个项目的测试
+为什么挂了" starting from the home directory — the project only becomes known
+once the agent actually `cd`s into it):
+
+1. **Run start** — `POST /agent/run`'s optional `workingDirectory` field
+   (default: `~`) is resolved once, before the loop begins, and its
+   `AGENTS.md` (if any) is rendered into that first request's final user
+   message.
+2. **Mid-run** — `src/agent/projectContext.ts`'s `createProjectContextObserver`,
+   shaped like (and wired next to) the existing `repeatGuard` in `loop.ts`:
+   after every tool call it inspects that call's `cwd`/`path` argument,
+   resolves the nearest `AGENTS.md` from there, and — if this run hasn't
+   already reported that same resolved file — appends a fresh user message
+   right after the tool's own result. Dedup is per **project** (keyed on the
+   resolved `AGENTS.md` path, not the literal `cwd`/`path` argument), so
+   working in different subdirectories of the same project only injects
+   once, while entering a genuinely different project later in the same run
+   injects again. There is no cap on how many distinct projects one run can
+   report on.
+
+Because this content is read automatically from whatever repository the
+user happens to be working in, it is **attacker-controlled** the moment a
+user clones a hostile repository — and this agent runs with no sandbox and,
+by default (§2.1), no approval prompt. The rendered block therefore always
+carries the resolved file's own path (so the step log stays traceable back
+to a specific file) and an explicit precedence statement: the user's spoken
+task always wins, and project conventions can never authorise a destructive
+action the user didn't ask for, nor relax any of the agent's safety rules
+(`src/agent/projectAgentsMd.ts`'s `renderProjectAgentsMd`).

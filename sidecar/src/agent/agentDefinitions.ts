@@ -107,15 +107,27 @@ export function createAgentDefinitionStore(
 }
 
 /**
- * Reads every root's `AGENTS.md`, if present, and joins them in root order
- * (design §4.5). Deliberately role-agnostic: this function has no concept of
- * "built-in" vs. "compat" roots and simply reads whatever list it is given --
- * the `~/.claude` compat root's exclusion (§9.2/§9.4) is entirely a
- * CALLER-SIDE contract, enforced by which roots `resolveGlobalInstructionRoots`
- * (`agentRoots.ts`) hands this function, never by anything in here. See that
- * module's doc comment for why the exclusion exists.
+ * Reads every root's `INSTRUCTIONS.md`, if present, and joins them in root
+ * order (design §4.5, renamed by §10.3). Deliberately role-agnostic: this
+ * function has no concept of "built-in" vs. "compat" roots and simply reads
+ * whatever list it is given -- the `~/.claude` compat root's exclusion
+ * (§9.2/§9.4) is entirely a CALLER-SIDE contract, enforced by which roots
+ * `resolveGlobalInstructionRoots` (`agentRoots.ts`) hands this function,
+ * never by anything in here. See that module's doc comment for why the
+ * exclusion exists.
  *
- * Multiple roots each carrying an `AGENTS.md` are additive, not
+ * RENAMED from `AGENTS.md` to `INSTRUCTIONS.md` (design §10.3, owner
+ * instruction 2026-08-28): once the real agents.md standard's own
+ * `AGENTS.md` (project conventions, `projectAgentsMd.ts`) entered this
+ * codebase, having this UNRELATED "owner global instructions" file share
+ * that exact filename was the very confusion that led to building the wrong
+ * thing the first time. This function's role and signature are unchanged --
+ * only the filename it reads is different, and the old filename is no
+ * longer read as a fallback (see `agentDefinitions.test.ts`'s explicit
+ * regression test for that). This feature shipped only hours before the
+ * rename and was never released, so there is no migration path to support.
+ *
+ * Multiple roots each carrying an `INSTRUCTIONS.md` are additive, not
  * first-root-wins: unlike a named skill/agent (which is opt-in -- the model
  * has to name it), a global instructions file is unnamed and always-on, and
  * a shipped built-in default plausibly coexists with a user's own override
@@ -125,11 +137,11 @@ export function loadGlobalInstructions(roots: string[]): string | undefined {
   const parts: string[] = [];
   for (const root of roots) {
     try {
-      const raw = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
+      const raw = fs.readFileSync(path.join(root, "INSTRUCTIONS.md"), "utf8");
       parts.push(raw.trim());
     } catch {
-      // Missing root or missing AGENTS.md within it: not every root has
-      // one, and that's the common case, not an error.
+      // Missing root or missing INSTRUCTIONS.md within it: not every root
+      // has one, and that's the common case, not an error.
       continue;
     }
   }

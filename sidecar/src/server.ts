@@ -154,7 +154,17 @@ export function buildApp(
    * call site keeps compiling and simply gets no agent selection or global
    * instructions (`/agent/run` behaves exactly as it did before this batch).
    */
-  agentDefinitions?: AgentDefinitionsSource
+  agentDefinitions?: AgentDefinitionsSource,
+  /**
+   * Design §10.1/§10.2: the real user home directory, threaded to
+   * `buildAgentRoutes`'s `AgentRouteOptions.homeDir` -- both the default
+   * `workingDirectory` and the upward-walk boundary for project `AGENTS.md`
+   * resolution (run-start and mid-run). Optional, trailing, same reasoning
+   * as every other optional param above: every pre-existing call site keeps
+   * compiling and this whole feature is skipped rather than guessing at a
+   * boundary (see `AgentRouteOptions.homeDir`'s own doc comment).
+   */
+  homeDir?: string
 ) {
   return createRouter([
     {
@@ -172,6 +182,7 @@ export function buildApp(
       approvalMode: agentApprovalMode,
       skills: skillStore,
       agentDefinitions,
+      homeDir,
     }),
     ...buildConversationRoutes(conversations),
     // P0-1: the entity dictionary feeds back into recognition -- read per
@@ -523,7 +534,8 @@ async function main() {
     env.contextLogPath,
     env.agentApprovalMode,
     skillStore,
-    agentDefinitions
+    agentDefinitions,
+    homedir()
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

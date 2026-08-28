@@ -420,3 +420,221 @@ describe("runAgentLoop generalization (open-file + ask-web design §2)", () => {
     expect(result.result.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * The mid-run `projectContext` dep on `RunAgentLoopDeps` (design §10.1/§10.2,
+ * docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md).
+ * Wired the same way `repeatGuard` already is (see `repeatGuard.test.ts`'s
+ * "a reminder never replaces the tool result it follows" test, which this
+ * mirrors): observed once per tool call, its non-undefined return pushed as
+ * its OWN `user` message, strictly after the tool's own `tool` message and
+ * never in place of it.
+ *
+ * `RunAgentLoopDeps.projectContext` is shaped like `repeatGuard`'s own dep
+ * field -- an object with a single `observe(toolName, args)` method -- so a
+ * plain object literal satisfying that shape is a valid fake here without
+ * importing anything from `projectContext.ts` itself; these tests only pin
+ * the LOOP's wiring, not the observer's own resolution logic (that's
+ * `projectContext.test.ts`'s job).
+ */
+describe("runAgentLoop projectContext dep (design §10.1/§10.2 mid-run discovery)", () => {
+  interface FakeProjectContextObserver {
+    observe(toolName: string, args: unknown): string | undefined;
+  }
+
+  test("a projectContext observer's non-undefined return is pushed as a user message, after and separate from the tool result", async () => {
+    let chatCalls = 0;
+    const capturedMessages: AgentChatMessage[][] = [];
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages.push(messages);
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "opentype__bash", arguments: '{"cwd":"/repo"}' },
+            },
+          ],
+        };
+      }
+      return { content: "done" };
+    };
+    const tools: McpToolSet = {
+      openAiTools: [],
+      callTool: async () => ({ content: "TOOL OUTPUT VERBATIM" }),
+    };
+    const observedCalls: Array<{ toolName: string; args: unknown }> = [];
+    const projectContext: FakeProjectContextObserver = {
+      observe: (toolName, args) => {
+        observedCalls.push({ toolName, args });
+        return "PROJECT CONTEXT BLOCK FOR /repo";
+      },
+    };
+
+    const result = await runAgentLoop({ task: "do something" }, { chat, tools, projectContext });
+
+    expect(result.result).toBe("done");
+    // The loop must pass the tool call's own (parsed) name and arguments
+    // through unchanged -- this is what lets the observer extract cwd/path.
+    expect(observedCalls).toEqual([{ toolName: "opentype__bash", args: { cwd: "/repo" } }]);
+
+    const finalMessages = capturedMessages.at(-1)!;
+    const toolMessages = finalMessages.filter((m) => (m as { role: string }).role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    // The tool result itself must stay the tool's own verbatim output -- the
+    // injected block is a SEPARATE message, never a replacement or mutation
+    // of it, so the step log and any audit of it remain faithful (the exact
+    // rule repeatGuard's own test of this pins for its reminder).
+    expect((toolMessages[0] as { content: string }).content).toBe("TOOL OUTPUT VERBATIM");
+
+    const projectMessages = finalMessages.filter(
+      (m) =>
+        (m as { role: string }).role === "user" &&
+        String((m as { content: unknown }).content).includes("PROJECT CONTEXT BLOCK FOR /repo")
+    );
+    expect(projectMessages).toHaveLength(1);
+
+    // §10.4's "goes in the user message, never the system message" rule
+    // applies to the mid-run discovery path too, not just the run-start
+    // path (routes.test.ts covers run-start). The system message is built
+    // once at the very start of the loop and never touched again, so this
+    // also guards against a future refactor that started mutating it.
+    const systemMessages = finalMessages.filter((m) => (m as { role: string }).role === "system");
+    expect(systemMessages).toHaveLength(1);
+    expect((systemMessages[0] as { content: string }).content).not.toContain(
+      "PROJECT CONTEXT BLOCK FOR /repo"
+    );
+  });
+
+  test("projectContext returning undefined pushes no extra message", async () => {
+    let chatCalls = 0;
+    const capturedMessages: AgentChatMessage[][] = [];
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages.push(messages);
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            { id: "call_1", type: "function", function: { name: "opentype__grep", arguments: "{}" } },
+          ],
+        };
+      }
+      return { content: "done" };
+    };
+    const tools: McpToolSet = {
+      openAiTools: [],
+      callTool: async () => ({ content: "GREP RESULT" }),
+    };
+    const projectContext: FakeProjectContextObserver = { observe: () => undefined };
+
+    await runAgentLoop({ task: "search something" }, { chat, tools, projectContext });
+
+    const finalMessages = capturedMessages.at(-1)!;
+    const userMessages = finalMessages.filter((m) => (m as { role: string }).role === "user");
+    // Only the ORIGINAL task's user message -- no extra one from a
+    // non-firing observer.
+    expect(userMessages).toHaveLength(1);
+  });
+
+  // Stage-4 review, priority item #1: `parsedArgs` in `loop.ts` is declared
+  // with `let` just above the per-tool-call `try` block, INSIDE the `for
+  // (const toolCall of toolCalls)` loop -- so each tool call gets its own
+  // fresh binding. If it were instead hoisted OUTSIDE that loop (one
+  // binding shared across every tool call in the batch), a tool call whose
+  // `JSON.parse` failed would leave `parsedArgs` holding the PREVIOUS call's
+  // arguments, and `projectContext.observe` would silently resolve against
+  // the wrong tool call's path -- a stale-args bug no other test here would
+  // catch, since none of them issue two tool calls in one iteration where
+  // the second has unparseable arguments. This test does exactly that.
+  test("two tool calls in one iteration, the second with unparseable arguments: the observer never sees the FIRST call's args for the SECOND call", async () => {
+    let chatCalls = 0;
+    const chat: AgentChatFn = async () => {
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "opentype__bash", arguments: '{"cwd":"/repo-one"}' },
+            },
+            {
+              id: "call_2",
+              type: "function",
+              // Deliberately malformed JSON -- `JSON.parse` throws, so
+              // `parsedArgs` for THIS call must be `undefined`, never a
+              // leftover from call_1.
+              function: { name: "opentype__bash", arguments: "{not valid json" },
+            },
+          ],
+        };
+      }
+      return { content: "done" };
+    };
+    const tools: McpToolSet = {
+      openAiTools: [],
+      callTool: async () => ({ content: "TOOL OUTPUT" }),
+    };
+    const observedCalls: Array<{ toolName: string; args: unknown }> = [];
+    const projectContext: FakeProjectContextObserver = {
+      observe: (toolName, args) => {
+        observedCalls.push({ toolName, args });
+        return undefined;
+      },
+    };
+
+    const result = await runAgentLoop({ task: "do two things" }, { chat, tools, projectContext });
+
+    expect(result.result).toBe("done");
+    expect(observedCalls).toHaveLength(2);
+    // call_1's own arguments, parsed.
+    expect(observedCalls[0]).toEqual({ toolName: "opentype__bash", args: { cwd: "/repo-one" } });
+    // call_2's arguments failed to parse -- must be `undefined`, NEVER
+    // call_1's `{ cwd: "/repo-one" }` leaking across the loop iteration.
+    expect(observedCalls[1]).toEqual({ toolName: "opentype__bash", args: undefined });
+  });
+
+  test("omitting the projectContext dep leaves the loop byte-identical to today (no extra messages, no crash)", async () => {
+    let chatCalls = 0;
+    const capturedMessages: AgentChatMessage[][] = [];
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages.push(messages);
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        return {
+          content: null,
+          toolCalls: [
+            { id: "call_1", type: "function", function: { name: "opentype__bash", arguments: '{"cwd":"/repo"}' } },
+          ],
+        };
+      }
+      return { content: "done" };
+    };
+    const tools: McpToolSet = {
+      openAiTools: [],
+      callTool: async () => ({ content: "TOOL OUTPUT" }),
+    };
+
+    // No `projectContext` key at all in deps -- exactly every pre-existing
+    // caller of runAgentLoop today.
+    const result = await runAgentLoop({ task: "do something" }, { chat, tools });
+
+    expect(result.result).toBe("done");
+    const finalMessages = capturedMessages.at(-1)!;
+    // system + original user + assistant (tool_calls) + tool result --
+    // exactly 4 messages, no fifth "project context" user message sneaking
+    // in when the dep was never supplied.
+    expect(finalMessages).toHaveLength(4);
+    expect(finalMessages.map((m) => (m as { role: string }).role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "tool",
+    ]);
+  });
+});

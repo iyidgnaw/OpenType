@@ -77,4 +77,19 @@ describe("resolveGlobalInstructionRoots", () => {
 
     expect(roots[0]).toBe("/custom/built-in");
   });
+
+  // Design §10.3 renamed the global instructions file this resolver's roots
+  // feed (`~/.opentype/AGENTS.md` -> `~/.opentype/INSTRUCTIONS.md`) and says
+  // the `~/.claude` exclusion "原样保留，理由不变" ("kept as-is, reasoning
+  // unchanged") across that rename. This resolver only ever returns
+  // DIRECTORIES -- it has no concept of which filename gets read inside
+  // them -- so the exclusion guarantee is automatically inherited by the
+  // rename with zero code change here. This test pins that as an asserted
+  // fact rather than an inference: the boundary this module enforces is
+  // about ROOTS, not about which file within a root gets opened.
+  test("the ~/.claude exclusion is filename-agnostic and survives the INSTRUCTIONS.md rename (design §10.3)", () => {
+    const roots = resolveGlobalInstructionRoots({ homeDir: "/home/diyi", builtInAgentsDir: "/app/agents" });
+
+    expect(roots.some((root) => root.includes(".claude"))).toBe(false);
+  });
 });

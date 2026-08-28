@@ -224,32 +224,47 @@ describe("buildAgentSystemPrompt: composition is APPEND, never replace (design �
   });
 });
 
-describe("loadGlobalInstructions: AGENTS.md discovery (design §4.5)", () => {
-  // ASSUMPTION (flagged in the report, spec does not pin this): the design
-  // text only says "if AGENTS.md exists under any root", without saying
-  // what happens if MORE THAN ONE root has one. We assume the additive
-  // reading -- every root's AGENTS.md that exists is included, in root
-  // order -- since "owner global instructions" plausibly comes from both a
-  // shipped default AND a user override, and first-root-wins (silently
-  // dropping the user's own file) would be a surprising way to treat a file
-  // whose entire purpose is direct human authorship.
-  test("no root has AGENTS.md: returns undefined", () => {
+describe("loadGlobalInstructions: INSTRUCTIONS.md discovery (design §10.3, revising §4.5)", () => {
+  // REVISED (design owner instruction, 2026-08-28, §10.3): the global
+  // instructions file is renamed from `AGENTS.md` to `INSTRUCTIONS.md`, and
+  // `AGENTS.md` stops being read as global instructions at all -- because
+  // `AGENTS.md` now means the real, unrelated agents.md-standard project
+  // file (§10.1/§10.2), and having both concepts share a filename is
+  // exactly what misled people into building the wrong thing the first
+  // time. This feature was only committed hours before this revision and
+  // never shipped, so this is a straight rename with no migration
+  // requirement, not a deprecation. Every test below that previously wrote
+  // an `AGENTS.md` fixture now writes `INSTRUCTIONS.md` instead; the
+  // function under test (`loadGlobalInstructions`) keeps its name --
+  // nothing about ITS signature or role changed, only the filename it
+  // reads.
+  //
+  // ASSUMPTION (unchanged from the pre-revision version of this file, still
+  // flagged in the report): the design text only says "if the file exists
+  // under any root", without saying what happens if MORE THAN ONE root has
+  // one. We assume the additive reading -- every root's file that exists is
+  // included, in root order -- since "owner global instructions" plausibly
+  // comes from both a shipped default AND a user override, and
+  // first-root-wins (silently dropping the user's own file) would be a
+  // surprising way to treat a file whose entire purpose is direct human
+  // authorship.
+  test("no root has INSTRUCTIONS.md: returns undefined", () => {
     const root = mkTempDir();
     expect(loadGlobalInstructions([root])).toBeUndefined();
   });
 
-  test("a single root's AGENTS.md content is returned", () => {
+  test("a single root's INSTRUCTIONS.md content is returned", () => {
     const root = mkTempDir();
-    fs.writeFileSync(path.join(root, "AGENTS.md"), "Always sign off with the owner's name.");
+    fs.writeFileSync(path.join(root, "INSTRUCTIONS.md"), "Always sign off with the owner's name.");
 
     expect(loadGlobalInstructions([root])).toContain("Always sign off with the owner's name.");
   });
 
-  test("multiple roots each with AGENTS.md: both are included, in root order", () => {
+  test("multiple roots each with INSTRUCTIONS.md: both are included, in root order", () => {
     const rootA = mkTempDir();
     const rootB = mkTempDir();
-    fs.writeFileSync(path.join(rootA, "AGENTS.md"), "FROM ROOT A");
-    fs.writeFileSync(path.join(rootB, "AGENTS.md"), "FROM ROOT B");
+    fs.writeFileSync(path.join(rootA, "INSTRUCTIONS.md"), "FROM ROOT A");
+    fs.writeFileSync(path.join(rootB, "INSTRUCTIONS.md"), "FROM ROOT B");
 
     const result = loadGlobalInstructions([rootA, rootB]) ?? "";
     expect(result).toContain("FROM ROOT A");
@@ -260,21 +275,46 @@ describe("loadGlobalInstructions: AGENTS.md discovery (design §4.5)", () => {
   test("a missing root among the list does not throw", () => {
     const missingRoot = path.join(mkTempDir(), "does-not-exist");
     const rootB = mkTempDir();
-    fs.writeFileSync(path.join(rootB, "AGENTS.md"), "FROM ROOT B");
+    fs.writeFileSync(path.join(rootB, "INSTRUCTIONS.md"), "FROM ROOT B");
 
     expect(() => loadGlobalInstructions([missingRoot, rootB])).not.toThrow();
     expect(loadGlobalInstructions([missingRoot, rootB])).toContain("FROM ROOT B");
   });
 
+  // THE REGRESSION TEST FOR THE RENAME ITSELF: a root carrying the OLD
+  // filename (`AGENTS.md`) but no `INSTRUCTIONS.md` must NOT contribute
+  // anything -- proving the rename is a real behavior change, not just a
+  // renamed fixture in the tests above. If an implementation kept reading
+  // `AGENTS.md` as a fallback (e.g. "try INSTRUCTIONS.md, then AGENTS.md
+  // for compat"), this is what would catch it.
+  test("a root's AGENTS.md is NOT read as global instructions anymore (design §10.3)", () => {
+    const root = mkTempDir();
+    fs.writeFileSync(path.join(root, "AGENTS.md"), "OLD FILENAME -- MUST NEVER BE READ AS GLOBAL INSTRUCTIONS");
+
+    expect(loadGlobalInstructions([root])).toBeUndefined();
+  });
+
+  test("a root with BOTH files present only surfaces INSTRUCTIONS.md's content, never AGENTS.md's", () => {
+    const root = mkTempDir();
+    fs.writeFileSync(path.join(root, "AGENTS.md"), "OLD FILENAME CONTENT -- MUST NOT APPEAR");
+    fs.writeFileSync(path.join(root, "INSTRUCTIONS.md"), "NEW FILENAME CONTENT");
+
+    const result = loadGlobalInstructions([root]) ?? "";
+    expect(result).toContain("NEW FILENAME CONTENT");
+    expect(result).not.toContain("OLD FILENAME CONTENT");
+  });
+
   // REVISED (design owner adjudication, 2026-08-28, overriding the original
-  // "additive across all three roots" reading above): the `~/.claude`
-  // compat root must be EXCLUDED from AGENTS.md, unlike agent-definition
-  // discovery itself, which DOES include it. Reasoning: an agent/skill
-  // imported from `~/.claude` is opt-in -- the model has to name it for it
-  // to matter -- but a global AGENTS.md is always-on and unnamed, so
-  // reading `~/.claude/AGENTS.md` would silently inject the user's *coding*
+  // "additive across all three roots" reading above -- and, per §10.3,
+  // unaffected by the filename rename): the `~/.claude` compat root must be
+  // EXCLUDED from global instructions, unlike agent-definition discovery
+  // itself, which DOES include it. Reasoning: an agent/skill imported from
+  // `~/.claude` is opt-in -- the model has to name it for it to matter --
+  // but global instructions are always-on and unnamed, so reading
+  // `~/.claude/INSTRUCTIONS.md` would silently inject the user's *coding*
   // instructions into every voice-dictation task. Different consent model,
-  // different rule.
+  // different rule. §10.3 explicitly says this exclusion "原样保留，理由
+  // 不变" for the renamed file.
   //
   // `loadGlobalInstructions` itself is (deliberately) role-agnostic -- it
   // has no concept of "built-in" vs. "compat" and simply reads whatever
@@ -288,13 +328,13 @@ describe("loadGlobalInstructions: AGENTS.md discovery (design §4.5)", () => {
   // by construction, prove server.ts's actual call site honors it; that
   // half of the guarantee needs a server.ts-level wiring test, which is
   // outside this pipeline's file scope (flagged in the stage-2 report).
-  test("a compat-root AGENTS.md is excluded when the caller omits that root from the list (design §4.5 revised)", () => {
+  test("a compat-root INSTRUCTIONS.md is excluded when the caller omits that root from the list (design §10.3, was §4.5)", () => {
     const builtInRoot = mkTempDir();
     const opentypeRoot = mkTempDir();
     const claudeCompatRoot = mkTempDir();
-    fs.writeFileSync(path.join(builtInRoot, "AGENTS.md"), "FROM BUILT-IN");
-    fs.writeFileSync(path.join(opentypeRoot, "AGENTS.md"), "FROM OPENTYPE");
-    fs.writeFileSync(path.join(claudeCompatRoot, "AGENTS.md"), "FROM CLAUDE COMPAT -- MUST NEVER APPEAR");
+    fs.writeFileSync(path.join(builtInRoot, "INSTRUCTIONS.md"), "FROM BUILT-IN");
+    fs.writeFileSync(path.join(opentypeRoot, "INSTRUCTIONS.md"), "FROM OPENTYPE");
+    fs.writeFileSync(path.join(claudeCompatRoot, "INSTRUCTIONS.md"), "FROM CLAUDE COMPAT -- MUST NEVER APPEAR");
 
     // The caller (standing in for server.ts's real assembly) deliberately
     // omits claudeCompatRoot here -- that omission IS the enforcement point.
@@ -303,6 +343,33 @@ describe("loadGlobalInstructions: AGENTS.md discovery (design §4.5)", () => {
     expect(result).toContain("FROM BUILT-IN");
     expect(result).toContain("FROM OPENTYPE");
     expect(result).not.toContain("FROM CLAUDE COMPAT");
+  });
+});
+
+/**
+ * §10.4's two-destinations rule, from the global-instructions side: the
+ * renamed `INSTRUCTIONS.md` content must land in the SYSTEM message (it is
+ * stable across requests within one config, unlike a project's AGENTS.md,
+ * which varies by working directory and therefore must never sit in the
+ * system message -- see `routes.test.ts`'s and `loop.test.ts`'s project-
+ * AGENTS.md tests for the contrasting user-message placement). This is
+ * already exercised indirectly by `buildAgentSystemPrompt`'s composition
+ * tests above (`globalInstructions` is always appended into the string that
+ * becomes the system message); this test asserts it explicitly and names
+ * the contrast, since design §10.4 calls the split out as a deliberate,
+ * security/cache-relevant decision rather than a style choice.
+ */
+describe("global instructions land in the SYSTEM message, unlike project AGENTS.md (design §10.4)", () => {
+  test("buildAgentSystemPrompt places global instructions in the string destined for the system message", () => {
+    const result = buildAgentSystemPrompt(AGENT_SYSTEM_PROMPT, undefined, "OWNER GLOBAL INSTRUCTIONS FROM INSTRUCTIONS.md");
+
+    // `buildAgentSystemPrompt`'s whole contract (see the composition
+    // describe block above) is "this string becomes the system message" --
+    // there is no separate user-message channel this function could route
+    // through, which is exactly the point: global instructions have only
+    // ONE destination, and it's this one.
+    expect(result).toContain("OWNER GLOBAL INSTRUCTIONS FROM INSTRUCTIONS.md");
+    expect(result.startsWith(AGENT_SYSTEM_PROMPT)).toBe(true);
   });
 });
 

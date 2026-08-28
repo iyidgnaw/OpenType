@@ -392,11 +392,22 @@ load-bearing for KV-cache stability, not a style choice).
 
 Resolution rule, taken literally from the standard: walking upward from a
 directory, the **first** `AGENTS.md` found wins outright — it is never
-merged with an ancestor's, even a repository root's. The walk stops at the
-user's home directory **inclusive**, or the filesystem root, whichever comes
-first — an `AGENTS.md` placed directly at `~` is found; one directory above
-`~` never is, on purpose (`src/agent/projectAgentsMd.ts`'s
-`findProjectAgentsMd`).
+merged with an ancestor's, even a repository root's. The walk **never
+leaves the home directory tree**: a `workingDirectory`/tool-call `cwd` that
+does not resolve inside `~` (checked via `realpath`, not a literal string
+compare — `/tmp`/`/var` are themselves symlinks on macOS) returns nothing
+and triggers no walk at all, not even one level up. `~` itself stays an
+**inclusive** stop — an `AGENTS.md` placed directly at `~` is found
+(`src/agent/projectAgentsMd.ts`'s `findProjectAgentsMd`).
+
+⚠️ **2026-08-28 owner correction (stage-4 review finding):** this used to
+read "the walk stops at home inclusive, or the filesystem root, whichever
+comes first" — which, taken literally, meant a `workingDirectory` with no
+ancestry in common with `~` (e.g. something under `/tmp`, world-writable on
+macOS) walked all the way to the filesystem root, reading whatever
+`AGENTS.md` any local process had planted along the way, for an agent with
+no sandbox and (§2.1) no approval prompt by default. The rule is now scoped
+to the home tree only, with no filesystem-root fallback.
 
 Two entry points, because which project a task is about is often discovered
 *during* the run, not known when it starts (a user says "看看这个项目的测试

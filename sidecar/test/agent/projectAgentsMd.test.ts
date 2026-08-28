@@ -125,10 +125,23 @@ describe("findProjectAgentsMd: nearest-file resolution (design §10.1/§10.2)", 
     expect(result).toBeUndefined();
   });
 
-  test("a start directory outside/unrelated to homeDir terminates at the filesystem root without throwing or hanging", () => {
-    // homeDir and startDir share no ancestry at all -- the walk from
-    // startDir will never hit homeDir, so it must fall through to the
-    // filesystem-root boundary instead of looping forever.
+  // REVISED (owner correction, 2026-08-28, following stage-4 review priority
+  // item #2): originally this test's own comment described the walk as
+  // "falling through to the filesystem-root boundary" when startDir and
+  // homeDir share no ancestry -- and flagged, as an open ASSUMPTION, that
+  // nothing between startDir and the real filesystem root happened to have
+  // an AGENTS.md in the test environment. That assumption was covering for
+  // a real defect: §10.2's original text ("home dir inclusive OR filesystem
+  // root, whichever comes first") licensed exactly that walk-to-root
+  // fallback, which means reading whatever AGENTS.md sits in ANY shared
+  // ancestor above an unrelated startDir -- including a world-writable
+  // directory like `/tmp` that any local process can plant a file in, for
+  // an agent with no sandbox and no default approval prompt (§2.1). The
+  // rule is now: a startDir outside homeDir is out of scope, full stop --
+  // no walk happens at all, so there is no "assume nothing exists up
+  // there" caveat left to make. See the dedicated test below, which proves
+  // this with planted decoys rather than an absence-of-evidence assumption.
+  test("a start directory outside/unrelated to homeDir returns undefined immediately, without throwing or hanging", () => {
     const startTree = mkTempDir();
     const startDir = path.join(startTree, "unrelated", "deeply", "nested", "dir");
     fs.mkdirSync(startDir, { recursive: true });
@@ -138,10 +151,54 @@ describe("findProjectAgentsMd: nearest-file resolution (design §10.1/§10.2)", 
     expect(() => {
       result = projectAgentsMd.findProjectAgentsMd(startDir, unrelatedHome);
     }).not.toThrow();
-    // ASSUMPTION (flagged in the report): this assumes no AGENTS.md exists
-    // anywhere between `startDir` and the real filesystem root in the test
-    // environment, which holds for a throwaway CI/dev sandbox.
     expect(result).toBeUndefined();
+  });
+
+  // The proof for the correction above: decoys planted at EVERY ancestor
+  // level between startDir and the filesystem root (modelling a
+  // world-writable location like `/tmp` that an attacker or any other local
+  // process controls) must never be picked up when startDir shares no
+  // ancestry with homeDir at all. Under the pre-correction behaviour (walk
+  // up to the filesystem root as a fallback), this test would have found
+  // "PLANTED ONE LEVEL UP" or "PLANTED AT STARTTREE ROOT" instead of
+  // returning `undefined`.
+  test("a startDir entirely outside homeDir never reads a planted AGENTS.md at any ancestor level (owner correction, 2026-08-28)", () => {
+    const startTree = mkTempDir();
+    const startDir = path.join(startTree, "somewhere", "deep");
+    fs.mkdirSync(startDir, { recursive: true });
+    writeFile(startTree, "AGENTS.md", "PLANTED AT STARTTREE ROOT -- MUST NEVER APPEAR");
+    writeFile(path.join(startTree, "somewhere"), "AGENTS.md", "PLANTED ONE LEVEL UP -- MUST NEVER APPEAR");
+    const homeDir = mkTempDir(); // a completely separate tree, no shared ancestry with startTree
+
+    const result = projectAgentsMd.findProjectAgentsMd(startDir, homeDir);
+
+    expect(result).toBeUndefined();
+  });
+
+  // Companion to the outside-home test above: a startDir that LOOKS like it
+  // might be outside home (it's reached through a symlink whose literal
+  // spelling lives elsewhere) but whose real location genuinely IS inside
+  // home must resolve normally -- the containment check must not
+  // over-correct into spuriously rejecting a legitimate in-home path.
+  //
+  // Provenance note: the returned `path` reflects the CALLER's own literal
+  // spelling (`.../project-link/AGENTS.md`, through the symlink), not the
+  // symlink's real target (`.../project/AGENTS.md`) -- `findProjectAgentsMd`
+  // canonicalises paths only for the boundary DECISION, never for what it
+  // reports back (see its own doc comment). `fs.readFileSync` follows the
+  // symlink transparently at the OS level, so the CONTENT read is still the
+  // real target file's.
+  test("a startDir reached via a symlink that resolves to somewhere INSIDE home is correctly treated as inside, not spuriously rejected", () => {
+    const homeDir = mkTempDir();
+    const project = path.join(homeDir, "project");
+    writeFile(project, "AGENTS.md", "PROJECT CONVENTIONS");
+    const startDirSymlink = path.join(homeDir, "project-link");
+    fs.symlinkSync(project, startDirSymlink, "dir");
+
+    const result = projectAgentsMd.findProjectAgentsMd(startDirSymlink, homeDir);
+
+    expect(result?.content).toContain("PROJECT CONVENTIONS");
+    expect(result?.path).toBe(path.join(startDirSymlink, "AGENTS.md"));
   });
 
   test("a missing AGENTS.md file that turns out to be unreadable (a directory of that name, not a file) is skipped, not thrown", () => {

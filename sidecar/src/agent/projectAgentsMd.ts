@@ -20,27 +20,44 @@ export interface ProjectAgentsMd {
 }
 
 /**
- * `path.resolve` collapses `.`/`..` segments and trailing slashes, but it
- * does NOT resolve symlinks -- and macOS routes several common roots through
- * one (`/tmp` -> `/private/tmp`, `/var` -> `/private/var`, which is also
- * where `os.tmpdir()` -- and therefore every test's `mkdtempSync` root --
- * actually lives). Without this, `homeDir` and a `dir` that is the SAME
- * directory but reached through its symlinked spelling would never compare
- * equal, and the upward walk below would silently sail past the home
- * boundary §10.2 requires, all the way to the real filesystem root.
+ * Best-effort `realpath`: resolves as much of `p` as actually exists on
+ * disk, and re-appends any trailing components that don't (a nonexistent
+ * leaf under an existing, possibly-symlinked, ancestor) literally.
  *
- * Falls back to the plain resolved path when `realpathSync` throws (a
- * directory that does not exist on disk, e.g. a `startDir` several levels
- * below anything real) -- that path can never legitimately match
- * `resolvedHome` anyway, so the fallback only ever costs a comparison that
- * was always going to fail, never a false match.
+ * Plain `fs.realpathSync` throws the moment ANY part of the path is
+ * missing, which would otherwise force falling back to a bare
+ * `path.resolve` for the WHOLE path the instant `startDir` doesn't exist
+ * yet -- losing symlink resolution for the existing ancestor portion too,
+ * which is exactly the part `findProjectAgentsMd`'s home-boundary check
+ * below depends on. `path.resolve` alone only collapses `.`/`..` segments
+ * and trailing slashes; it never touches symlinks, and macOS routes several
+ * common roots through one (`/tmp` -> `/private/tmp`, `/var` ->
+ * `/private/var`, which is also where `os.tmpdir()` -- and therefore every
+ * test's `mkdtempSync` root -- actually lives).
+ *
+ * Falls back to the plain resolved path only if NOTHING on the path exists,
+ * all the way to the filesystem root (an entirely hypothetical `p`).
  */
-function realpathOrSelf(p: string): string {
-  try {
-    return fs.realpathSync(p);
-  } catch {
-    return p;
+function realpathBestEffort(p: string): string {
+  let dir = path.resolve(p);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(dir), ...tail);
+    } catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) {
+        return path.resolve(p);
+      }
+      tail.unshift(path.basename(dir));
+      dir = parent;
+    }
   }
+}
+
+/** True when `child` is `parent` itself, or a descendant of it. Both must already be resolved absolute paths. */
+function isInsideOrEqual(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent + path.sep);
 }
 
 /**
@@ -48,66 +65,79 @@ function realpathOrSelf(p: string): string {
  * "找到的第一份即采用，不再继续向上，也不与上层合并") -- a nested package's
  * file fully shadows its repo root's, they are never combined.
  *
- * The walk stops at `homeDir` INCLUSIVE, or the real filesystem root,
- * whichever comes first (§10.2: "绝不读 /AGENTS.md 或 /Users/AGENTS.md --
- * 那不是任何人的项目"). An `AGENTS.md` placed directly at `homeDir` IS found;
- * one directory above `homeDir` never is, even if it exists on disk -- and
- * the literal filesystem root's own `AGENTS.md` is never read either, even
- * when `startDir`/`homeDir` share no common ancestry and the walk has
- * nowhere else to stop (see the `isFilesystemRoot` handling below).
+ * The walk NEVER leaves the `homeDir` tree (2026-08-28 owner correction to
+ * §10.2, see the design doc's own §10.2 for the reasoning in full): if the
+ * (realpath-resolved) `startDir` is not `homeDir` itself or somewhere under
+ * it, this returns `undefined` immediately, without taking a single step
+ * upward -- not "walk up to the filesystem root as a fallback". The
+ * original §10.2 text ("home dir inclusive OR filesystem root, whichever
+ * comes first") literally licensed climbing out of home for an unrelated
+ * `startDir`, which meant reading whatever `AGENTS.md` happened to sit in
+ * any shared ancestor above it -- including a world-writable directory like
+ * `/tmp` that any local process can plant a file in, read by an agent with
+ * no sandbox and (§2.1) no approval prompt by default. `homeDir` itself
+ * stays an inclusive stop: an `AGENTS.md` placed directly at `homeDir` IS
+ * found.
  *
- * The boundary comparison itself goes through `realpathOrSelf`, not a plain
- * string compare, so a symlink-crossing path (see that function's own doc
- * comment) can't silently defeat it.
+ * The BOUNDARY decisions (is `startDir` inside `homeDir` at all; has the
+ * walk now reached `homeDir`) are made by comparing `realpathBestEffort`
+ * forms, never literal strings -- see that function's own doc comment for
+ * why a plain `path.resolve` is not enough on macOS. The WALK itself, and
+ * the `path` this returns, stay in terms of the caller's own (literal,
+ * merely `path.resolve`d) directory chain, deliberately NOT canonicalised:
+ * provenance should read back as the path the caller actually referenced
+ * (e.g. a symlinked project directory a tool call named directly), not a
+ * `/private/...`-style canonical form the caller never wrote or saw.
  *
  * Never throws: a missing `startDir`, a missing or unreadable `AGENTS.md`
  * (including the edge case of a directory that happens to be named
- * `AGENTS.md`), or a `startDir` with no ancestry in common with `homeDir`
- * all resolve to `undefined` rather than propagating an error -- matching
+ * `AGENTS.md`), or a `startDir` outside `homeDir` entirely all resolve to
+ * `undefined` rather than propagating an error -- matching
  * `loadGlobalInstructions`'s existing try/catch-swallow style for the same
  * reason: a missing project file is the overwhelmingly common case, not a
  * fault.
  */
 export function findProjectAgentsMd(startDir: string, homeDir: string): ProjectAgentsMd | undefined {
-  const resolvedHome = realpathOrSelf(path.resolve(homeDir));
+  const realHome = realpathBestEffort(homeDir);
+
+  if (!isInsideOrEqual(realpathBestEffort(startDir), realHome)) {
+    // Not home itself and not under it: out of scope for automatic
+    // instruction pickup, full stop. No walk, no read, not even one level
+    // up -- see this function's own doc comment for why "walk to the
+    // filesystem root instead" is not an acceptable fallback here.
+    return undefined;
+  }
+
   let dir = path.resolve(startDir);
-
   for (;;) {
-    const isFilesystemRoot = path.dirname(dir) === dir;
-    if (!isFilesystemRoot) {
-      // Never even attempt this read at the filesystem root itself (see
-      // below) -- "绝不读 /AGENTS.md 或 /Users/AGENTS.md" (§10.2) is a rule
-      // about not treating the root, or one level below it when that's as
-      // far as an unrelated startDir/homeDir pairing ever climbs, as
-      // anyone's project. Only the root is special-cased explicitly here;
-      // every real ancestor between `startDir` and `homeDir` (or the root)
-      // is a legitimate candidate and IS read.
-      const candidate = path.join(dir, "AGENTS.md");
-      try {
-        const content = fs.readFileSync(candidate, "utf8");
-        return { content, path: candidate };
-      } catch {
-        // Missing file, a directory named AGENTS.md (EISDIR), or any other
-        // read failure -- all treated as "nothing here", never thrown.
-      }
+    const candidate = path.join(dir, "AGENTS.md");
+    try {
+      const content = fs.readFileSync(candidate, "utf8");
+      return { content, path: candidate };
+    } catch {
+      // Missing file, a directory named AGENTS.md (EISDIR), or any other
+      // read failure -- all treated as "nothing here", never thrown.
     }
 
-    // Compared via realpath, not the literal string -- see
-    // `realpathOrSelf`'s own doc comment for why a plain `dir ===
-    // resolvedHome` is not safe on macOS.
-    if (realpathOrSelf(dir) === resolvedHome) {
+    if (realpathBestEffort(dir) === realHome) {
       // Boundary reached with nothing found at homeDir itself: stop here,
-      // never read anything above it.
+      // never read anything above it. Compared via realpath (not `dir ===
+      // path.resolve(homeDir)`) so a symlinked `homeDir` -- reached, while
+      // walking, through a literal ancestor spelling that never matches
+      // `homeDir`'s own literal spelling -- still correctly stops here
+      // instead of climbing past it.
       return undefined;
     }
 
-    if (isFilesystemRoot) {
-      // Filesystem root reached without ever passing through homeDir (an
-      // unrelated startDir) -- stop rather than loop forever, and without
-      // ever having read root's own AGENTS.md (see above).
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      // Unreachable in ordinary operation now that the upfront containment
+      // check guarantees `startDir` starts inside `homeDir` (never the
+      // filesystem root itself) -- kept only as a backstop against looping
+      // forever if that invariant is ever violated by a future change.
       return undefined;
     }
-    dir = path.dirname(dir);
+    dir = parent;
   }
 }
 

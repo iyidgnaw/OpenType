@@ -138,11 +138,7 @@ struct SettingsColumn: View {
     /// rather than a menu that hides the current value behind a click.
     private var interfaceLanguageRow: some View {
         SettingsStackedRow(
-            title: OpenTypeL10n.text("界面语言", english: "Interface language"),
-            titleHint: OpenTypeL10n.text(
-                "系统自身的权限弹窗（麦克风、语音识别）跟随系统语言，不受这里影响",
-                english: "The system's own permission dialogs (microphone, speech recognition) follow the system language and are unaffected by this setting"
-            )
+            title: OpenTypeL10n.text("界面语言", english: "Interface language")
         ) {
             SegmentedControl(
                 options: InterfaceLanguage.allCases,
@@ -177,13 +173,11 @@ struct SettingsColumn: View {
             SettingsRow(
                 divided: false,
                 title: title,
-                // A refused `register()` replaces the explanation rather than
-                // sitting under it: the switch has just failed to move, and
-                // that is the only thing worth reading on the row.
-                subtitle: model.launchAtLoginError ?? OpenTypeL10n.text(
-                    "OpenType 常驻菜单栏，登录后自动开始运行，不占用程序坞",
-                    english: "OpenType lives in the menu bar — it starts with your session and never takes a Dock slot"
-                ),
+                // Nothing shows in the ordinary case (owner copy rule, §5,
+                // removed the standing "lives in the menu bar…" explanation);
+                // a refused `register()` is the one thing worth reading here,
+                // so it is the only subtitle this row ever prints.
+                subtitle: model.launchAtLoginError,
                 tinted: model.launchAtLoginError != nil
             ) {
                 SettingsSwitch(
@@ -226,8 +220,7 @@ struct SettingsColumn: View {
         SettingsGroup(OpenTypeL10n.text("快捷键", english: "Shortcut")) {
             SettingsRow(
                 divided: false,
-                title: OpenTypeL10n.text("启动方式", english: "Trigger"),
-                titleHint: configuration.hotKeyPreset.note
+                title: OpenTypeL10n.text("启动方式", english: "Trigger")
             ) {
                 Menu {
                     ForEach(HotKeyPreset.allCases) { preset in
@@ -290,11 +283,7 @@ struct SettingsColumn: View {
             // voice, so it gets the width.
             SettingsStackedRow(
                 divided: false,
-                title: OpenTypeL10n.text("松开之后", english: "On release"),
-                titleHint: OpenTypeL10n.text(
-                    "三档都不经过 AI 模型 —— 轻整理只按固定规则去口癖和标点。",
-                    english: "None of the three involves an AI model — Tidy only applies fixed rules to fillers and punctuation."
-                )
+                title: OpenTypeL10n.text("松开之后", english: "On release")
             ) {
                 SegmentedControl(
                     options: TranscribeVariant.allCases,
@@ -306,11 +295,7 @@ struct SettingsColumn: View {
             }
 
             SettingsRow(
-                title: OpenTypeL10n.text("自动写入当前输入框", english: "Insert into the focused field"),
-                subtitle: OpenTypeL10n.text(
-                    "结果始终会复制到剪贴板",
-                    english: "The result is always copied to the clipboard"
-                )
+                title: OpenTypeL10n.text("自动写入当前输入框", english: "Insert into the focused field")
             ) {
                 SettingsSwitch(isOn: $configuration.automaticallyInsert)
                     .accessibilityLabel(
@@ -343,10 +328,7 @@ struct SettingsColumn: View {
 
             SettingsRow(
                 title: OpenTypeL10n.text("提示音", english: "Sounds"),
-                subtitle: OpenTypeL10n.text(
-                    "OpenType Air · 一组低响度提示音",
-                    english: "OpenType Air · a set of quiet cues"
-                )
+                subtitle: "OpenType Air"
             ) {
                 Menu {
                     ForEach(FeedbackSoundCue.allCases) { cue in
@@ -435,10 +417,6 @@ struct SettingsColumn: View {
             if let config = model.whisperModelConfig, !config.presets.isEmpty {
                 SettingsRow(
                     title: OpenTypeL10n.text("语音模型", english: "Speech model"),
-                    titleHint: OpenTypeL10n.text(
-                        "更大的模型更准，但下载更久、识别更慢",
-                        english: "A larger model is more accurate, but slower to download and to transcribe"
-                    ),
                     // Only the transient "saved, not yet in effect" status
                     // shows as a subtitle — it is real state the user just
                     // caused, not standing prose about the tradeoff.
@@ -530,10 +508,7 @@ struct SettingsColumn: View {
             PermissionRow(
                 title: OpenTypeL10n.text("语音识别（实时字幕）", english: "Speech recognition (live captions)"),
                 status: model.speechRecognitionPermission,
-                deniedNote: OpenTypeL10n.text(
-                    "未授权时字幕不显示，不影响最终识别",
-                    english: "Without it captions stay hidden; final recognition is unaffected"
-                ),
+                deniedNote: nil,
                 grant: { model.requestSpeechRecognitionPermission() }
             )
         }
@@ -563,11 +538,7 @@ struct SettingsColumn: View {
         SettingsGroup(OpenTypeL10n.text("数据", english: "Data")) {
             SettingsRow(
                 divided: false,
-                title: OpenTypeL10n.text("保留本地输入历史", english: "Keep local input history"),
-                subtitle: OpenTypeL10n.text(
-                    "关闭后，听写、问答与任务的结果都不再写入本地记录，也不会被用作后续问答和任务的上下文；审计记录不受影响",
-                    english: "When off, results from dictation, ask, and agent tasks are no longer recorded locally, and won't be reused as context for later questions and tasks; the audit trail is unaffected"
-                )
+                title: OpenTypeL10n.text("保留本地输入历史", english: "Keep local input history")
             ) {
                 SettingsSwitch(isOn: $configuration.keepHistory)
                     .accessibilityLabel(

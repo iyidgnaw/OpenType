@@ -99,4 +99,11 @@
 
 ## 7. 决策日志（施工中追加）
 
-- （待记）
+- **A-1**（2026-08-29）：agent-definitions 五个端点放**新文件** `sidecar/src/agent/agentDefinitionRoutes.ts`，不在 `routes.ts` 原地改（避免动 `AgentDefinitionsSource` 破坏既有测试的 fake）。server.ts 路由表把新文件注册在 `buildAgentRoutes` **之前**（router 首个匹配生效），旧的 `GET /agent/definitions` handler 保留但被遮蔽，server.ts 加注释说明是刻意遮蔽、后续可清理。
+- **A-2**：API 的 `root` 字段沿用现状 = **字面文件系统根路径**（`ResourceEntry.root`），不发明符号 id。Swift 侧分组规则：路径前缀 `~/.opentype` → 「我的」，`~/.claude` → 「Claude Code」，其余 → 「内置」。
+- **A-3**：B2 只测承载性不变量（POST 的 model 永不落入文件），不锁具体状态码。
+- **A-4**：名称在任何根都不存在时 DELETE/PUT 返回 **404**；仅存在于 builtin/claude 时返回 403。
+- **A-5**：创建成功返回 **200**（本仓库 route 惯例，不用 201）。
+- **D-1**（2026-08-28）：D2 文案删除与 D3 窄轨图标并入 D1 的流水线一次实现、一次审查（E4 豁免测试部分）。
+- **D-3**（2026-08-29）：D4 审查通过后随批记录——DictationViews 的「纠错一次就会记住」空态提示**保留**（仅词典为空时出现=状态门控）；McpBuiltInCatalog 注释漏提 builtInTools.ts 来源、`docs/tool-catalog.md` 仍写 10 个工具，两处并入收尾文档批修正。
+- **D-2**（2026-08-29）边界文案裁决：**删** 语音模型 titleHint（「更大的模型更准…」）与 界面语言 titleHint（系统对话框跟随系统语言）——与 8B 表单提示同类的静态机制说明；**留** 麦克风/辅助功能的 deniedNote（仅拒绝状态出现=状态反馈）、更新按钮的幂等提示（动作后果）、「Agent 工具」行副标题「内置工具与 MCP 服务器」（内容标签）、tooltip 类（按需出现，不算画面内常驻文案）。

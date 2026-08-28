@@ -10,7 +10,6 @@ import SwiftUI
 private enum McpIcon {
     static let back: CGFloat = 20
     static let rowChevron: CGFloat = 16
-    static let cardGlyph: CGFloat = 17
     static let inlineGlyph: CGFloat = 15
     static let removeGlyph: CGFloat = 14
     static let sheetClose: CGFloat = 18
@@ -25,31 +24,39 @@ private enum McpIcon {
 /// One built-in tool as this page lists it: what it is called, one line about
 /// what it does, and whether running it changes anything.
 ///
-/// The list is transcribed from `sidecar/src/agent/coreTools.ts` (plus the two
-/// memory tools it merges in) and `docs/tool-catalog.md` rather than fetched:
-/// the built-in set is compiled into the sidecar binary that ships with this
-/// app, so there is no version skew for a runtime query to protect against,
-/// and a panel that goes blank when the sidecar is down would be answering
-/// "what can the agent do" with silence.
-private struct McpBuiltInTool: Identifiable, Equatable {
+/// The list is transcribed from `sidecar/src/agent/coreTools.ts` (plus
+/// `sidecar/src/agent/readHistoryTool.ts`'s `opentype__read_history`) rather
+/// than fetched: the built-in set is compiled into the sidecar binary that
+/// ships with this app, so there is no version skew for a runtime query to
+/// protect against, and a panel that goes blank when the sidecar is down
+/// would be answering "what can the agent do" with silence.
+///
+/// Internal rather than `private` so `McpBuiltInCatalogTests`
+/// (`@testable import`) can pin the ground truth directly instead of only
+/// through rendered views.
+struct McpBuiltInTool: Identifiable, Equatable {
     let name: String
     let summary: String
     /// Shown as the orange 「有副作用」 tag.
     ///
     /// The line is drawn at "could this leave something different behind":
-    /// `bash` and `python` execute arbitrary code, `open_file` launches
-    /// whatever application the system associates with a path, and
-    /// `remember_fact` writes to long-term memory that later runs read back.
-    /// The other six only read — including `consolidate_memory_now`, which
-    /// re-derives entries from history the user already dictated rather than
-    /// introducing anything new.
+    /// `bash`/`python` execute arbitrary code, `open_file` launches whatever
+    /// application the system associates with a path, `remember_fact` writes
+    /// to long-term memory that later runs read back, and `write_file`/
+    /// `edit_file`/`move_file`/`trash` mutate the filesystem. The other eight
+    /// only read — including `consolidate_memory_now`, which re-derives
+    /// entries from history the user already dictated rather than
+    /// introducing anything new, and `read_history`, which only expands a
+    /// record the user already produced.
     let hasSideEffects: Bool
 
     var id: String { name }
 }
 
-private enum McpBuiltInCatalog {
-    /// 本机 — the six that touch this machine.
+/// Internal rather than `private` for the same `@testable`-visibility reason
+/// as `McpBuiltInTool` above.
+enum McpBuiltInCatalog {
+    /// 本机 — the eleven that touch this machine.
     static var local: [McpBuiltInTool] {
         [
             McpBuiltInTool(
@@ -100,10 +107,50 @@ private enum McpBuiltInCatalog {
                 ),
                 hasSideEffects: false
             ),
+            McpBuiltInTool(
+                name: "opentype__write_file",
+                summary: OpenTypeL10n.text(
+                    "写入文件内容，不存在则创建，已存在则整份覆盖",
+                    english: "Writes a file's contents, creating it if missing or overwriting it whole if it exists"
+                ),
+                hasSideEffects: true
+            ),
+            McpBuiltInTool(
+                name: "opentype__edit_file",
+                summary: OpenTypeL10n.text(
+                    "精确字符串查找替换，匹配不唯一时拒绝执行",
+                    english: "Exact-string find/replace; refuses to run when the match isn't unique"
+                ),
+                hasSideEffects: true
+            ),
+            McpBuiltInTool(
+                name: "opentype__move_file",
+                summary: OpenTypeL10n.text(
+                    "移动或重命名文件/目录，目标已存在时拒绝，不会覆盖",
+                    english: "Moves or renames a file/directory; refuses rather than overwriting an existing destination"
+                ),
+                hasSideEffects: true
+            ),
+            McpBuiltInTool(
+                name: "opentype__trash",
+                summary: OpenTypeL10n.text(
+                    "移入 ~/.Trash 而非直接删除，重名会加编号后缀",
+                    english: "Moves into ~/.Trash instead of deleting; a name collision gets a numbered suffix"
+                ),
+                hasSideEffects: true
+            ),
+            McpBuiltInTool(
+                name: "opentype__glob",
+                summary: OpenTypeL10n.text(
+                    "按文件名递归查找，默认上限 200 条结果",
+                    english: "Recursive filename search, capped at 200 results by default"
+                ),
+                hasSideEffects: false
+            ),
         ]
     }
 
-    /// 网络与记忆 — the four that reach past this machine, or past this run.
+    /// 网络与记忆 — the five that reach past this machine, or past this run.
     static var networkAndMemory: [McpBuiltInTool] {
         [
             McpBuiltInTool(
@@ -135,6 +182,14 @@ private enum McpBuiltInCatalog {
                 summary: OpenTypeL10n.text(
                     "立即跑一次记忆整理",
                     english: "Runs a memory consolidation pass right now"
+                ),
+                hasSideEffects: false
+            ),
+            McpBuiltInTool(
+                name: "opentype__read_history",
+                summary: OpenTypeL10n.text(
+                    "展开「最近动态」里被截断的一条记录或整段对话",
+                    english: "Expands a clipped entry or a whole thread from Recent activity"
                 ),
                 hasSideEffects: false
             ),
@@ -268,10 +323,7 @@ struct AgentToolsPage: View {
                     english: "Built-in tools · \(McpBuiltInCatalog.count)"
                 )
             ) {
-                Text(OpenTypeL10n.text("始终可用，不可关闭", english: "Always available, can't be turned off"))
-                    .font(DS.Text.groupLabel())
-                    .fontWeight(.regular)
-                    .foregroundStyle(DS.Colour.ink(0.4))
+                EmptyView()
             }
 
             VStack(spacing: 0) {
@@ -300,7 +352,6 @@ struct AgentToolsPage: View {
     private var mcpColumn: some View {
         VStack(alignment: .leading, spacing: DS.Space.group) {
             serverSection
-            riskCard
             environmentCard
         }
     }
@@ -368,18 +419,6 @@ struct AgentToolsPage: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 4)
             }
-
-            Text(OpenTypeL10n.text(
-                "改动在保存时就会生效，不用重启语音服务。",
-                english: "Changes take effect as soon as you save — no restart needed."
-            ))
-            .font(DS.Text.groupLabel())
-            .fontWeight(.regular)
-            // 1.6 line height at 11pt.
-            .lineSpacing(4)
-            .foregroundStyle(DS.Colour.ink(0.45))
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 4)
         }
     }
 
@@ -479,47 +518,7 @@ struct AgentToolsPage: View {
         + Text(OpenTypeL10n.text(" —— 不是合并。", english: " — not merged."))
     }
 
-    // MARK: The two standing cards
-
-    /// The handoff gives this the same `0 1px 2px rgba(0,0,0,.04)` every other
-    /// card on the page carries — it is a white card that happens to have an
-    /// orange edge, not a flat callout — so it takes the card shadow too. It
-    /// cannot use `dsCard()`, which hard-codes the neutral border.
-    private var riskCard: some View {
-        DS.Shadow.card(riskCardBody)
-    }
-
-    private var riskCardBody: some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: McpIcon.cardGlyph))
-                .foregroundStyle(DS.Colour.warningText)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(OpenTypeL10n.text(
-                    "MCP 工具和内置工具一样，直接执行",
-                    english: "MCP tools run directly, exactly like the built-in ones"
-                ))
-                .font(DS.Text.size(12.5, .semibold))
-                Text(OpenTypeL10n.text(
-                    "不经沙箱、不逐条确认。添加一个服务器等于把它提供的每个工具都交给 Agent。只添加你信任来源的服务器。",
-                    english: "No sandbox, no per-call confirmation. Adding a server hands the agent every tool it offers. Only add servers you trust."
-                ))
-                .font(DS.Text.size(11.5))
-                // 1.6 line height at 11.5pt.
-                .lineSpacing(4)
-                .foregroundStyle(DS.Colour.ink(0.55))
-                .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, DS.Space.content)
-        .padding(.vertical, 14)
-        .background(DS.Colour.card, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
-                .strokeBorder(DS.Colour.warning.opacity(0.35), lineWidth: 0.75)
-        )
-    }
+    // MARK: The standing card
 
     private var environmentCard: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -1157,37 +1156,21 @@ struct McpServerSheet: View {
                 text: $draft.name,
                 placeholder: OpenTypeL10n.text("例如 github", english: "e.g. github")
             )
-            nameHint
-                .font(DS.Text.groupLabel())
-                .fontWeight(.regular)
-                // 1.55 line height at 11pt.
-                .lineSpacing(3)
-                .foregroundStyle(nameViolation == nil ? DS.Colour.ink(0.45) : DS.Colour.warningText)
-                .fixedSize(horizontal: false, vertical: true)
+            // Only the validation error shows here — the standing explanation
+            // of what the name becomes (a tool-name prefix, letters/digits/_/-
+            // only) was state-independent mechanism copy and is gone (owner
+            // copy rule, §5); the character-set rule itself still shows the
+            // moment it's actually violated.
+            if let nameViolation {
+                Text(nameViolation)
+                    .font(DS.Text.groupLabel())
+                    .fontWeight(.regular)
+                    // 1.55 line height at 11pt.
+                    .lineSpacing(3)
+                    .foregroundStyle(DS.Colour.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
-    }
-
-    private var nameHint: Text {
-        if let nameViolation {
-            return Text(nameViolation)
-        }
-        // Three chips, not one: the handoff sets `_` and `-` in the same code
-        // treatment as the example tool name, and a rule about which literal
-        // characters are allowed is exactly the copy where the reader has to be
-        // able to tell the character from the punctuation around it.
-        return Text(OpenTypeL10n.text(
-            "会成为工具名的前缀 —— ",
-            english: "Becomes the prefix of every tool name — "
-        ))
-        + Text(McpCodeChip("github__create_issue"))
-        + Text(OpenTypeL10n.text(
-            "。只能用字母、数字、",
-            english: ". Letters, digits, "
-        ))
-        + Text(McpCodeChip("_"))
-        + Text(OpenTypeL10n.text(" 和 ", english: " and "))
-        + Text(McpCodeChip("-"))
-        + Text(OpenTypeL10n.text("。", english: " only."))
     }
 
     private var transportField: some View {
@@ -1248,16 +1231,6 @@ struct McpServerSheet: View {
                         .strokeBorder(DS.Colour.blockBorder, lineWidth: 0.75)
                 )
             }
-            Text(OpenTypeL10n.text(
-                "保存后只回传遮盖值，原值不会再离开本机。键名可见，值不可见。",
-                english: "Once saved, only the mask comes back — the real value never leaves this Mac again. Keys are visible, values are not."
-            ))
-            .font(DS.Text.groupLabel())
-            .fontWeight(.regular)
-            // 1.55 line height at 11pt.
-            .lineSpacing(3)
-            .foregroundStyle(DS.Colour.ink(0.45))
-            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1342,13 +1315,6 @@ struct McpServerSheet: View {
                 ) {
                     confirmingDelete = true
                 }
-            } else {
-                Text(OpenTypeL10n.text(
-                    "保存后开始连接",
-                    english: "Saving starts the connection"
-                ))
-                .font(DS.Text.size(11.5))
-                .foregroundStyle(DS.Colour.ink(0.45))
             }
 
             Spacer()

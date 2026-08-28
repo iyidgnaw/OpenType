@@ -589,28 +589,6 @@ struct UsageStatsBand: View {
             } else {
                 wideBody
             }
-
-            Text(OpenTypeL10n.text(
-                """
-                在这台 Mac 上从本地审计日志算出，不上传。中英混说时字数是两种单位的合计，\
-                适合和自己过去比，不适合跨语言比较。
-                """,
-                english: """
-                    Computed on this Mac from the local audit log — nothing is \
-                    uploaded. For mixed Chinese/English speech the word total \
-                    blends two units, so compare it with your own past numbers \
-                    rather than across languages.
-                    """
-            ))
-            .font(DS.Text.size(11))
-            .lineSpacing(4)
-            .foregroundStyle(DS.Colour.ink(0.45))
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, narrow ? DS.Space.content : 20)
-            .padding(.vertical, 9)
-            .background(DS.Colour.insetSurface)
-            .dsHairline(.top)
         }
         .clipShape(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
         .dsCard()
@@ -713,10 +691,12 @@ struct UsageStatsBand: View {
                 .font(DS.Text.caption().weight(.medium))
                 .foregroundStyle(item.hasData ? AnyShapeStyle(.primary) : AnyShapeStyle(DS.Colour.ink(0.5)))
                 .fixedSize(horizontal: false, vertical: true)
-            Text(item.note)
-                .font(DS.Text.size(11))
-                .foregroundStyle(DS.Colour.ink(0.42))
-                .fixedSize(horizontal: false, vertical: true)
+            if let note = item.note {
+                Text(note)
+                    .font(DS.Text.size(11))
+                    .foregroundStyle(DS.Colour.ink(0.42))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         // Natural width, not an equal share of the row. The mock packs the four
         // figures at the left of a `flex:1` container with exactly 28pt between
@@ -861,7 +841,14 @@ struct UsageStatsBand: View {
         /// 「秒」, set apart because it is prose riding on a number.
         var unit: String?
         let label: String
-        let note: String
+        /// `nil` when there is nothing data-bearing to say — the owner copy
+        /// rule (§5) removed the standing methodology lectures ("CJK by
+        /// character · Latin by word", the generic "key release → delivered
+        /// text" placeholder, "should fall as the dictionary learns") that
+        /// used to fill this line unconditionally; what is left only prints
+        /// when it folds in an actual value (see `endToEndNote`) or an
+        /// owner-share count (see `learned`).
+        let note: String?
         /// `false` when the figure printed 「—」 or a dimmed zero. Drives the
         /// value's colour, and demotes the label with it.
         let hasData: Bool
@@ -893,10 +880,7 @@ struct UsageStatsBand: View {
             // an absence. Dimmed so the two still read differently.
             value: Self.grouped(summary.wordsDictated),
             label: OpenTypeL10n.text("说出的字数", english: "Words dictated"),
-            note: OpenTypeL10n.text(
-                "中文按字 · 英文按词",
-                english: "CJK by character · Latin by word"
-            ),
+            note: nil,
             hasData: summary.wordsDictated > 0
         )
     }
@@ -921,13 +905,14 @@ struct UsageStatsBand: View {
     /// riding on an existing figure's `note` line rather than a fifth
     /// `Figure`, on purpose — the panel's layout is closed at four.
     ///
-    /// Falls back to the plain description every earlier week has shown when
-    /// neither per-mode figure has data — the headline can still be non-`nil`
-    /// in that case (a legacy pre-3-mode-era row, or a `transcribe`/`ask`
-    /// session missing `recognized.recordingEndedAt`, both still counted
-    /// toward the headline but attributed to neither column), and the note
-    /// should not claim a breakdown it cannot show.
-    private var endToEndNote: String {
+    /// `nil` when neither per-mode figure has data — the headline can still
+    /// be non-`nil` in that case (a legacy pre-3-mode-era row, or a
+    /// `transcribe`/`ask` session missing `recognized.recordingEndedAt`, both
+    /// still counted toward the headline but attributed to neither column),
+    /// and there is no per-mode value left to show. This used to fall back to
+    /// a standing "key release → delivered text" placeholder sentence; the
+    /// owner copy rule (§5) removed it since it named no actual data.
+    private var endToEndNote: String? {
         switch (summary.averageTranscribeEndToEndLatency, summary.averageAskEndToEndLatency) {
         case let (transcribe?, ask?):
             return OpenTypeL10n.text(
@@ -945,10 +930,7 @@ struct UsageStatsBand: View {
                 english: "Ask \(Self.latencyValue(ask))s"
             )
         case (nil, nil):
-            return OpenTypeL10n.text(
-                "松开快捷键 → 出字",
-                english: "Key release → delivered text"
-            )
+            return nil
         }
     }
 
@@ -958,10 +940,7 @@ struct UsageStatsBand: View {
             value: Self.latencyValue(summary.averageResponseLatency),
             unit: summary.averageResponseLatency == nil ? nil : Self.secondsUnit,
             label: OpenTypeL10n.text("回答耗时", english: "Response time"),
-            note: OpenTypeL10n.text(
-                "识别之后 · 问答与 Agent",
-                english: "After recognition · Ask and Agent"
-            ),
+            note: nil,
             hasData: summary.averageResponseLatency != nil
         )
     }
@@ -977,10 +956,7 @@ struct UsageStatsBand: View {
                 ? String(format: "%.1f", summary.correctionsPerHundredWords)
                 : "—",
             label: OpenTypeL10n.text("每 100 字纠错", english: "Corrections per 100 words"),
-            note: OpenTypeL10n.text(
-                "词典学得越多应越低",
-                english: "Should fall as the dictionary learns"
-            ),
+            note: nil,
             hasData: hasData,
             accented: true,
             trend: trend(hasData: hasData),

@@ -299,7 +299,12 @@ private struct SidebarModeCard: View {
     }
 }
 
-/// The icon rail's version: the mode glyph alone, same menu behind it.
+/// The icon rail's version: a fixed mic glyph (the app's own recording
+/// trigger, not "whichever mode happens to be selected" — `InputMode.symbol`
+/// already varies per mode, and swapping this button's glyph along with it
+/// read as a second, redundant mode indicator rather than as the single
+/// "press to talk" affordance the rail collapses everything else to), same
+/// menu behind it.
 private struct SidebarModeButton: View {
     @ObservedObject var model: AppModel
 
@@ -313,7 +318,7 @@ private struct SidebarModeButton: View {
                 }
             }
         } label: {
-            Image(systemName: model.configuration.selectedMode.symbol)
+            Image(systemName: "mic.fill")
                 .font(.system(size: 15))
                 .foregroundStyle(DS.Colour.accent)
                 .frame(width: 34, height: 34)

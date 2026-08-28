@@ -1680,6 +1680,19 @@ struct ConversationMessageSummary: Decodable, Identifiable, Equatable {
     let role: String
     let content: String
     let createdAt: Int
+    /// Persisted agent-run step log for this message, since the
+    /// 2026-08-28 skill/agent-UI batch (`ConversationStepRecord[]` on the
+    /// sidecar side, `sidecar/src/memory/conversations.ts`). Reuses
+    /// `AgentStepSummary`'s existing `{type, detail}` decode shape --
+    /// no new type needed, it already matches exactly. Present (non-nil)
+    /// for an assistant message whose run recorded steps; `null`/absent
+    /// (older rows, user messages, non-agent turns) decodes to `nil`.
+    ///
+    /// Defaulted so every existing memberwise construction of this type
+    /// (none of which are about step logs) keeps compiling without
+    /// naming `steps:` -- the same pattern `ConversationSummary.preview`
+    /// already uses above.
+    var steps: [AgentStepSummary]? = nil
 }
 
 /// Mirrors the sidecar's `ConversationWithMessages` -- the full thread

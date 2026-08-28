@@ -106,6 +106,7 @@
 - **A-5**：创建成功返回 **200**（本仓库 route 惯例，不用 201）。
 - **D-1**（2026-08-28）：D2 文案删除与 D3 窄轨图标并入 D1 的流水线一次实现、一次审查（E4 豁免测试部分）。
 - **B-1**（2026-08-29）：steps 的持久化类型放 **memory 层自己的宽结构类型**（`{type: string; detail: string}`），不 import agent/loop 的 `AgentProgressEvent`——存储层不该向上依赖 agent 模块（分层 + 潜在环），联合类型约束属于生产方；窄类型天然可赋值给宽类型，测试文件的 TS2345 摩擦随之消失。
+- **B-4**（2026-08-29）：Bw4 复审四项处置——(1) anchorIndex 逐消息重算改为渲染路径一次预计算，经「已测 4 参函数委托新的 5 参重载」实现，钉死的测试不动；(2) 历史步骤块 `initiallyExpanded: false`，仅当前活跃 run 的锚点展开（对应 spec「历史线程显示**折叠**步骤块」）；(3) `stepLogAnchor` 接回渲染路径作为唯一命名接缝；(4) 历史日志**不显示耗时**——duration 未持久化，补列超出本批范围（未来可作为 steps 之外的附加列，暂不做）。
 - **C-1**（2026-08-29）：C4 两缺陷成立并修复——(1) 编辑器 footer 删除必须走 confirmationDialog（对齐 McpServerSheet；sidecar 端是 rm -rf 非废纸篓）；(2) `AgentEditorFormState.savePayload` 在 **edit 态**必须把 displayName/tools 以「present-but-empty」发送（PUT 省略键=保留旧值，清空动作否则静默丢失），create 态保持省略=继承全部。附带：弹窗宽度按设计意图改 620/560（高度不变）；三处外观小修（按钮阴影、L10n 包裹、分段控件 2pt）。
 - **B-3**（2026-08-29）：agentRunStepsPersistence.test.ts 残留 3 个 TS2769（测试自己把响应 cast 成 `unknown[]`/缺 detail 的 fixture 与 toEqual 泛型绑定冲突）**容忍不修**：bun 才是本仓库的门槛（1348/0），tsc 非门控且带 68 个既有基线错误，该文件错误数已从基线 8 降到 3。收尾批可顺手做纯类型标注清理，不单独开轮次。
 - **B-2**（2026-08-29）：`test/memory/db.test.ts` 钉死 conversation_messages 旧列清单的断言因 owner 批准的 D0 schema 变更而陈旧，授权实现方做**最小更新**（期望列表加 `"steps"`）——与 D2 的「删除文案导致的既有断言更新」同一先例，属更正非削弱。

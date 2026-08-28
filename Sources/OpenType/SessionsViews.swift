@@ -437,14 +437,48 @@ struct SessionThreadColumn: View {
 
             ScrollViewReader { scroller in
                 ScrollView {
+                    // Computed once per render, not once per message: the
+                    // anchor is an `O(n)` scan over the thread, and the 5-arg
+                    // `SessionStepLogResolver.steps` overload below exists
+                    // specifically so a loop over every message doesn't
+                    // re-run it `O(n)` times.
+                    let live = liveRun(for: focused)
+                    let anchor = stepLogAnchor(in: detail)
                     LazyVStack(alignment: .leading, spacing: narrow ? 18 : 20) {
                         ForEach(Array(detail.messages.enumerated()), id: \.element.id) { index, message in
                             // The log and the answer it produced are one turn at
                             // 12pt, not two messages at 20 — they are the same
                             // reply, seen from two distances.
                             VStack(alignment: .leading, spacing: 12) {
-                                if index == stepLogAnchor(in: detail), let log = stepLog(for: focused) {
-                                    log
+                                // Every message gets a chance to render its own
+                                // step log now, not just the anchor: a
+                                // historical (already-persisted) thread has no
+                                // in-flight run at all, so the ONLY way its
+                                // steps ever show is each message asking for
+                                // its own persisted value here. The resolver is
+                                // what still makes an ACTIVELY running turn win
+                                // at the anchor over that same message's own
+                                // (stale-by-comparison) persisted content — see
+                                // `SessionStepLogResolver`'s doc comment.
+                                if let steps = SessionStepLogResolver.steps(
+                                    forMessageAt: index,
+                                    in: detail.messages,
+                                    conversationId: focused.id,
+                                    liveRun: live,
+                                    anchorIndex: anchor
+                                ) {
+                                    // Only the in-flight run's own log opens
+                                    // expanded — a historical/persisted log
+                                    // (including a just-finished, no-longer-
+                                    // running trailing one) starts collapsed,
+                                    // since a thread reopened after a fresh
+                                    // launch showing every past run's steps
+                                    // already unfurled would bury the actual
+                                    // conversation under old step tables.
+                                    StepLog(
+                                        steps: steps,
+                                        initiallyExpanded: index == anchor && live?.isActivelyRunning == true
+                                    )
                                 }
                                 // 78% wide, 80% narrow: the same bubble reads as
                                 // narrower when the column is, so the handoff
@@ -493,32 +527,48 @@ struct SessionThreadColumn: View {
 
     /// Where the step log goes: immediately before the answer it produced, so
     /// the reading order is task → what it did → what it found.
+    ///
+    /// Delegates to `SessionStepLogResolver.anchorIndex` so the "last
+    /// non-user message" rule has exactly one definition. `messages(_:focused:)`
+    /// calls this exactly ONCE per render (not once per message) and threads
+    /// the result into the 5-arg `SessionStepLogResolver.steps(...:anchorIndex:)`
+    /// overload for every message in the loop — computing the anchor is an
+    /// `O(n)` scan over the thread, so re-deriving it per message would make
+    /// rendering an `O(n²)` thread scan instead of `O(n)`.
     private func stepLogAnchor(in detail: ConversationDetail) -> Int? {
-        detail.messages.lastIndex { $0.role != "user" }
+        SessionStepLogResolver.anchorIndex(in: detail.messages)
     }
 
-    /// The steps for this conversation, if this session still has them.
+    /// The in-flight run state for `focused`'s conversation, if any —
+    /// what `SessionStepLogResolver.LiveRun` is built from.
     ///
-    /// Steps are not persisted with the conversation — `GET /conversations/:id`
-    /// returns roles and content only — so a thread from a previous launch has
-    /// no log to show. Live runs are matched through the voice surface, which
-    /// is the only place a *running* run's conversation id is known
-    /// (`AgentRunRecord.conversationId` is filled in on completion).
-    private func stepLog(for focused: FocusedConversation) -> StepLog? {
-        // Only Agent threads have steps. Conversation ids are unique across
-        // both kinds, so matching on id alone would also be correct — but the
-        // rule is "step logs belong to agent runs", and code that relies on an
-        // id space instead of saying so breaks quietly if that ever changes.
-        guard focused.kind == .agent else { return nil }
-        if let panel = model.agentPanelState,
-           panel.conversationId == focused.id,
-           !panel.steps.isEmpty {
-            return StepLog(progress: panel.steps)
-        }
-        guard let run = model.agentRuns.first(where: { $0.conversationId == focused.id }),
-              !run.steps.isEmpty
+    /// Since the 2026-08-28 skill/agent-UI batch, steps ARE persisted with
+    /// the conversation (`ConversationMessageSummary.steps`, written by the
+    /// sidecar alongside the assistant message a run produced), so a
+    /// historical thread — including one reopened after a fresh launch —
+    /// has its own log to show without this at all; see
+    /// `SessionStepLogResolver`'s doc comment for the full precedence. This
+    /// method supplies only the OTHER half: the current run's live,
+    /// not-yet-persisted (or just-settled) state, matched through the voice
+    /// surface's `agentPanelState`, which is the only place a run's
+    /// conversation id is known while `isActivelyRunning`.
+    ///
+    /// Only Agent threads have a live source at all: `AskPanelState` (Ask's
+    /// equivalent surface state) carries no step feed of its own — Ask's web
+    /// tool calls complete inside the one blocking `/oneshot/ask` call, with
+    /// no async polling ticker the way Agent's `/agent/run` has. An Ask
+    /// thread's steps, when it has any, are therefore always read from its
+    /// own persisted value, never from a live record here.
+    private func liveRun(for focused: FocusedConversation) -> SessionStepLogResolver.LiveRun? {
+        guard focused.kind == .agent,
+              let panel = model.agentPanelState,
+              panel.conversationId == focused.id
         else { return nil }
-        return StepLog(steps: run.steps, elapsed: SessionFormat.elapsed(of: run))
+        return SessionStepLogResolver.LiveRun(
+            conversationId: focused.id,
+            steps: panel.steps.map(\.asStepSummary),
+            isActivelyRunning: panel.phase == .running
+        )
     }
 
     /// §H's button, styled to match the unified voice surface's result-card
@@ -697,16 +747,14 @@ struct StepLog: View {
     private let elapsed: String?
     @State private var expanded: Bool
 
-    /// From a completed run's persisted summary (`AgentRunRecord.steps`).
+    /// From either a message's persisted step log (`ConversationMessageSummary.steps`
+    /// / `AgentRunRecord.steps`) or the live progress feed
+    /// (`AgentProgressPanelState.steps`, mapped through
+    /// `AgentProgressStep.asStepSummary`) — `SessionStepLogResolver` picks
+    /// which source applies per message before either ever reaches this
+    /// view, so there is only one initializer to reconcile them in.
     init(steps: [AgentStepSummary], elapsed: String? = nil, initiallyExpanded: Bool = true) {
         self.entries = steps.map(StepLogEntry.init(step:))
-        self.elapsed = elapsed
-        self._expanded = State(initialValue: initiallyExpanded)
-    }
-
-    /// From the live progress feed (`AgentProgressPanelState.steps`).
-    init(progress: [AgentProgressStep], elapsed: String? = nil, initiallyExpanded: Bool = true) {
-        self.entries = progress.map(StepLogEntry.init(progress:))
         self.elapsed = elapsed
         self._expanded = State(initialValue: initiallyExpanded)
     }
@@ -772,26 +820,142 @@ struct StepLog: View {
     }
 }
 
+/// Resolves which step log (if any) one message in a thread should render —
+/// the merge seam between a message's own PERSISTED steps
+/// (`ConversationMessageSummary.steps`, since the 2026-08-28 skill/agent-UI
+/// batch) and a conversation's LIVE, in-flight run state, neither of which
+/// alone is enough: persisted-only misses the run that is still going and
+/// has not been written down yet, live-only misses every historical thread
+/// from before this session (or before this app launch).
+///
+/// **Pinned precedence** (docs/superpowers/specs/2026-08-28-skill-agent-ui-and-step-log-persistence.md
+/// §2; see `ConversationStepLogPersistenceTests.swift`'s header for the full
+/// worked-through rationale, including the case the first draft of that
+/// spec got backwards):
+/// - A message's own persisted `steps`, when present and non-empty, is what
+///   it shows at every **non-anchor** index — a live run anywhere else in
+///   the conversation never reaches back and changes an already-settled
+///   turn's own log.
+/// - At the **anchor** (the last non-user message — where a run-in-progress
+///   attaches, since its own assistant message does not exist yet), a
+///   matching, **actively running** live record wins unconditionally, even
+///   over that anchor's own non-empty persisted steps: a follow-up run's
+///   live feed must keep showing for its whole duration, not just for one
+///   race-y instant.
+/// - Once a matching live record is **not** actively running (the run
+///   already finished, and this is a trailing, not-yet-torn-down record),
+///   the anchor's own persisted value preempts it — persisted first if
+///   present, the live record only as a fallback when the anchor genuinely
+///   has no persisted value yet.
+/// - `[]` (persisted or live) normalises to "no steps" throughout, never a
+///   zero-row collapsible block.
+/// - A live record for a **different** conversation never applies.
+enum SessionStepLogResolver {
+    /// The state of an in-flight (or just-finished) run, if one exists for
+    /// the conversation currently being rendered. The caller
+    /// (`SessionThreadColumn.liveRun(for:)`) builds this from
+    /// `AppModel.agentPanelState`.
+    struct LiveRun: Equatable {
+        var conversationId: Int
+        var steps: [AgentStepSummary]
+        /// Mirrors `AgentProgressPanelState.phase == .running` — the same
+        /// condition `isWorking(_:)` already tests. Distinguishes "this run
+        /// has not finished yet" (live wins unconditionally at the anchor)
+        /// from "this is a leftover record for a run that already completed
+        /// or failed" (persisted wins, live is only a fallback).
+        var isActivelyRunning: Bool
+    }
+
+    /// The last non-user message in a thread — where the step log goes,
+    /// immediately before the answer it produced. Single definition;
+    /// `SessionThreadColumn.stepLogAnchor(in:)` delegates here rather than
+    /// re-stating the rule.
+    static func anchorIndex(in messages: [ConversationMessageSummary]) -> Int? {
+        messages.lastIndex { $0.role != "user" }
+    }
+
+    /// Which steps (if any) `messages[index]` should render. See this type's
+    /// doc comment for the full precedence rule.
+    ///
+    /// Thin wrapper over the 5-arg overload below, which does the actual
+    /// work: computes the anchor once and delegates. Kept exactly as the
+    /// pinned, stage-1-tested entry point
+    /// (`ConversationStepLogPersistenceTests.swift`) — a render loop calling
+    /// this once per message would otherwise recompute `anchorIndex(in:)`
+    /// (an `O(n)` scan) once per message too, i.e. `O(n²)` over a thread;
+    /// `SessionThreadColumn.messages(_:focused:)` computes the anchor once
+    /// per render instead and calls the 5-arg overload directly.
+    static func steps(
+        forMessageAt index: Int,
+        in messages: [ConversationMessageSummary],
+        conversationId: Int,
+        liveRun: LiveRun?
+    ) -> [AgentStepSummary]? {
+        steps(
+            forMessageAt: index,
+            in: messages,
+            conversationId: conversationId,
+            liveRun: liveRun,
+            anchorIndex: anchorIndex(in: messages)
+        )
+    }
+
+    /// Same precedence rule as the 4-arg overload above, but takes the
+    /// thread's anchor index already computed — the version an
+    /// once-per-thread render loop should call.
+    static func steps(
+        forMessageAt index: Int,
+        in messages: [ConversationMessageSummary],
+        conversationId: Int,
+        liveRun: LiveRun?,
+        anchorIndex: Int?
+    ) -> [AgentStepSummary]? {
+        let persisted = nonEmpty(messages[index].steps)
+        let isAnchor = index == anchorIndex
+        guard isAnchor, let liveRun, liveRun.conversationId == conversationId else {
+            return persisted
+        }
+        if liveRun.isActivelyRunning {
+            return nonEmpty(liveRun.steps)
+        }
+        return persisted ?? nonEmpty(liveRun.steps)
+    }
+
+    /// `[]` and `nil` are equivalent as "nothing to show" throughout this
+    /// type — never a `0`-row collapsible block.
+    private static func nonEmpty(_ steps: [AgentStepSummary]?) -> [AgentStepSummary]? {
+        guard let steps, !steps.isEmpty else { return nil }
+        return steps
+    }
+}
+
+/// The live progress feed's step, expressed in the same `{type, detail}`
+/// shape `AgentStepSummary`/the sidecar's persisted `ConversationStepRecord`
+/// already use — what lets `SessionThreadColumn.liveRun(for:)` build a
+/// `SessionStepLogResolver.LiveRun` (and `StepLog`) from either source
+/// without a second table of steps.
+private extension AgentProgressStep {
+    var asStepSummary: AgentStepSummary {
+        let type: String
+        switch kind {
+        case .thinking: type = "thinking"
+        case .toolCall: type = "tool_call"
+        case .toolResult: type = "tool_result"
+        case .error: type = "error"
+        }
+        return AgentStepSummary(type: type, detail: detail)
+    }
+}
+
 /// One row of a `StepLog`, normalised away from whichever of the two step
 /// types it came from.
-private struct StepLogEntry {
+struct StepLogEntry {
     var label: String
     var detail: String
     var tint: Color
 
     init(step: AgentStepSummary) {
         self.init(type: step.type, detail: step.detail)
-    }
-
-    init(progress: AgentProgressStep) {
-        let type: String
-        switch progress.kind {
-        case .thinking: type = "thinking"
-        case .toolCall: type = "tool_call"
-        case .toolResult: type = "tool_result"
-        case .error: type = "error"
-        }
-        self.init(type: type, detail: progress.detail)
     }
 
     private init(type: String, detail: String) {
@@ -1430,14 +1594,6 @@ private enum SessionFormat {
         let total = Int(seconds.rounded())
         guard total >= 60 else { return "\(total)s" }
         return String(format: "%dm %02ds", total / 60, total % 60)
-    }
-
-    /// A finished run's wall-clock time, for the step log's header.
-    static func elapsed(of run: AgentRunRecord) -> String? {
-        guard let completedAt = run.completedAt else { return nil }
-        let seconds = completedAt.timeIntervalSince(run.dispatchedAt)
-        guard seconds >= 0 else { return nil }
-        return seconds < 60 ? String(format: "%.1fs", seconds) : duration(seconds)
     }
 
     private static let timeFormatter: DateFormatter = {

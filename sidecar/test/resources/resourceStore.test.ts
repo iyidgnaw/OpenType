@@ -225,6 +225,75 @@ describe("createResourceStore: layout: \"file\" (design §8, agent definitions)"
     expect(store.list().map((e) => e.name)).toEqual(["real"]);
   });
 
+  /**
+   * A README.md placed directly under a "file"-layout root (e.g. the shipped
+   * `sidecar/agents/README.md` placeholder, or a user documenting their own
+   * `~/.opentype/agents/`) must NOT register as an entry. A README inside a
+   * directory of definitions is a documentation convention, not a
+   * definition -- `resourceStore.ts`'s `readFileEntry` currently has no
+   * concept of this and treats it exactly like any other `.md` file, which
+   * silently turns the README's own prose into a fake agent's system prompt.
+   *
+   * This is a NAME check, not a "does it have frontmatter" check: a
+   * no-frontmatter `.md` file must otherwise keep loading with its whole
+   * content as the body (see `agentDefinitions.test.ts`'s "a file with no
+   * frontmatter at all still loads" test, and `frontmatter.test.ts`'s "no
+   * frontmatter at all" test) -- that is deliberate Claude Code
+   * compatibility and this exclusion must not touch it. Only the name
+   * "README" (case-insensitively) is excluded.
+   */
+  test("a file named README.md (any case) is not treated as an entry, matched case-insensitively", () => {
+    const root = mkTempDir();
+    writeFlatFile(root, "README.md", "This directory holds agent definitions. See the design doc for the format.");
+    writeFlatFile(root, "real-agent.md", skillFile("real-agent", "d", "body"));
+
+    const store = createResourceStore({ roots: [root], layout: "file", entryExtension: ".md" });
+
+    // Only the real agent registers -- the README does not appear under any
+    // name at all (not "README", not the empty string, nothing).
+    expect(store.list().map((e) => e.name)).toEqual(["real-agent"]);
+
+    // Lowercase and mixed-case variants are excluded too, each checked in
+    // its own root so one casing can't accidentally shadow another under
+    // first-root-wins if the exclusion were only partially implemented.
+    const rootLower = mkTempDir();
+    writeFlatFile(rootLower, "readme.md", "lowercase variant");
+    expect(createResourceStore({ roots: [rootLower], layout: "file", entryExtension: ".md" }).list()).toEqual([]);
+
+    const rootMixed = mkTempDir();
+    writeFlatFile(rootMixed, "Readme.md", "mixed-case variant");
+    expect(createResourceStore({ roots: [rootMixed], layout: "file", entryExtension: ".md" }).list()).toEqual([]);
+  });
+
+  test("a same-named README with frontmatter that sets an explicit `name` is still excluded by its filename", () => {
+    // The exclusion is about the FILE's own name, not the resolved entry
+    // name -- a README.md that happens to carry `name: something-else` in
+    // its frontmatter must still be excluded, since the whole point is that
+    // dropping a file called README.md into the directory should never
+    // silently become an entry, regardless of what's inside it.
+    const root = mkTempDir();
+    writeFlatFile(root, "README.md", skillFile("something-else", "d", "body"));
+
+    const store = createResourceStore({ roots: [root], layout: "file", entryExtension: ".md" });
+
+    expect(store.list()).toEqual([]);
+  });
+
+  test("layout \"directory\" is unaffected: a skill directory containing a README.md alongside SKILL.md keeps working", () => {
+    // Directory layout only ever looks at the marker file (SKILL.md) inside
+    // each entry directory -- a README.md sitting alongside it is just an
+    // ordinary file in that directory and directory-layout discovery never
+    // enumerates loose files inside an entry dir at all, so this must be a
+    // no-op change for skills.
+    const root = mkTempDir();
+    writeEntry(root, "my-skill", skillFile("my-skill", "does things", "body"));
+    fs.writeFileSync(path.join(root, "my-skill", "README.md"), "human-facing notes about this skill");
+
+    const store = createResourceStore({ roots: [root], entryFileName: "SKILL.md" });
+
+    expect(store.list().map((e) => e.name)).toEqual(["my-skill"]);
+  });
+
   test("first-root-wins still applies across roots for file layout", () => {
     const rootA = mkTempDir();
     const rootB = mkTempDir();

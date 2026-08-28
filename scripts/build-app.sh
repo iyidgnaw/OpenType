@@ -81,6 +81,27 @@ fi
 rm -rf "$resources_dir/whisper"
 ditto "$project_dir/sidecar/whisper" "$resources_dir/whisper"
 
+# Built-in skills/agent definitions: bundle sidecar/skills/ and
+# sidecar/agents/ so the packaged binary's built-in root actually exists on
+# disk. `sidecar/src/server.ts` resolves its built-in roots relative to
+# `import.meta.dir`, which inside a `bun build --compile` binary points into
+# the compiled binary's embedded virtual filesystem, not a real directory
+# beside it -- SidecarClient.swift's `bundledSkillsAndAgentsEnvironment`
+# points OPENTYPE_SKILLS_DIR/OPENTYPE_AGENTS_DIR at these bundled, absolute
+# copies instead, but only if they're actually here to point at.
+if [ -d "$project_dir/sidecar/skills" ]; then
+  rm -rf "$resources_dir/skills"
+  ditto "$project_dir/sidecar/skills" "$resources_dir/skills"
+else
+  echo "warning: sidecar/skills/ not found -- packaged app will ship with zero built-in skills." >&2
+fi
+if [ -d "$project_dir/sidecar/agents" ]; then
+  rm -rf "$resources_dir/agents"
+  ditto "$project_dir/sidecar/agents" "$resources_dir/agents"
+else
+  echo "warning: sidecar/agents/ not found -- packaged app will ship with zero built-in agent definitions." >&2
+fi
+
 # A `bun build --compile` binary doesn't carry the source tree's
 # sidecar/.env.local with it, and doesn't know to look for one at an
 # arbitrary launch-time cwd. Bundle it (if present) as sidecar.env next to

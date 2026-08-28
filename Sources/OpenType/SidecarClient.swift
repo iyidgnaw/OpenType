@@ -339,6 +339,85 @@ final class SidecarClient {
         ]
     }
 
+    /// Points the sidecar's built-in skill/agent-definition discovery at the
+    /// bundled copies `build-app.sh` ditto's into `Contents/Resources/`
+    /// (`skills/`, `agents/`), for a packaged launch only.
+    ///
+    /// `sidecar/src/server.ts` resolves its built-in roots as
+    /// `resolve(import.meta.dir, "..", "skills")` / `"..", "agents"` —
+    /// correct for a `bun run` dev launch, but meaningless inside a
+    /// `bun build --compile` binary, whose `import.meta.dir` points into the
+    /// compiled binary's embedded virtual filesystem rather than a real
+    /// directory beside it. `OPENTYPE_SKILLS_DIR` / `OPENTYPE_AGENTS_DIR`
+    /// (`skills/skillRoots.ts`, `agent/agentRoots.ts`) already exist as
+    /// override env vars for exactly this — the sidecar prefers them over
+    /// its own built-in default when set, so we only need to set them, never
+    /// touch the sidecar side.
+    ///
+    /// Each directory is checked independently, and only counts if it's
+    /// actually a directory — a stray same-named file must not be handed to
+    /// the sidecar as a root to scan. A missing directory means the
+    /// corresponding key is left out of the result entirely (not set to an
+    /// empty string), matching `loadBundledEnvironment`'s "absent, not
+    /// empty" precedent for a dev/source run where no bundled copy exists.
+    ///
+    /// - Parameter resourcePath: Overridable for testing; defaults to
+    ///   `Bundle.main.resourcePath`.
+    nonisolated static func bundledSkillsAndAgentsEnvironment(
+        resourcePath: String?
+    ) -> [String: String] {
+        guard let resourcePath else { return [:] }
+        var result: [String: String] = [:]
+        func directoryExists(_ path: String) -> Bool {
+            var isDirectory: ObjCBool = false
+            let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+            return exists && isDirectory.boolValue
+        }
+        let skillsPath = resourcePath.appending("/skills")
+        if directoryExists(skillsPath) {
+            result["OPENTYPE_SKILLS_DIR"] = skillsPath
+        }
+        let agentsPath = resourcePath.appending("/agents")
+        if directoryExists(agentsPath) {
+            result["OPENTYPE_AGENTS_DIR"] = agentsPath
+        }
+        return result
+    }
+
+    /// The full spawn environment `start()` hands to the sidecar child
+    /// process, composed as one pure, directly-testable function rather than
+    /// a sequence of inline merges inside `start()` — a correct builder that
+    /// nothing calls is exactly how this batch's own bug (and an unwired
+    /// skill-discovery TTL alongside it) shipped, so the composition itself
+    /// is a seam worth pinning, not just each piece in isolation.
+    ///
+    /// Order matters: `baseEnvironment` first, then bundled `sidecar.env`
+    /// values, then the socket path (set after the bundled env so nothing in
+    /// a bundled env file can ever override it), then the writable
+    /// data-directory paths, then the bundled skills/agents roots. Does NOT
+    /// include the packaged-only whisper vars (`OPENTYPE_WHISPER_PYTHON_BIN`
+    /// / `_SCRIPT_PATH`) — those stay entangled with `start()`'s
+    /// `bundledIsExecutable` branch, which also decides `executableURL`/
+    /// `arguments`, and untangling that is out of scope here.
+    nonisolated static func childEnvironment(
+        baseEnvironment: [String: String],
+        resourcePath: String?,
+        socketURL: URL
+    ) -> [String: String] {
+        var environment = baseEnvironment
+        for (key, value) in Self.loadBundledEnvironment(resourcePath: resourcePath) {
+            environment[key] = value
+        }
+        environment["OPENTYPE_SIDECAR_SOCKET"] = socketURL.path
+        for (key, value) in Self.dataDirectoryEnvironment(socketURL: socketURL) {
+            environment[key] = value
+        }
+        for (key, value) in Self.bundledSkillsAndAgentsEnvironment(resourcePath: resourcePath) {
+            environment[key] = value
+        }
+        return environment
+    }
+
     /// Spawns the sidecar and blocks (asynchronously) until it responds
     /// healthily on its Unix socket, or throws after a short timeout.
     func start() async throws {
@@ -354,16 +433,11 @@ final class SidecarClient {
         self.terminationIntent = terminationIntent
 
         let process = Process()
-        var environment = ProcessInfo.processInfo.environment
-        // Merge bundled sidecar.env values first, then always set the socket
-        // path last, so nothing in a bundled env file can ever override it.
-        for (key, value) in Self.loadBundledEnvironment() {
-            environment[key] = value
-        }
-        environment["OPENTYPE_SIDECAR_SOCKET"] = socketURL.path
-        for (key, value) in Self.dataDirectoryEnvironment(socketURL: socketURL) {
-            environment[key] = value
-        }
+        var environment = Self.childEnvironment(
+            baseEnvironment: ProcessInfo.processInfo.environment,
+            resourcePath: Bundle.main.resourcePath,
+            socketURL: socketURL
+        )
 
         let bundledBinaryPath = (Bundle.main.resourcePath ?? "")
             .appending("/opentype-sidecar")

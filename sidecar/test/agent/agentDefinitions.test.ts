@@ -491,3 +491,45 @@ describe("resolveAgentFromTask: voice-prefix selection (design §4.4 -- the prim
     expect(result.task).toBe("帮我写封邮件");
   });
 });
+
+/**
+ * Regression guard for the shipped `sidecar/agents/` placeholder: at the
+ * time this batch (8abd25f) landed, that directory contained nothing but a
+ * `README.md` documenting the format. Because `resourceStore.ts`'s "file"
+ * layout (`readFileEntry`) accepted any `.md` file, that README silently
+ * registered as a real agent definition named "README", with the README's
+ * own prose as its system-prompt body -- visible in `GET /agent/definitions`
+ * and reachable as a `resolveAgentFromTask` alias.
+ *
+ * This deliberately reads the REAL, shipped `sidecar/agents/` directory
+ * (not an injected temp dir, unlike every other test in this file) because
+ * the whole point is to pin what THIS repo currently ships there: zero
+ * usable agent definitions. It doubles as the regression test for the
+ * `resourceStore.ts` README-exclusion fix (see
+ * `test/resources/resourceStore.test.ts`'s "a file named README.md ... is
+ * not treated as an entry" tests) -- if that fix is ever reverted, or a
+ * second stray non-definition file is added to `sidecar/agents/` later,
+ * this is what catches it.
+ *
+ * Two separate assertions below, on purpose: `toEqual([])` pins the CURRENT
+ * shipped content (this repo ships no real built-in agents today -- the
+ * README says so explicitly: "It ships empty on purpose"), and is expected
+ * to need updating the day a legitimate built-in agent is added here, the
+ * same maintenance `builtInSkills.test.ts`'s `EXPECTED_SKILLS` list already
+ * requires for skills. The `name`-based assertion pins the actual invariant
+ * this test exists for -- no file named README ever registers as an agent
+ * -- so it keeps guarding against exactly this regression even after that
+ * day, once the list is no longer empty and the `toEqual([])` line has been
+ * updated to name the real agent(s) instead.
+ */
+describe("createAgentDefinitionStore against the real shipped sidecar/agents/ directory", () => {
+  test("the built-in agents root ships with zero usable agent definitions (README.md must not count as one)", () => {
+    const builtInAgentsDir = path.resolve(__dirname, "..", "..", "agents");
+    expect(fs.existsSync(builtInAgentsDir)).toBe(true);
+
+    const store = createAgentDefinitionStore({ roots: [builtInAgentsDir] });
+
+    expect(store.list()).toEqual([]);
+    expect(store.list().some((entry) => entry.name.toLowerCase() === "readme")).toBe(false);
+  });
+});

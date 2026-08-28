@@ -25,3 +25,11 @@ tools: read_file, write_file
 ```
 
 `OPENTYPE_AGENTS_DIR` overrides this root entirely (see `sidecar/README.md`).
+
+Note: this file, `README.md`, is itself deliberately excluded from agent
+discovery — `resourceStore.ts`'s `"file"`-layout discovery skips any file
+named `README.md` (case-insensitively) by its own filename, regardless of
+what's inside it, so this placeholder (and a user's own README documenting
+their `~/.opentype/agents/`) never registers as a callable agent. If you're
+wondering why dropping a `README.md` here does nothing, that's why — give
+your agent definitions any other filename.

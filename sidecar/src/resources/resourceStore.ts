@@ -85,9 +85,27 @@ function readDirectoryEntry(root: string, dirent: fs.Dirent, entryFileName: stri
  * `root`. Frontmatter `name` wins over the file's own basename when both
  * are present, matching the directory layout's "frontmatter name wins over
  * the directory name" precedent.
+ *
+ * A `README.md` (any case) is excluded regardless of what's inside it. A
+ * README sitting directly in a flat directory of definitions is a
+ * documentation convention -- the shipped `sidecar/agents/README.md`
+ * placeholder describes the format, it isn't an agent -- but the "file"
+ * layout otherwise treats any `.md` file as an entry, so without this check
+ * a user's own README documenting their `~/.opentype/agents/` would
+ * silently register as a real agent, its prose read in as the system
+ * prompt. This is a check on the FILE'S OWN name, deliberately before
+ * frontmatter is even consulted: a README that sets `name: something-else`
+ * must still be excluded, since the point is that a file called README.md
+ * never becomes an entry no matter what it contains. `"directory"` layout
+ * is untouched -- it never enumerates loose files inside an entry
+ * directory, so a README next to a `SKILL.md` was never at risk.
  */
 function readFileEntry(root: string, dirent: fs.Dirent, entryExtension: string): ResourceEntry | null {
   if (!dirent.isFile() || !dirent.name.endsWith(entryExtension)) {
+    return null;
+  }
+  const basename = dirent.name.slice(0, dirent.name.length - entryExtension.length);
+  if (basename.toLowerCase() === "readme") {
     return null;
   }
   const filePath = path.join(root, dirent.name);
@@ -98,7 +116,6 @@ function readFileEntry(root: string, dirent: fs.Dirent, entryExtension: string):
     return null;
   }
   const { attrs, body } = parseFrontmatter(raw);
-  const basename = dirent.name.slice(0, dirent.name.length - entryExtension.length);
   const name = attrs.name?.trim() ? attrs.name.trim() : basename;
   return { name, description: attrs.description ?? "", body, root, path: filePath };
 }

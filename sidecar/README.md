@@ -53,13 +53,22 @@ its SQLite DB at `sidecar/.data/opentype.sqlite3`. Useful env vars (see
   below); mainly useful for pointing a dev server at a different skill
   directory without touching the bundled `sidecar/skills/`. Does not affect
   the other two skill roots (`~/.opentype/skills`, `~/.claude/skills`),
-  which are never overridable — see `src/skills/skillRoots.ts`.
+  which are never overridable — see `src/skills/skillRoots.ts`. A packaged
+  `.app` launch sets this automatically (`SidecarClient.swift`'s
+  `bundledSkillsAndAgentsEnvironment`, pointed at the `Contents/Resources/skills`
+  `build-app.sh` bundles) — `import.meta.dir`, which is what the built-in
+  default without this override resolves against, points into a
+  `bun build --compile` binary's embedded virtual filesystem rather than a
+  real directory beside it, so without this the packaged app would find zero
+  built-in skills.
 - `OPENTYPE_AGENTS_DIR` — override the built-in agent-definition root (see
   "Agent definitions" below); same purpose and same caveat as
   `OPENTYPE_SKILLS_DIR` above — only the built-in root moves, the other two
   agent roots (`~/.opentype/agents`, `~/.claude/agents`) are never
   overridable, and it has no effect on the (separate, shorter) root list
-  `AGENTS.md` global instructions use — see `src/agent/agentRoots.ts`.
+  `AGENTS.md` global instructions use — see `src/agent/agentRoots.ts`. Also
+  set automatically for a packaged launch, same mechanism as
+  `OPENTYPE_SKILLS_DIR` above.
 
 ## Test
 
@@ -300,6 +309,18 @@ copied straight from Claude Code doesn't need editing. `model` is parsed but
 deliberately **ignored** — this product has exactly one, globally-configured
 LLM provider; per-agent model switching is out of scope for this batch. An
 unrecognised frontmatter field never fails the whole file to load.
+
+A `README.md` sitting directly in an agent-definition root (e.g. the
+built-in `sidecar/agents/README.md` placeholder below) never registers as an
+entry — `resourceStore.ts`'s `"file"`-layout discovery excludes any file
+named `README.md` (case-insensitively), by the file's own name, regardless
+of what's inside it. A README documenting the format of a directory of
+definitions is a convention, not a definition; without this exclusion a
+user's own `~/.opentype/agents/README.md` would silently become a callable
+agent named "README" running its own prose as a system prompt. This applies
+only to the `"file"` layout (agent definitions) — Skills' `"directory"`
+layout never enumerates loose files inside a skill directory at all, so a
+`README.md` next to a `SKILL.md` was never at risk.
 
 Discovery uses the same three-root, first-root-wins, 5s-TTL machinery as
 Skills above (`src/resources/resourceStore.ts`'s `layout: "file"` mode, see

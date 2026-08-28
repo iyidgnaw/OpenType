@@ -1,6 +1,7 @@
 import { unlinkSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { buildAgentRoutes } from "./agent/routes";
+import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { buildAgentRoutes, type SkillIndexSource } from "./agent/routes";
 import { withApproval, yoloApprovalPolicy } from "./agent/approval";
 import type { AgentChatFn } from "./agent/loop";
 import {
@@ -13,6 +14,12 @@ import { buildMcpConfigRoutes } from "./agent/mcpConfigRoutes";
 import { createBuiltInTools } from "./agent/builtInTools";
 import { createCoreTools } from "./agent/coreTools";
 import { mergeToolSets, type ToolSet } from "./agent/toolSets";
+import { createSkillStore } from "./skills/skillStore";
+import { resolveSkillRoots } from "./skills/skillRoots";
+import { createSkillTool } from "./skills/skillTool";
+import { createAgentDefinitionStore, loadGlobalInstructions } from "./agent/agentDefinitions";
+import { resolveAgentRoots, resolveGlobalInstructionRoots } from "./agent/agentRoots";
+import type { AgentDefinitionsSource } from "./agent/routes";
 import { buildAsrRoutes, type TranscribeFn, type TranscribeOptions } from "./asr/routes";
 import { buildAsrStatusRoutes, type AsrStatusDeps, type LocalWhisperStatus } from "./asr/statusRoutes";
 import { buildWhisperModelRoutes } from "./asr/whisperModelRoutes";
@@ -121,7 +128,33 @@ export function buildApp(
    * compiling and simply gets a route that reports "nothing to delete"
    * rather than one wired to a real path.
    */
-  contextLogPath?: string
+  contextLogPath?: string,
+  /**
+   * §2.1 ("闸门默认打开"): whether `/agent/run` prompts before a destructive
+   * shell/python call. `main()` passes the resolved `env.agentApprovalMode`
+   * here -- this is the only place in the app that reads that env value, so
+   * every other call site (all pre-existing test call sites included) keeps
+   * compiling and gets the same "yolo" default `buildAgentRoutes` itself
+   * falls back to when this is omitted.
+   */
+  agentApprovalMode?: "yolo" | "prompt",
+  /**
+   * Design §3.3/§3.4: source for the always-resident skill index, threaded
+   * to `buildAgentRoutes` so `/agent/run` renders and injects it fresh on
+   * every call. Optional, trailing, same reasoning as every other optional
+   * param above -- every pre-existing call site keeps compiling and simply
+   * gets no skill index (`RunAgentLoopInput.skills` stays unset, exactly
+   * today's behavior).
+   */
+  skillStore?: SkillIndexSource,
+  /**
+   * Design §4/§4.5: source for agent-name/voice-prefix selection and
+   * AGENTS.md global instructions, threaded to `buildAgentRoutes`. Optional,
+   * trailing, same reasoning as `skillStore` above -- every pre-existing
+   * call site keeps compiling and simply gets no agent selection or global
+   * instructions (`/agent/run` behaves exactly as it did before this batch).
+   */
+  agentDefinitions?: AgentDefinitionsSource
 ) {
   return createRouter([
     {
@@ -131,15 +164,15 @@ export function buildApp(
     },
     ...buildOneShotRoutes(store, conversations, chat, contextLogWriter, tools),
     ...buildMemoryRoutes(store, callLLM, contextLogPath),
-    ...buildAgentRoutes(
-      store,
-      conversations,
-      chat,
-      tools,
-      contextLogWriter,
-      spillRoot,
-      runLogRoot
-    ),
+    // §9.1: approval mode, the skill index source, and agent definitions all
+    // land on `buildAgentRoutes` as one trailing options object rather than
+    // three separate positional parameters -- see that function's own doc
+    // comment (`AgentRouteOptions`, `src/agent/routes.ts`).
+    ...buildAgentRoutes(store, conversations, chat, tools, contextLogWriter, spillRoot, runLogRoot, {
+      approvalMode: agentApprovalMode,
+      skills: skillStore,
+      agentDefinitions,
+    }),
     ...buildConversationRoutes(conversations),
     // P0-1: the entity dictionary feeds back into recognition -- read per
     // request (not captured once) so a term taught mid-session applies to the
@@ -246,18 +279,83 @@ async function main() {
   const mcpTools = createReloadableMcpToolSet(resolvedMcpServers.servers);
   const builtInTools = createBuiltInTools({ store, callLLM });
   const coreTools = createCoreTools({ memoryStore: store, conversations });
+  // Skill discovery (design §3.2/§8): built-in `sidecar/skills/` (bundled
+  // alongside this module, `OPENTYPE_SKILLS_DIR`-overridable) -> user
+  // `~/.opentype/skills` -> read-only Claude-Code-compat `~/.claude/skills`,
+  // first root wins a name collision. `resolveSkillRoots` is pure path
+  // logic; `createSkillStore` does the actual (TTL-cached) disk reads, on
+  // demand from `agent/routes.ts`'s per-request `renderSkillIndex` call --
+  // not read once here and frozen for the process lifetime.
+  const skillStore = createSkillStore({
+    roots: resolveSkillRoots({
+      homeDir: homedir(),
+      builtInSkillsDir: resolve(import.meta.dir, "..", "skills"),
+      env: process.env,
+    }),
+    // Design §5: "不做文件监听热重载" -- a short TTL substitutes for it. Without
+    // this, `createResourceStore`'s `ttlMs` defaults to 0 (always re-read),
+    // which would walk all three skill roots and re-parse every SKILL.md on
+    // every single `/agent/run` call instead of once per 5s window.
+    ttlMs: 5_000,
+  });
+  const skillTool = createSkillTool({ store: skillStore });
+  // Agent-definition discovery (design §4/§8/§9.4): same three-root,
+  // first-root-wins shape as skills above, built on the SAME
+  // `resources/resourceStore.ts` layer (`layout: "file"` instead of
+  // `"directory"`) rather than a parallel implementation. `resolveAgentRoots`
+  // is pure path logic, mirroring `resolveSkillRoots`.
+  //
+  // AGENTS.md global instructions (§4.5) use a DIFFERENT, shorter root list
+  // (`resolveGlobalInstructionRoots`): built-in + `~/.opentype` only, never
+  // `~/.claude` -- see that function's doc comment (`agent/agentRoots.ts`)
+  // for why an imported skill/agent and an imported AGENTS.md have different
+  // consent models even though they can live in the same `~/.claude`
+  // directory. `loadGlobalInstructions` itself doesn't know or care which
+  // root is "compat"; the exclusion is entirely this call site handing it
+  // the shorter list.
+  const builtInAgentsDir = resolve(import.meta.dir, "..", "agents");
+  const agentDefinitionStore = createAgentDefinitionStore({
+    roots: resolveAgentRoots({
+      homeDir: homedir(),
+      builtInAgentsDir,
+      env: process.env,
+    }),
+    ttlMs: 5_000,
+  });
+  const globalInstructionRoots = resolveGlobalInstructionRoots({
+    homeDir: homedir(),
+    builtInAgentsDir,
+  });
+  const agentDefinitions: AgentDefinitionsSource = {
+    list: () => agentDefinitionStore.list(),
+    globalInstructions: () => loadGlobalInstructions(globalInstructionRoots),
+  };
   // The approval seam wraps the *merged* set so built-in memory tools, core
   // tools, and MCP tools all flow through the same gate. The policy here is
-  // the always-allow baseline, and stays that way on purpose: this is the set
+  // always the always-allow baseline, unconditionally -- this is the set
   // `/oneshot/ask` also narrows down to its two web tools, and ask has no run
-  // to prompt through. `/agent/run` applies the real, user-prompting policy
-  // (P1-6, `agent/approval.ts`) on top of this, per run, because asking needs
-  // that run's id, signal and question broker -- none of which exist here. See
-  // `agent/routes.ts`. No guards are registered: the YOLO stance is unchanged
-  // (T6 added the guard SEAM and its monotonicity, not a policy). The audit
-  // sink is left unset here because the approval pair belongs to a run, and
-  // only the agent route knows which run a call belongs to.
-  const tools = withApproval(mergeToolSets(builtInTools, coreTools, mcpTools), yoloApprovalPolicy);
+  // to prompt through, ever, regardless of `agentApprovalMode`. `/agent/run`
+  // is where `agentApprovalMode` (§2.1, read from `env.agentApprovalMode`,
+  // resolved once in `main()` and threaded down through `buildApp` ->
+  // `buildAgentRoutes`) actually chooses between this same always-allow
+  // policy (the "yolo" default) and the user-prompting one (P1-6,
+  // `agent/approval.ts`, opt-in via `OPENTYPE_AGENT_APPROVAL=prompt`) on top
+  // of this, per run, because asking needs that run's id, signal and
+  // question broker -- none of which exist here. See `agent/routes.ts`. No
+  // guards are registered: the YOLO stance is unchanged (T6 added the guard
+  // SEAM and its monotonicity, not a policy). The audit sink is left unset
+  // here because the approval pair belongs to a run, and only the agent
+  // route knows which run a call belongs to.
+  // `skillTool` (`opentype__load_skill`) is merged into the same set as
+  // every other built-in/core/MCP tool. It reaches Ask mode's tool set too
+  // in principle (`tools` is the one merged set both `/oneshot/ask` and
+  // `/agent/run` start from), but Ask narrows down to `ASK_TOOL_NAMES` (web
+  // search/fetch only) before use, so `load_skill` is absent there for free
+  // -- see `oneshot/routes.ts`, and design §3.4's "Ask 模式不注入" line.
+  const tools = withApproval(
+    mergeToolSets(builtInTools, coreTools, skillTool, mcpTools),
+    yoloApprovalPolicy
+  );
   const contextLogWriter = createFileContextUsageLogWriter(env.contextLogPath);
 
   // Local MLX-Whisper ASR: spawns the python server once here (alongside the
@@ -422,7 +520,10 @@ async function main() {
         return (await response.json()) as LocalWhisperStatus;
       },
     },
-    env.contextLogPath
+    env.contextLogPath,
+    env.agentApprovalMode,
+    skillStore,
+    agentDefinitions
   );
 
   // P1-9 single-instance guard: an existing socket file is only safe to

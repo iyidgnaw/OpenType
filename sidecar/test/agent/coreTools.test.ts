@@ -90,12 +90,13 @@ function toolNames(set: ToolSet): string[] {
 }
 
 describe("createCoreTools tool inventory", () => {
-  // Contract extension (unified-memory-and-recent-context design §3.6,
-  // Task 11): the inventory grows from eight to exactly nine --
-  // `opentype__read_history` joins the set. Same precedent as the
-  // seven-to-eight change above it: the list itself legitimately changes
-  // here; every other assertion is untouched.
-  test("exposes exactly the nine namespaced core tools, all type 'function'", () => {
+  // Contract extension (first-party-tools-skills-and-agents design §2): the
+  // inventory grows from nine to exactly fourteen -- the five file tools
+  // (`opentype__write_file`, `opentype__edit_file`, `opentype__move_file`,
+  // `opentype__trash`, `opentype__glob`) join the set. Same precedent as the
+  // eight-to-nine change this comment used to describe: the list itself
+  // legitimately changes here; every other assertion is untouched.
+  test("exposes exactly the fourteen namespaced core tools, all type 'function'", () => {
     const tools = createCoreTools({ homeDir: makeTempHome(), fetchFn: blockedFetch() });
 
     for (const tool of tools.openAiTools) {
@@ -111,6 +112,11 @@ describe("createCoreTools tool inventory", () => {
         "opentype__web_search",
         "opentype__web_fetch",
         "opentype__open_file",
+        "opentype__write_file",
+        "opentype__edit_file",
+        "opentype__move_file",
+        "opentype__trash",
+        "opentype__glob",
         "opentype__read_history",
       ].sort()
     );

@@ -7,6 +7,8 @@ import type { McpToolSet } from "../../src/agent/mcpClient";
 import { buildAgentRoutes } from "../../src/agent/routes";
 import { createRouter } from "../../src/router";
 import type { ContextUsageLogWriter } from "../../src/oneshot/contextDebugLog";
+import { AGENT_SYSTEM_PROMPT } from "../../src/oneshot/prompts";
+import type { AgentDefinition } from "../../src/agent/agentDefinitions";
 
 function makeStore(): MemoryStore {
   return new MemoryStore(openDatabase(":memory:"));
@@ -581,5 +583,368 @@ describe("recent activity injection (Task 10, design §3.5)", () => {
     const userMessage = capturedMessages!.find((m) => m.role === "user");
     expect(userMessage?.content).not.toContain("Recent activity");
     expect(store.recentEvents(10)).toHaveLength(0);
+  });
+});
+
+/**
+ * Agent-definition route wiring (design §4.4/§4.5,
+ * docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md).
+ *
+ * `buildAgentRoutes` grows one new trailing parameter to carry this: an
+ * `agentSupport` options object shaped `{ agentDefinitions?: {
+ * list(): AgentDefinition[]; globalInstructions(): string | undefined } }`.
+ * This is a DELIBERATE CHOICE made here, not dictated by the design doc --
+ * flagged as a coordination point in the stage-1 report, since the same
+ * batch's skill-index-injection and approval-mode work (design §3.4, §2.1)
+ * also extend this same function's signature. Whoever implements this
+ * (stage 3) should reconcile all pending `routes.ts` signature changes into
+ * one coherent parameter list rather than stacking unrelated positional
+ * params independently.
+ *
+ * Every test below passes an in-memory fake for `agentDefinitions` (a plain
+ * object matching the shape above) -- none of them touch real files or real
+ * discovery roots; `agentDefinitions.test.ts` covers discovery/composition
+ * as pure units.
+ *
+ * RED-STATE NOTE: as of this stage, `buildAgentRoutes` does not accept this
+ * parameter and `/agent/run` does not read `body.agentName` at all, and
+ * `GET /agent/definitions` does not exist (falls through the router to the
+ * same 404 `{ error: "not_found" }` the progress-route tests' comment
+ * documents for an unbuilt route). So passing the extra constructor argument
+ * is harmless no-op JS (bun strips types, extra args are ignored) and every
+ * assertion below that depends on the new behavior fails for the right
+ * reason: the feature is simply not there yet.
+ */
+describe("agent definitions: agentName + GET /agent/definitions (design §4.4)", () => {
+  interface FakeAgentDefinitionsProvider {
+    list(): AgentDefinition[];
+    globalInstructions(): string | undefined;
+  }
+
+  function fakeProvider(
+    definitions: AgentDefinition[],
+    globalInstructions?: string
+  ): FakeAgentDefinitionsProvider {
+    return {
+      list: () => definitions,
+      globalInstructions: () => globalInstructions,
+    };
+  }
+
+  function agentDef(overrides: Partial<AgentDefinition>): AgentDefinition {
+    return {
+      name: "agent",
+      description: "d",
+      body: "body",
+      root: "/agents",
+      path: "/agents/agent.md",
+      ...overrides,
+    };
+  }
+
+  test("agentName selects a definition: its body is composed onto the base system prompt", async () => {
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const writer = agentDef({ name: "writer", description: "d", body: "You write warm, concise emails." });
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: fakeProvider([writer]) }
+      )
+    );
+
+    const response = await router(post({ task: "write an email to my landlord", agentName: "writer" }));
+
+    expect(response.status).toBe(200);
+    const systemMessage = capturedMessages!.find((m) => m.role === "system");
+    expect(systemMessage?.content).toContain("You write warm, concise emails.");
+    // Composition appends, never replaces (see agentDefinitions.test.ts's
+    // dedicated security test for the full argument) -- the base prompt must
+    // still be present in full and first.
+    expect(systemMessage?.content?.startsWith(AGENT_SYSTEM_PROMPT)).toBe(true);
+  });
+
+  test("agentName takes precedence over a voice prefix present in the task", async () => {
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const writer = agentDef({ name: "writer", description: "d", body: "WRITER BODY" });
+    const researcher = agentDef({
+      name: "researcher",
+      displayName: "研究员",
+      description: "d",
+      body: "RESEARCHER BODY",
+    });
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: fakeProvider([writer, researcher]) }
+      )
+    );
+
+    // The task's own leading text would, on its own, voice-match "researcher"
+    // -- but an explicit agentName of "writer" must win outright.
+    await router(post({ task: "用研究员查一下天气", agentName: "writer" }));
+
+    const systemMessage = capturedMessages!.find((m) => m.role === "system");
+    expect(systemMessage?.content).toContain("WRITER BODY");
+    expect(systemMessage?.content).not.toContain("RESEARCHER BODY");
+    // DECIDED (design owner adjudication, 2026-08-28 -- no longer an
+    // assumption): stripping is task hygiene scoped to the agent that was
+    // actually addressed, not a side effect of `agentName` selection itself.
+    // The task here addresses "研究员" (a DIFFERENT agent than the one
+    // explicitly named), so nothing is stripped -- leaving "用研究员" in
+    // would be wrong too, but for a different reason than leaving it in
+    // would be for the same-agent case below: here it's simply not a prefix
+    // ADDRESSING "writer" at all, so there is nothing for writer's resolution
+    // to strip. See the next test for the same-agent case, where stripping
+    // DOES still happen despite agentName being explicit.
+    const userMessage = capturedMessages!.find((m) => m.role === "user");
+    expect(userMessage?.content).toContain("用研究员查一下天气");
+  });
+
+  test("agentName explicit AND the task's own prefix addresses that SAME agent: the prefix is still stripped", async () => {
+    // Design owner adjudication (2026-08-28, revising the earlier
+    // no-stripping-when-explicit assumption): explicit agentName decides
+    // WHICH agent runs, but stripping is a separate, orthogonal step that
+    // still happens whenever the task's leading text addresses the agent
+    // that ends up running -- named explicitly or found by voice-prefix
+    // alike. Rationale: leaving "用写作助手" in the task hands the model a
+    // task addressed to someone else, which is a correctness bug regardless
+    // of how the agent was selected. Scoping the strip to the *actually
+    // selected* agent (not "strip any recognized agent-address") is what
+    // keeps this from damaging an unrelated task that merely starts with a
+    // phrase addressing some OTHER agent -- see the previous test.
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const writer = agentDef({ name: "writer", displayName: "写作助手", description: "d", body: "WRITER BODY" });
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: fakeProvider([writer]) }
+      )
+    );
+
+    await router(post({ task: "用写作助手帮我写封邮件", agentName: "writer" }));
+
+    const userMessage = capturedMessages!.find((m) => m.role === "user");
+    expect(userMessage?.content).toContain("帮我写封邮件");
+    expect(userMessage?.content).not.toContain("用写作助手");
+  });
+
+  test("an unknown agentName is a 400 with a readable message", async () => {
+    const chat: AgentChatFn = async () => ({ content: "done" });
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: fakeProvider([]) }
+      )
+    );
+
+    const response = await router(post({ task: "do something", agentName: "does-not-exist" }));
+
+    // An explicitly named agent that doesn't exist is a CALLER error (400),
+    // unlike a voice prefix that simply fails to match anything (which is
+    // just "no agent selected", not an error at all).
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("does-not-exist");
+  });
+
+  test("with neither agentName nor a matching voice prefix, the system message is byte-identical to today", async () => {
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const writer = agentDef({ name: "writer", description: "d", body: "WRITER BODY" });
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: fakeProvider([writer]) }
+      )
+    );
+
+    await router(post({ task: "just a normal task with no agent mentioned" }));
+
+    const systemMessage = capturedMessages!.find((m) => m.role === "system");
+    expect(systemMessage?.content).toBe(AGENT_SYSTEM_PROMPT);
+  });
+
+  test("GET /agent/definitions returns name/description/source-root/tools for each discovered agent", async () => {
+    const chat: AgentChatFn = async () => ({ content: "done" });
+    const writer = agentDef({
+      name: "writer",
+      description: "Writes emails",
+      tools: "bash, read_file",
+      root: "/agents/builtin",
+      path: "/agents/builtin/writer.md",
+    });
+    const plain = agentDef({
+      name: "plain",
+      description: "No tool restriction",
+      root: "/agents/user",
+      path: "/agents/user/plain.md",
+    });
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: fakeProvider([writer, plain]) }
+      )
+    );
+
+    const response = await router(new Request("http://sidecar/agent/definitions", { method: "GET" }));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Array<{
+      name: string;
+      description: string;
+      root: string;
+      tools?: string;
+    }>;
+    const byName = Object.fromEntries(body.map((entry) => [entry.name, entry]));
+    expect(byName.writer).toMatchObject({
+      name: "writer",
+      description: "Writes emails",
+      root: "/agents/builtin",
+      tools: "bash, read_file",
+    });
+    expect(byName.plain).toMatchObject({
+      name: "plain",
+      description: "No tool restriction",
+      root: "/agents/user",
+    });
+  });
+
+  test("the resolved agent's tools allowlist narrows what reaches the chat call (end-to-end wiring check)", async () => {
+    let capturedTools: unknown;
+    const chat: AgentChatFn = async (_messages, options) => {
+      capturedTools = options?.tools;
+      return { content: "done" };
+    };
+    const tools: McpToolSet = {
+      openAiTools: [
+        { type: "function", function: { name: "opentype__bash" } },
+        { type: "function", function: { name: "opentype__grep" } },
+      ],
+      callTool: async () => ({ content: "" }),
+    };
+    const writer = agentDef({ name: "writer", description: "d", body: "b", tools: "bash" });
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        tools,
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: fakeProvider([writer]) }
+      )
+    );
+
+    await router(post({ task: "do a thing", agentName: "writer" }));
+
+    const names = (capturedTools as { function: { name: string } }[]).map((tool) => tool.function.name);
+    expect(names).toContain("opentype__bash");
+    expect(names).not.toContain("opentype__grep");
+  });
+});
+
+/**
+ * AGENTS.md global instructions (design §4.5) -- a separate mechanism from
+ * the named-agent selection above: it applies REGARDLESS of whether an
+ * agentName/voice-prefix match happened, because it represents the owner's
+ * standing instructions rather than a specific agent's persona.
+ */
+describe("AGENTS.md global instructions (design §4.5)", () => {
+  test("global instructions are appended after the agent body, and apply even with no agent selected", async () => {
+    let capturedMessages: AgentChatMessage[] | undefined;
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "done" };
+    };
+    const writer: AgentDefinition = {
+      name: "writer",
+      description: "d",
+      body: "WRITER BODY",
+      root: "/agents",
+      path: "/agents/writer.md",
+    };
+    const provider = {
+      list: () => [writer],
+      globalInstructions: () => "Always sign off with the owner's name, Diyi.",
+    };
+    const router = createRouter(
+      buildAgentRoutes(
+        makeStore(),
+        makeConversations(),
+        chat,
+        noTools(),
+        captureContextLog().writer,
+        undefined,
+        undefined,
+        { agentDefinitions: provider }
+      )
+    );
+
+    // No agentName, no voice prefix -- global instructions must still apply.
+    await router(post({ task: "just a normal task" }));
+    let systemMessage = capturedMessages!.find((m) => m.role === "system");
+    expect(systemMessage?.content).toContain("Always sign off with the owner's name, Diyi.");
+    expect(systemMessage?.content?.startsWith(AGENT_SYSTEM_PROMPT)).toBe(true);
+
+    // With an agent selected, the order is base -> agent body -> global
+    // instructions (never base -> global -> body).
+    await router(post({ task: "write something", agentName: "writer" }));
+    systemMessage = capturedMessages!.find((m) => m.role === "system");
+    const bodyIndex = systemMessage!.content!.indexOf("WRITER BODY");
+    const globalIndex = systemMessage!.content!.indexOf("Always sign off with the owner's name, Diyi.");
+    expect(bodyIndex).toBeGreaterThan(-1);
+    expect(globalIndex).toBeGreaterThan(bodyIndex);
   });
 });

@@ -24,7 +24,7 @@ import {
   type AskUserBroker,
 } from "./askUser";
 import { mergeToolSets } from "./toolSets";
-import { createPromptingApprovalPolicy, withApproval } from "./approval";
+import { createPromptingApprovalPolicy, withApproval, yoloApprovalPolicy } from "./approval";
 import {
   AgentCancelledError,
   createCancellationRegistry,
@@ -34,6 +34,14 @@ import {
 import { logContextUsage, type ContextUsageLogWriter } from "../oneshot/contextDebugLog";
 import { resolveConversation } from "../oneshot/routes";
 import type { OneShotChatMessage } from "../oneshot/client";
+import { renderSkillIndex, type Skill } from "../skills/skillStore";
+import { AGENT_SYSTEM_PROMPT } from "../oneshot/prompts";
+import {
+  applyAgentToolAllowlist,
+  buildAgentSystemPrompt,
+  resolveAgentFromTask,
+  type AgentDefinition,
+} from "./agentDefinitions";
 
 interface AgentRunRequestBody {
   task?: string;
@@ -46,6 +54,15 @@ interface AgentRunRequestBody {
    * response shape are exactly as before and nothing is registered.
    */
   runId?: string;
+  /**
+   * Explicit agent selection (design §4.4's second, future-UI path) --
+   * precedence over the voice-prefix match `resolveAgentFromTask` performs
+   * on `task` itself. An unrecognised name is a caller error (400): unlike a
+   * voice prefix that simply fails to match anything (which just means "no
+   * agent selected", not a mistake), a client that names a specific agent
+   * and gets a different, or no, persona back would silently misfire.
+   */
+  agentName?: string;
 }
 
 async function readJsonBody<T>(req: Request): Promise<T> {
@@ -67,6 +84,55 @@ const ASK_USER_TIMEOUT_MS = 120_000;
  * the run open forever, and expiring reads as `unavailable`, never as consent.
  */
 const APPROVAL_TIMEOUT_MS = 120_000;
+
+/**
+ * Injectable source for the skill index (design §3.3/§3.4,
+ * docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md).
+ * Shaped as a store (`{ list(): Skill[] }`, the same shape `createSkillStore`
+ * returns) rather than a pre-rendered string, so `handleAgentRun` renders it
+ * fresh -- and picks up the skill store's own short TTL cache (design §5) --
+ * on every `/agent/run` call instead of freezing it at server-boot time.
+ */
+export interface SkillIndexSource {
+  list(): Skill[];
+}
+
+/**
+ * Injectable source for agent definitions + AGENTS.md global instructions
+ * (design §4, §4.5). `list()` is the discovered `AgentDefinition[]`
+ * (`agentDefinitions.ts`'s `createAgentDefinitionStore`, TTL-cached the same
+ * way the skill store is); `globalInstructions()` is the already-assembled
+ * `AGENTS.md` text (`loadGlobalInstructions`, called with whichever root
+ * list `server.ts` resolved -- the `~/.claude` exclusion, design §9.2/§9.4,
+ * lives entirely in which roots that call is given, not in anything here).
+ * Both are re-read fresh per call, same reasoning as `SkillIndexSource`
+ * above.
+ */
+export interface AgentDefinitionsSource {
+  list(): AgentDefinition[];
+  globalInstructions(): string | undefined;
+}
+
+/**
+ * §9.1's reconciled trailing options object: this batch's three concurrent
+ * lines (approval mode, skill index, agent definitions) each wanted to add a
+ * parameter to `buildAgentRoutes`; rather than stack three more positional
+ * arguments after `spillRoot`/`runLogRoot` (which stay positional --
+ * pre-existing, and every pre-existing call site already relies on their
+ * position), all three land here as one options object instead. Every field
+ * optional and every pre-existing call site (none of which pass an 8th
+ * argument at all) keeps compiling and gets exactly today's behavior:
+ * `approvalMode` defaults to `"yolo"`, no skill index is injected, no agent
+ * selection or AGENTS.md happens.
+ */
+export interface AgentRouteOptions {
+  /** §2.1: `"yolo"` (default -- no prompting) or `"prompt"` (today's always-prompt-on-destructive behavior). */
+  approvalMode?: "yolo" | "prompt";
+  /** §3.3/§3.4: source for the always-resident skill index. */
+  skills?: SkillIndexSource;
+  /** §4/§4.5: source for agent-name/voice-prefix selection and AGENTS.md global instructions. */
+  agentDefinitions?: AgentDefinitionsSource;
+}
 
 /**
  * Renders prior conversation turns as a short "previous task / previous
@@ -105,16 +171,65 @@ async function handleAgentRun(
   cancellations: CancellationRegistry,
   askUser: AskUserBroker,
   spillRoot?: string,
-  runLog?: RunLog
+  runLog?: RunLog,
+  approvalMode: "yolo" | "prompt" = "yolo",
+  skillStore?: SkillIndexSource,
+  agentDefinitions?: AgentDefinitionsSource
 ): Promise<Response> {
   const body = await readJsonBody<AgentRunRequestBody>(req);
-  const task = body.task ?? "";
-  if (String(task).trim() === "") {
+  const rawTask = body.task ?? "";
+  if (String(rawTask).trim() === "") {
     throw new ApiError("task is required", 400);
   }
   const context = body.context;
   const runId =
     typeof body.runId === "string" && body.runId.length > 0 ? body.runId : undefined;
+
+  // Agent selection (design §4.4/§9.3): an explicit `agentName` wins outright
+  // over the task's own voice prefix. An unrecognised explicit name is a
+  // caller error (400) -- distinct from a voice prefix that simply fails to
+  // match anything, which is not an error at all, just "no agent selected".
+  //
+  // Stripping is task hygiene, not a side effect of selection: whichever
+  // agent ends up running, the task text it sees should never carry a
+  // leading address to somebody else (or to itself). `resolveAgentFromTask`
+  // scoped to a SINGLETON candidate list (`[explicit]`) reuses its exact
+  // matching/stripping logic to answer "does the task's own prefix address
+  // THIS agent" without re-deriving that logic here -- if the task's prefix
+  // names a *different* agent than the one `agentName` explicitly selected,
+  // nothing is stripped, since there is nothing addressing the agent that is
+  // actually about to run.
+  const definitionsList = agentDefinitions?.list() ?? [];
+  let selectedDefinition: AgentDefinition | undefined;
+  let task: string;
+  if (typeof body.agentName === "string" && body.agentName.length > 0) {
+    const explicit = definitionsList.find((definition) => definition.name === body.agentName);
+    if (!explicit) {
+      throw new ApiError(`Unknown agent: "${body.agentName}"`, 400);
+    }
+    selectedDefinition = explicit;
+    task = resolveAgentFromTask(rawTask, [explicit]).task;
+  } else {
+    const resolved = resolveAgentFromTask(rawTask, definitionsList);
+    selectedDefinition = resolved.definition;
+    task = resolved.task;
+  }
+
+  // Composition is base -> agent body -> AGENTS.md global instructions
+  // (design §4.2/§4.5), always APPENDING -- never replacing -- the base
+  // prompt, which stays the harness's own defense regardless of what any
+  // agent file or AGENTS.md says. With no agent selected and no global
+  // instructions configured, this is byte-identical to `AGENT_SYSTEM_PROMPT`
+  // (today's behavior, unchanged).
+  const globalInstructions = agentDefinitions?.globalInstructions();
+  const systemPrompt = buildAgentSystemPrompt(AGENT_SYSTEM_PROMPT, selectedDefinition, globalInstructions);
+  // §4.3: a selected agent's `tools` frontmatter narrows the tool set THIS
+  // run's model calls can see -- applied to the base merged set, before the
+  // per-run `ask_user` tool below is added in, so an agent's tools allowlist
+  // can never accidentally remove the harness's own ask-the-user escape
+  // hatch (that isn't a "hand or foot" tool a persona author is choosing
+  // between, it's plumbing).
+  const runTools = selectedDefinition ? applyAgentToolAllowlist(tools, selectedDefinition) : tools;
 
   // Agent mode's known-terms context lookup runs against the same input
   // (task + any selected context) `runAgentLoop`'s optional `knownTerms`
@@ -153,6 +268,13 @@ async function handleAgentRun(
   const priorTurnsSummary = formatPriorTurns(priorMessages);
   const combinedContext = [priorTurnsSummary, context].filter(Boolean).join("\n\n") || undefined;
 
+  // Rendered fresh per request (design §3.3/§3.4): a skill file added since
+  // the last call must be visible without a restart, bounded only by the
+  // skill store's own short TTL cache. `undefined` when no store is wired
+  // up (every pre-existing call site) so `RunAgentLoopInput.skills` is
+  // simply omitted, matching today's behavior exactly.
+  const skills = skillStore ? renderSkillIndex(skillStore.list()) : undefined;
+
   // With a `runId`, the loop's (previously unused) `onProgress` hook feeds
   // the in-memory progress registry so `GET /agent/progress/:runId` can show
   // a live feed while this blocking call is still running. The run is marked
@@ -175,6 +297,13 @@ async function handleAgentRun(
         knownTerms,
         runtimeContext: buildTimeContext(),
         recentActivity,
+        skills,
+        // undefined when no agent was selected and no AGENTS.md exists --
+        // `buildAgentSystemPrompt` returns `AGENT_SYSTEM_PROMPT` unchanged in
+        // that case, and `runAgentLoop` defaults to the same constant when
+        // `systemPrompt` is omitted, so passing it explicitly here changes
+        // nothing about today's behavior.
+        systemPrompt,
       },
       {
         chat,
@@ -182,23 +311,35 @@ async function handleAgentRun(
         // surface; merged in here rather than living in the shared set for
         // that reason (T5).
         //
-        // P1-6 wraps that same per-run set in the prompting approval policy,
-        // and it has to happen here rather than where `server.ts` assembles
-        // the tool set: asking needs this run's id, this run's cancellation
-        // signal, and the broker, none of which exist at construction time.
-        // MCP tools stay inside the wrapper, as they have been since the
-        // seam landed -- `tools` is the whole merged set.
+        // P1-6 wraps that same per-run set in an approval policy, and it has
+        // to happen here rather than where `server.ts` assembles the tool
+        // set: asking needs this run's id, this run's cancellation signal,
+        // and the broker, none of which exist at construction time. MCP
+        // tools stay inside the wrapper, as they have been since the seam
+        // landed -- `runTools` is the merged set, already narrowed by the
+        // selected agent's `tools` allowlist if it has one (§4.3).
+        //
+        // Which policy depends on `approvalMode` (§2.1 of
+        // docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md,
+        // threaded down from `env.agentApprovalMode` via `buildAgentRoutes`).
+        // `yolo` is the default per the owner's §0 stance ("闸门默认打开") --
+        // no prompting for destructive commands. This demotes
+        // `createPromptingApprovalPolicy`/`commandRisk.ts`'s 942-line risk
+        // tokeniser to opt-in; nothing about either was deleted, so flipping
+        // `OPENTYPE_AGENT_APPROVAL=prompt` restores today's behavior exactly.
         tools: withApproval(
           mergeToolSets(
-            tools,
+            runTools,
             createAskUserTool(askUser, { runId, timeoutMs: ASK_USER_TIMEOUT_MS })
           ),
-          createPromptingApprovalPolicy({
-            broker: askUser,
-            runId,
-            timeoutMs: APPROVAL_TIMEOUT_MS,
-            signal,
-          })
+          approvalMode === "prompt"
+            ? createPromptingApprovalPolicy({
+                broker: askUser,
+                runId,
+                timeoutMs: APPROVAL_TIMEOUT_MS,
+                signal,
+              })
+            : yoloApprovalPolicy
         ),
         // One producer, two consumers (T7): the durable log keeps the full
         // record, the display registry keeps its bounded view of it. The log
@@ -296,6 +437,25 @@ function handleAgentProgress(req: Request, progressRegistry: AgentProgressRegist
 }
 
 /**
+ * Lists every discovered agent definition (design §4.4's "供将来的 UI 与调试
+ * 使用"), narrowed to just name/description/source-root/tools -- not the
+ * full internal `AgentDefinition` shape (which also carries the raw
+ * markdown `body`/`path`/`model`), since nothing here needs a debug/UI
+ * surface to echo an agent's entire system-prompt text back over HTTP. No
+ * `agentDefinitions` source configured (every pre-existing call site) means
+ * an empty list, not an error -- this route existing at all is opt-in.
+ */
+function handleAgentDefinitions(agentDefinitions?: AgentDefinitionsSource): Response {
+  const definitions = (agentDefinitions?.list() ?? []).map((definition) => ({
+    name: definition.name,
+    description: definition.description,
+    root: definition.root,
+    tools: definition.tools,
+  }));
+  return Response.json(definitions);
+}
+
+/**
  * `/agent/run` is still a single blocking call: it runs the whole loop and
  * returns the full (untruncated) step log at once. Live feedback comes from
  * the sidecar-internal progress registry created here: a run dispatched with
@@ -310,8 +470,16 @@ export function buildAgentRoutes(
   tools: McpToolSet,
   contextLogWriter: ContextUsageLogWriter,
   spillRoot?: string,
-  runLogRoot?: string
+  runLogRoot?: string,
+  // §9.1: one trailing options object -- see `AgentRouteOptions`'s doc
+  // comment for why this replaced three separate trailing parameters.
+  // Omitted (every pre-existing call site), every field below falls back to
+  // its own "exactly today's behavior" default.
+  options?: AgentRouteOptions
 ): Route[] {
+  const approvalMode = options?.approvalMode ?? "yolo";
+  const skillStore = options?.skills;
+  const agentDefinitions = options?.agentDefinitions;
   const progressRegistry = createAgentProgressRegistry();
   const cancellations = createCancellationRegistry();
   const runLog = runLogRoot ? createRunLog(runLogRoot) : undefined;
@@ -332,7 +500,10 @@ export function buildAgentRoutes(
           cancellations,
           askUser,
           spillRoot,
-          runLog
+          runLog,
+          approvalMode,
+          skillStore,
+          agentDefinitions
         ),
     },
     {
@@ -354,6 +525,11 @@ export function buildAgentRoutes(
       method: "POST",
       path: "/agent/answer/:runId",
       handler: (req) => handleAgentAnswer(req, askUser),
+    },
+    {
+      method: "GET",
+      path: "/agent/definitions",
+      handler: () => handleAgentDefinitions(agentDefinitions),
     },
   ];
 }

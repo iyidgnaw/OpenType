@@ -35,3 +35,38 @@ describe("loadEnv", () => {
     expect(env.whisperSocketPath).toBe("/tmp/custom-whisper.sock");
   });
 });
+
+/**
+ * §2.1 of docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md:
+ * "闸门默认打开" -- `/agent/run` stops prompting for destructive commands by
+ * default. `OPENTYPE_AGENT_APPROVAL` is the escape hatch back to today's
+ * always-prompt behavior. `env.agentApprovalMode` does not exist on
+ * `SidecarEnv` yet, so every assertion below reads `undefined` until it's
+ * added -- the expected RED failure mode for this whole block.
+ */
+describe("agentApprovalMode (OPENTYPE_AGENT_APPROVAL)", () => {
+  test("defaults to 'yolo' when unset", () => {
+    const env = loadEnv({});
+    expect(env.agentApprovalMode).toBe("yolo");
+  });
+
+  test("reads 'prompt' from OPENTYPE_AGENT_APPROVAL", () => {
+    const env = loadEnv({ OPENTYPE_AGENT_APPROVAL: "prompt" });
+    expect(env.agentApprovalMode).toBe("prompt");
+  });
+
+  test("reads 'yolo' explicitly", () => {
+    const env = loadEnv({ OPENTYPE_AGENT_APPROVAL: "yolo" });
+    expect(env.agentApprovalMode).toBe("yolo");
+  });
+
+  // Fail-closed toward the SAFER (prompting-capable) baseline product
+  // stance would suggest, but design §2.1 is explicit: unrecognised values
+  // fall back to "yolo", not "prompt" -- an env var a user mistyped should
+  // not silently make the product act as if they'd asked for confirmation
+  // prompts they never opted into.
+  test("falls back to 'yolo' for any unrecognised value", () => {
+    const env = loadEnv({ OPENTYPE_AGENT_APPROVAL: "sudo-mode" });
+    expect(env.agentApprovalMode).toBe("yolo");
+  });
+});

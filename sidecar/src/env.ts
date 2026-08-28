@@ -18,6 +18,18 @@ export interface SidecarEnv {
   spillRoot: string;
   /** Root directory for durable per-run step logs (`agent/runLog.ts`). */
   runLogRoot: string;
+  /**
+   * §2.1 of docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md
+   * ("权限放松" / "闸门默认打开"): whether `/agent/run` prompts before a
+   * destructive shell/python call. Defaults to `"yolo"` (no prompting) per
+   * the owner's explicit §0 product stance -- usability over safety, because
+   * an approval gate nobody understands just gets clicked through blind.
+   * `OPENTYPE_AGENT_APPROVAL=prompt` is the escape hatch back to the
+   * previous always-prompt behavior. Any unrecognised value falls back to
+   * `"yolo"`, not `"prompt"`: a mistyped env var should not silently make
+   * the product start demanding confirmations the user never opted into.
+   */
+  agentApprovalMode: "yolo" | "prompt";
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
@@ -67,6 +79,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
   // Durable agent step logs (`agent/runLog.ts`, T7); same convention again.
   const runLogRoot =
     source.OPENTYPE_RUN_LOG_ROOT ?? resolve(import.meta.dir, "..", ".data", "run-logs");
+  const agentApprovalMode: "yolo" | "prompt" =
+    source.OPENTYPE_AGENT_APPROVAL === "prompt" ? "prompt" : "yolo";
 
   return {
     socketPath,
@@ -80,5 +94,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): SidecarEnv {
     whisperScriptPath,
     spillRoot,
     runLogRoot,
+    agentApprovalMode,
   };
 }

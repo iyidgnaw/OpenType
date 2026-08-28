@@ -60,8 +60,24 @@ const GREP_TOOL_NAME = "opentype__grep";
 const WEB_SEARCH_TOOL_NAME = "opentype__web_search";
 const WEB_FETCH_TOOL_NAME = "opentype__web_fetch";
 const OPEN_FILE_TOOL_NAME = "opentype__open_file";
+const WRITE_FILE_TOOL_NAME = "opentype__write_file";
+const EDIT_FILE_TOOL_NAME = "opentype__edit_file";
+const MOVE_FILE_TOOL_NAME = "opentype__move_file";
+const TRASH_TOOL_NAME = "opentype__trash";
+const GLOB_TOOL_NAME = "opentype__glob";
 
 const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
+
+/**
+ * §2 of docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md:
+ * "默认上限 200 条" for `opentype__glob`. Exported (not just inlined) so the
+ * number can't silently drift out of sync with the design doc, and so a
+ * caller/test can pin it without hardcoding a magic number of its own.
+ */
+export const GLOB_DEFAULT_LIMIT = 200;
+
+/** Directory names `opentype__glob` never descends into, plus any other dot-directory. */
+const GLOB_SKIPPED_DIR_NAMES = new Set([".git", "node_modules", "Library"]);
 
 /**
  * Source-side clamp, applied inside each tool before the result ever reaches
@@ -70,7 +86,7 @@ const DEFAULT_EXEC_TIMEOUT_MS = 60_000;
  * built into the progress log/messages. Kept under the tests' 30k ceiling
  * with headroom for framing (exit-code line, truncation marker).
  */
-const SOURCE_CLAMP_MAX_CHARS = 25_000;
+export const SOURCE_CLAMP_MAX_CHARS = 25_000;
 
 const MAX_SEARCH_RESULTS = 8;
 
@@ -78,11 +94,32 @@ const MAX_SEARCH_RESULTS = 8;
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
-function clampAtSource(text: string): string {
+export function clampAtSource(text: string): string {
   if (text.length <= SOURCE_CLAMP_MAX_CHARS) {
     return text;
   }
   return `${text.slice(0, SOURCE_CLAMP_MAX_CHARS)}\n...[truncated]`;
+}
+
+/**
+ * Turns a shell-ish filename pattern (`*`/`?` wildcards, everything else
+ * literal) into a `RegExp` anchored to the whole basename. Deliberately not
+ * a full glob engine (no `**`, no brace expansion, no character classes) --
+ * `opentype__glob` matches by *filename*, not by path segments, so this is
+ * all the design's "按文件名模式递归查找" needs.
+ */
+function filenamePatternToRegExp(pattern: string): RegExp {
+  let source = "";
+  for (const ch of pattern) {
+    if (ch === "*") {
+      source += ".*";
+    } else if (ch === "?") {
+      source += ".";
+    } else {
+      source += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${source}$`);
 }
 
 function expandTilde(p: string, homeDir: string): string {
@@ -93,6 +130,46 @@ function expandTilde(p: string, homeDir: string): string {
     return path.join(homeDir, p.slice(2));
   }
   return p;
+}
+
+/**
+ * Renames `src` to `dest`, falling back to a recursive copy + remove when
+ * they straddle two filesystems (`EXDEV` -- e.g. an external drive), which
+ * a bare `fs.renameSync` cannot do. Shared by `opentype__move_file` and
+ * `opentype__trash`, since "trash" is just "move into `.Trash`".
+ */
+function moveEntry(src: string, dest: string): void {
+  try {
+    fs.renameSync(src, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EXDEV") {
+      throw err;
+    }
+    fs.cpSync(src, dest, { recursive: true });
+    fs.rmSync(src, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Finds a free name for `baseName` inside `trashDir`, walking " 2", " 3", ...
+ * SEQUENTIALLY rather than always trying " 2": once a first collision has
+ * already claimed " 2", a second one that just retried " 2" would clobber
+ * it -- real data loss, and the exact failure mode `opentype__trash` exists
+ * to prevent.
+ */
+function uniqueTrashDestination(trashDir: string, baseName: string): string {
+  const candidate = path.join(trashDir, baseName);
+  if (!fs.existsSync(candidate)) {
+    return candidate;
+  }
+  const ext = path.extname(baseName);
+  const stem = baseName.slice(0, baseName.length - ext.length);
+  for (let n = 2; ; n++) {
+    const next = path.join(trashDir, `${stem} ${n}${ext}`);
+    if (!fs.existsSync(next)) {
+      return next;
+    }
+  }
 }
 
 function errorContent(err: unknown): { content: string } {
@@ -438,6 +515,248 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     return { content: `Opened ${filePath} with its default application.` };
   }
 
+  /**
+   * Full-file write (§2). Creates missing parent directories -- "整理文件"
+   * tasks routinely target a path that doesn't exist yet -- and reports
+   * both the UTF-8 byte count (not `.length`, which undercounts multi-byte
+   * text) and whether an existing file was overwritten, since silently
+   * clobbering something is the one failure mode this tool's caller most
+   * needs surfaced back to it.
+   */
+  async function handleWriteFile(
+    rawArgs: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
+    if (signal?.aborted) {
+      return { content: "Error: cancelled." };
+    }
+    const args = (rawArgs ?? {}) as { path?: unknown; content?: unknown };
+    if (typeof args.path !== "string" || args.path.trim().length === 0) {
+      return { content: 'Error: write_file requires a non-empty "path" string.' };
+    }
+    if (typeof args.content !== "string") {
+      return { content: 'Error: write_file requires a "content" string.' };
+    }
+    const filePath = expandTilde(args.path, homeDir);
+    const existedBefore = fs.existsSync(filePath);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, args.content, "utf8");
+    const byteCount = Buffer.byteLength(args.content, "utf8");
+    return {
+      content: existedBefore
+        ? `Overwritten ${filePath} (${byteCount} bytes).`
+        : `Wrote ${filePath} (${byteCount} bytes).`,
+    };
+  }
+
+  /**
+   * Exact-string find/replace (§2). `old_string` not found, or found more
+   * than once without `replace_all: true`, resolves as an Error with the
+   * match count named -- and, critically, the file is left byte-unchanged
+   * in both cases: this handler never writes until it knows the edit is
+   * unambiguous.
+   */
+  async function handleEditFile(
+    rawArgs: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
+    if (signal?.aborted) {
+      return { content: "Error: cancelled." };
+    }
+    const args = (rawArgs ?? {}) as {
+      path?: unknown;
+      old_string?: unknown;
+      new_string?: unknown;
+      replace_all?: unknown;
+    };
+    if (typeof args.path !== "string" || args.path.trim().length === 0) {
+      return { content: 'Error: edit_file requires a non-empty "path" string.' };
+    }
+    if (typeof args.old_string !== "string" || args.old_string.length === 0) {
+      return { content: 'Error: edit_file requires a non-empty "old_string" string.' };
+    }
+    if (typeof args.new_string !== "string") {
+      return { content: 'Error: edit_file requires a "new_string" string.' };
+    }
+    const filePath = expandTilde(args.path, homeDir);
+    if (!fs.existsSync(filePath)) {
+      return { content: `Error: no file exists at ${filePath}.` };
+    }
+    const original = fs.readFileSync(filePath, "utf8");
+    const occurrences = original.split(args.old_string).length - 1;
+    if (occurrences === 0) {
+      return { content: `Error: old_string not found in ${filePath}.` };
+    }
+    if (occurrences > 1 && args.replace_all !== true) {
+      return {
+        content:
+          `Error: old_string matches ${occurrences} times in ${filePath}; ` +
+          'pass replace_all: true to replace all of them, or narrow old_string to a unique match.',
+      };
+    }
+    const updated =
+      occurrences > 1
+        ? original.split(args.old_string).join(args.new_string)
+        : original.replace(args.old_string, args.new_string);
+    fs.writeFileSync(filePath, updated, "utf8");
+    return { content: `Edited ${filePath} (${occurrences} replacement${occurrences === 1 ? "" : "s"}).` };
+  }
+
+  /**
+   * Move/rename (§2). The one hard-refusal this batch keeps (design's own
+   * words: "move_file 不覆盖"): an existing destination *file* is an Error,
+   * full stop, with the source left untouched -- silently clobbering a
+   * same-named file is the one mistake here that can't be undone by
+   * `opentype__trash`. An existing destination *directory* is not a
+   * collision; the source moves into it under its own basename, same as
+   * `mv src dir/`.
+   */
+  async function handleMoveFile(
+    rawArgs: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
+    if (signal?.aborted) {
+      return { content: "Error: cancelled." };
+    }
+    const args = (rawArgs ?? {}) as { source?: unknown; destination?: unknown };
+    if (typeof args.source !== "string" || args.source.trim().length === 0) {
+      return { content: 'Error: move_file requires a non-empty "source" string.' };
+    }
+    if (typeof args.destination !== "string" || args.destination.trim().length === 0) {
+      return { content: 'Error: move_file requires a non-empty "destination" string.' };
+    }
+    const source = expandTilde(args.source, homeDir);
+    let destination = expandTilde(args.destination, homeDir);
+    if (!fs.existsSync(source)) {
+      return { content: `Error: no file exists at ${source}.` };
+    }
+    if (fs.existsSync(destination) && fs.statSync(destination).isDirectory()) {
+      destination = path.join(destination, path.basename(source));
+    }
+    if (fs.existsSync(destination)) {
+      return { content: `Error: destination already exists at ${destination}.` };
+    }
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    moveEntry(source, destination);
+    return { content: `Moved ${source} to ${destination}.` };
+  }
+
+  /**
+   * Recoverable "delete" (§2/§0): moves into `<homeDir>/.Trash` rather than
+   * removing anything, dedup'ing a name collision by walking " 2", " 3", ...
+   * SEQUENTIALLY rather than always trying " 2" -- a fixed " 2" suffix would
+   * clobber whatever a *previous* trash already parked there once a second
+   * collision came in, which is exactly the data loss this tool exists to
+   * rule out. This is the product's answer to `bash rm`: give the model a
+   * delete that's always undoable so it has no reason to reach for the real
+   * thing.
+   */
+  async function handleTrash(
+    rawArgs: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
+    if (signal?.aborted) {
+      return { content: "Error: cancelled." };
+    }
+    const args = (rawArgs ?? {}) as { path?: unknown };
+    if (typeof args.path !== "string" || args.path.trim().length === 0) {
+      return { content: 'Error: trash requires a non-empty "path" string.' };
+    }
+    const target = expandTilde(args.path, homeDir);
+    if (!fs.existsSync(target)) {
+      return { content: `Error: no file or directory exists at ${target}.` };
+    }
+    const trashDir = path.join(homeDir, ".Trash");
+    fs.mkdirSync(trashDir, { recursive: true });
+    const destination = uniqueTrashDestination(trashDir, path.basename(target));
+    moveEntry(target, destination);
+    return { content: `Moved ${target} to ${destination}.` };
+  }
+
+  /**
+   * Recursive filename-pattern search (§2), skipping `.git`/`node_modules`/
+   * `Library` and any other dot-directory -- "找一下那个 PDF" is the
+   * highest-frequency voice task and none of those trees are ever what the
+   * user means by "my files". Defaults the root to `homeDir` and the result
+   * cap to `GLOB_DEFAULT_LIMIT`.
+   */
+  async function handleGlob(
+    rawArgs: unknown,
+    signal?: AbortSignal
+  ): Promise<{ content: string }> {
+    if (signal?.aborted) {
+      return { content: "Error: cancelled." };
+    }
+    const args = (rawArgs ?? {}) as { pattern?: unknown; path?: unknown; limit?: unknown };
+    if (typeof args.pattern !== "string" || args.pattern.length === 0) {
+      return { content: 'Error: glob requires a non-empty "pattern" string.' };
+    }
+    const root =
+      typeof args.path === "string" && args.path.trim().length > 0
+        ? expandTilde(args.path, homeDir)
+        : homeDir;
+    if (!fs.existsSync(root)) {
+      return { content: `Error: no directory exists at ${root}.` };
+    }
+    const limit =
+      typeof args.limit === "number" && Number.isFinite(args.limit) && args.limit > 0
+        ? Math.floor(args.limit)
+        : GLOB_DEFAULT_LIMIT;
+    const matcher = filenamePatternToRegExp(args.pattern);
+    const matches: string[] = [];
+    let cancelled = false;
+
+    // `~` can contain hundreds of thousands of entries even after skipping
+    // .git/node_modules/Library/dot-directories, so this walk can run long --
+    // checking `signal` only at entry (like the other four handlers) would
+    // leave a cancelled agent run stuck until the whole tree finishes. Every
+    // other tool here delegates cancellation to `runProcess`'s child-process
+    // kill; a synchronous recursive walk has no such point, so it polls
+    // `signal.aborted` itself between directory entries instead.
+    function walk(dir: string): void {
+      if (matches.length >= limit || cancelled) {
+        return;
+      }
+      if (signal?.aborted) {
+        cancelled = true;
+        return;
+      }
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (matches.length >= limit || cancelled) {
+          return;
+        }
+        const entryPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name.startsWith(".") || GLOB_SKIPPED_DIR_NAMES.has(entry.name)) {
+            continue;
+          }
+          walk(entryPath);
+        } else if (matcher.test(entry.name)) {
+          matches.push(entryPath);
+        }
+      }
+    }
+    walk(root);
+
+    if (cancelled) {
+      return { content: "Error: cancelled." };
+    }
+    if (matches.length === 0) {
+      return { content: `No matches found for "${args.pattern}" under ${root}.` };
+    }
+    // Source-side clamp like every other tool in this file (§2's own
+    // convention): `limit` bounds the number of *matches*, not their total
+    // rendered length, and `GLOB_DEFAULT_LIMIT` (200) absolute home-directory
+    // paths can comfortably exceed `SOURCE_CLAMP_MAX_CHARS` on its own.
+    return { content: clampAtSource(matches.join("\n")) };
+  }
+
   async function handleReadHistoryTool(rawArgs: unknown): Promise<{ content: string }> {
     const args = (rawArgs ?? {}) as {
       eventId?: unknown;
@@ -467,6 +786,11 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
     [WEB_SEARCH_TOOL_NAME, handleWebSearch],
     [WEB_FETCH_TOOL_NAME, handleWebFetch],
     [OPEN_FILE_TOOL_NAME, handleOpenFile],
+    [WRITE_FILE_TOOL_NAME, handleWriteFile],
+    [EDIT_FILE_TOOL_NAME, handleEditFile],
+    [MOVE_FILE_TOOL_NAME, handleMoveFile],
+    [TRASH_TOOL_NAME, handleTrash],
+    [GLOB_TOOL_NAME, handleGlob],
     [READ_HISTORY_TOOL_NAME, handleReadHistoryTool],
   ]);
 
@@ -621,6 +945,112 @@ export function createCoreTools(deps: CoreToolsDeps): ToolSet {
             path: { type: "string", description: "Path of the file to open; ~ is expanded." },
           },
           required: ["path"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: WRITE_FILE_TOOL_NAME,
+        description:
+          "Write content to a file, creating it (and any missing parent directories) if needed, or " +
+          "overwriting it if it already exists. Reports the byte count written and whether an " +
+          "existing file was overwritten. ~ is expanded.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Path of the file to write; ~ is expanded." },
+            content: { type: "string", description: "The full text content to write." },
+          },
+          required: ["path", "content"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: EDIT_FILE_TOOL_NAME,
+        description:
+          "Replace an exact string in a file with another. old_string must match exactly once " +
+          "unless replace_all is true; if it matches zero or (without replace_all) more than once, " +
+          "the edit is refused and the file is left unchanged. ~ is expanded.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Path of the file to edit; ~ is expanded." },
+            old_string: { type: "string", description: "The exact text to find." },
+            new_string: { type: "string", description: "The text to replace it with." },
+            replace_all: {
+              type: "boolean",
+              description: "Replace every occurrence instead of requiring exactly one match.",
+            },
+          },
+          required: ["path", "old_string", "new_string"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: MOVE_FILE_TOOL_NAME,
+        description:
+          "Move or rename a file or directory, creating the destination's missing parent " +
+          "directories. If destination is an existing directory, source moves into it under its own " +
+          "name. Refuses (with no changes made) if destination already exists as a file -- it never " +
+          "overwrites silently. ~ is expanded in both paths.",
+        parameters: {
+          type: "object",
+          properties: {
+            source: { type: "string", description: "Path of the file/directory to move; ~ is expanded." },
+            destination: {
+              type: "string",
+              description: "Destination path, or an existing directory to move into; ~ is expanded.",
+            },
+          },
+          required: ["source", "destination"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: TRASH_TOOL_NAME,
+        description:
+          "Move a file or directory to the user's Trash (~/.Trash) instead of deleting it -- always " +
+          "recoverable, never a permanent delete. A name collision in Trash gets a numbered suffix " +
+          "rather than clobbering what's already there. ~ is expanded.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Path of the file/directory to trash; ~ is expanded." },
+          },
+          required: ["path"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: GLOB_TOOL_NAME,
+        description:
+          "Find files by filename pattern (supports * and ? wildcards), searching recursively. " +
+          `Defaults to the user's home directory and a cap of ${GLOB_DEFAULT_LIMIT} results; skips ` +
+          ".git, node_modules, Library, and other dot-directories. Use this to locate a file by name " +
+          "-- for searching file CONTENTS use grep instead. ~ is expanded.",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: { type: "string", description: "Filename pattern to match, e.g. \"*.pdf\"." },
+            path: {
+              type: "string",
+              description: "Directory to search; defaults to the user's home directory. ~ is expanded.",
+            },
+            limit: {
+              type: "number",
+              description: `Maximum number of results to return (default ${GLOB_DEFAULT_LIMIT}).`,
+            },
+          },
+          required: ["pattern"],
         },
       },
     },

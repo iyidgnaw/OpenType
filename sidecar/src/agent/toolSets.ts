@@ -81,18 +81,32 @@ export function mergeToolSets(...sets: ToolSet[]): ToolSet {
  * Narrows a tool set to an allowlist of tool names (open-file + ask-web
  * design, docs/superpowers/specs/2026-08-13-b2-open-file-and-ask-web-design.md
  * §2 -- how `/oneshot/ask` gets its web-only toolset out of the full merged
- * set). `openAiTools` keeps the source's own descriptor objects, unmodified
- * and in source order; `callTool` delegates kept names to the source set and
- * throws the same "Unknown tool" error `mergeToolSets` uses for everything
- * else -- a filtered-out call never reaches the source set, so filtering an
- * approval-wrapped set keeps the gate for what remains.
+ * set; reused since the 2026-08-28 first-party-tools-skills-and-agents
+ * design §4.3 by `agentDefinitions.ts`'s `applyAgentToolAllowlist` to narrow
+ * to a selected agent's own `tools` frontmatter). `openAiTools` re-filters
+ * `set.openAiTools` on every access (a getter, not a snapshot taken once at
+ * call time) for the same reason `mergeToolSets` above reads its sources
+ * live: `set` itself may be a `mergeToolSets` result whose own tool list
+ * grows as MCP servers finish connecting AFTER this filter was constructed
+ * (e.g. mid-run, while a single `/agent/run` call with a `tools`-restricted
+ * agent is still executing several tool-calling turns) -- a one-time
+ * `.filter()` here would freeze that list at construction time and silently
+ * hide any such tool for the rest of the run, even though it is on the
+ * allowlist and the underlying set already has it. `callTool` delegates
+ * kept names to the source set and throws the same "Unknown tool" error
+ * `mergeToolSets` uses for everything else -- a filtered-out call never
+ * reaches the source set, so filtering an approval-wrapped set keeps the
+ * gate for what remains.
  */
 export function filterToolSet(set: ToolSet, names: string[]): ToolSet {
   const allowed = new Set(names);
-  const openAiTools = set.openAiTools.filter((tool) => {
-    const name = (tool as { function?: { name?: unknown } } | undefined)?.function?.name;
-    return typeof name === "string" && allowed.has(name);
-  });
+
+  function currentOpenAiTools(): unknown[] {
+    return set.openAiTools.filter((tool) => {
+      const name = (tool as { function?: { name?: unknown } } | undefined)?.function?.name;
+      return typeof name === "string" && allowed.has(name);
+    });
+  }
 
   async function callTool(
     name: string,
@@ -105,5 +119,10 @@ export function filterToolSet(set: ToolSet, names: string[]): ToolSet {
     return set.callTool(name, args, signal);
   }
 
-  return { openAiTools, callTool };
+  return {
+    get openAiTools() {
+      return currentOpenAiTools();
+    },
+    callTool,
+  };
 }

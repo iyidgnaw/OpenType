@@ -222,6 +222,101 @@ describe("runAgentLoop", () => {
     const userMessage = capturedMessages.find((m) => m.role === "user");
     expect(userMessage?.content).not.toContain("Recent activity");
   });
+
+  // First-party tools/skills/agents design §3.4
+  // (docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md):
+  // `RunAgentLoopInput.skills` is the rendered skill index (skillStore.ts's
+  // `renderSkillIndex`), injected exactly like `knownTerms` / `runtimeContext`
+  // / `recentActivity` -- final user message only, appended AFTER
+  // recentActivity -- because a user can add a skill file at any moment, and
+  // anything that can change between requests must never land in the system
+  // message (docs/model-context-inventory.md §5's prefix-stability rule).
+  test("skills is appended to the final user message after recentActivity, never the system message", async () => {
+    let capturedMessages: AgentChatMessage[] = [];
+    const chat: AgentChatFn = async (messages) => {
+      capturedMessages = messages;
+      return { content: "ok" };
+    };
+    const recentActivity = 'Recent activity, oldest first.\n{"eventId":1,"mode":"ask","input":"x"}';
+    const skills = "find-and-open: locate and open a file\norganize-files: tidy up a folder";
+
+    await runAgentLoop(
+      { task: "做事", recentActivity, skills },
+      { chat, tools: noTools() }
+    );
+
+    expect(capturedMessages[0]?.role).toBe("system");
+    expect(capturedMessages[0]?.content).not.toContain("find-and-open");
+    expect(capturedMessages[0]?.content).not.toContain(skills);
+
+    const lastMessage = capturedMessages[capturedMessages.length - 1];
+    expect(lastMessage?.role).toBe("user");
+    const content = lastMessage?.content ?? "";
+    expect(content).toContain(skills);
+
+    const recentActivityIndex = content.indexOf(recentActivity);
+    const skillsIndex = content.indexOf(skills);
+    expect(recentActivityIndex).toBeGreaterThanOrEqual(0);
+    expect(skillsIndex).toBeGreaterThan(recentActivityIndex);
+  });
+
+  test("the system message is byte-identical with or without skills (KV-cache prefix stability)", async () => {
+    let withSkillsMessages: AgentChatMessage[] = [];
+    let withoutSkillsMessages: AgentChatMessage[] = [];
+    const chatWith: AgentChatFn = async (messages) => {
+      withSkillsMessages = messages;
+      return { content: "ok" };
+    };
+    const chatWithout: AgentChatFn = async (messages) => {
+      withoutSkillsMessages = messages;
+      return { content: "ok" };
+    };
+
+    await runAgentLoop(
+      { task: "做事", skills: "find-and-open: locate and open a file" },
+      { chat: chatWith, tools: noTools() }
+    );
+    // No `skills` key at all here -- this is the "today's" call the field
+    // must not change anything for.
+    await runAgentLoop({ task: "做事" }, { chat: chatWithout, tools: noTools() });
+
+    const systemWith = withSkillsMessages.find((m) => m.role === "system")?.content;
+    const systemWithout = withoutSkillsMessages.find((m) => m.role === "system")?.content;
+    expect(systemWith).toBeTruthy();
+    expect(systemWith).toBe(systemWithout as string);
+
+    // The invariant above ("system message unaffected") is trivially true if
+    // `skills` were simply never wired up at all, so pin it against a second
+    // invariant that only holds once the field IS wired: the USER message
+    // must actually differ between the two calls, since one of them carries
+    // a skill index the other doesn't.
+    const userWith = withSkillsMessages.find((m) => m.role === "user")?.content;
+    const userWithout = withoutSkillsMessages.find((m) => m.role === "user")?.content;
+    expect(userWith).not.toBe(userWithout);
+  });
+
+  test("omitting skills produces a user message byte-identical to today's", async () => {
+    let baselineMessages: AgentChatMessage[] = [];
+    let omittedMessages: AgentChatMessage[] = [];
+    const chatBaseline: AgentChatFn = async (messages) => {
+      baselineMessages = messages;
+      return { content: "ok" };
+    };
+    const chatOmitted: AgentChatFn = async (messages) => {
+      omittedMessages = messages;
+      return { content: "ok" };
+    };
+
+    // Same input shape as pre-this-batch code would have passed (no `skills`
+    // key), run twice, to prove the new optional field is invisible when unused.
+    await runAgentLoop({ task: "总结一下这段文字", context: "some text" }, { chat: chatBaseline, tools: noTools() });
+    await runAgentLoop({ task: "总结一下这段文字", context: "some text" }, { chat: chatOmitted, tools: noTools() });
+
+    const baselineUser = baselineMessages.find((m) => m.role === "user")?.content;
+    const omittedUser = omittedMessages.find((m) => m.role === "user")?.content;
+    expect(baselineUser).toBe(omittedUser as string);
+    expect(baselineUser).not.toContain("Skills");
+  });
 });
 
 /**

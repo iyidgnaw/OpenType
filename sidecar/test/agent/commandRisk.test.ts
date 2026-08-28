@@ -963,7 +963,18 @@ describe("POST /agent/run — the policy is wired into a real run", () => {
         new ConversationStore(openDatabase(":memory:")),
         chat,
         tools,
-        () => {}
+        () => {},
+        undefined, // spillRoot
+        undefined, // runLogRoot
+        // §2.1 (first-party-tools-skills-and-agents design, 2026-08-28) flips
+        // the DEFAULT approval mode to "yolo" -- this block exists solely to
+        // prove the prompting policy is really wired into a real /agent/run
+        // (see the comment above), so it has to opt into "prompt" explicitly
+        // now that omitting this parameter no longer selects it. §9.1
+        // reconciled the trailing approvalMode/skills/agentDefinitions
+        // parameters into one options object -- same value, passed by key
+        // instead of by position.
+        { approvalMode: "prompt" }
       )
     );
   }

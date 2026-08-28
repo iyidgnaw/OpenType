@@ -75,6 +75,23 @@ export interface RunAgentLoopInput {
    * of content, so it follows the same rule, not a style choice.
    */
   recentActivity?: string;
+  /**
+   * Rendered skill index (`skills/skillStore.ts`'s `renderSkillIndex`) --
+   * first-party tools/skills/agents design §3.4
+   * (docs/superpowers/specs/2026-08-28-first-party-tools-skills-and-agents-design.md).
+   *
+   * Appended to the FINAL USER MESSAGE, after `recentActivity`, for the same
+   * reason `knownTerms`/`runtimeContext`/`recentActivity` all live there and
+   * not in the system message: a skill file can be added at any moment (no
+   * hot-reload, but a 5s TTL cache means the very next request can see a new
+   * one), so this content changes between requests in a way the system
+   * message must never do -- landing it there would invalidate the whole
+   * KV-cache prefix on every single call (`docs/model-context-inventory.md`
+   * §5). Ask mode never sets this: its toolset is a web-only allowlist that
+   * does not include `opentype__load_skill`, so an index it can't act on
+   * would just be wasted context.
+   */
+  skills?: string;
   /** System message content; defaults to `AGENT_SYSTEM_PROMPT`. */
   systemPrompt?: string;
   /**
@@ -193,6 +210,9 @@ function buildInitialMessages(input: RunAgentLoopInput): AgentChatMessage[] {
   }
   if (input.recentActivity) {
     userContentParts.push("", input.recentActivity);
+  }
+  if (input.skills) {
+    userContentParts.push("", input.skills);
   }
 
   return [

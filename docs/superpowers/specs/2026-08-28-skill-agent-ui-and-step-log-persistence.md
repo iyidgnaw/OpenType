@@ -105,6 +105,9 @@
 - **A-4**：名称在任何根都不存在时 DELETE/PUT 返回 **404**；仅存在于 builtin/claude 时返回 403。
 - **A-5**：创建成功返回 **200**（本仓库 route 惯例，不用 201）。
 - **D-1**（2026-08-28）：D2 文案删除与 D3 窄轨图标并入 D1 的流水线一次实现、一次审查（E4 豁免测试部分）。
+- **B-1**（2026-08-29）：steps 的持久化类型放 **memory 层自己的宽结构类型**（`{type: string; detail: string}`），不 import agent/loop 的 `AgentProgressEvent`——存储层不该向上依赖 agent 模块（分层 + 潜在环），联合类型约束属于生产方；窄类型天然可赋值给宽类型，测试文件的 TS2345 摩擦随之消失。
+- **B-3**（2026-08-29）：agentRunStepsPersistence.test.ts 残留 3 个 TS2769（测试自己把响应 cast 成 `unknown[]`/缺 detail 的 fixture 与 toEqual 泛型绑定冲突）**容忍不修**：bun 才是本仓库的门槛（1348/0），tsc 非门控且带 68 个既有基线错误，该文件错误数已从基线 8 降到 3。收尾批可顺手做纯类型标注清理，不单独开轮次。
+- **B-2**（2026-08-29）：`test/memory/db.test.ts` 钉死 conversation_messages 旧列清单的断言因 owner 批准的 D0 schema 变更而陈旧，授权实现方做**最小更新**（期望列表加 `"steps"`）——与 D2 的「删除文案导致的既有断言更新」同一先例，属更正非削弱。
 - **A-7**（2026-08-29）：A4 审查发现并以 PoC 证实 frontmatter 键注入——`displayName`/`tools` 只 trim 未折叠单行，嵌入 `\n` 可在写出的 .md 里伪造任意键（含 `model:`，违反 B2；tools 省略时还可经 displayName 私设工具白名单）。修复：两字段与 `description` 走同一单行折叠后才进 `renderFrontmatter`；补 stage-1 回归测试；DELETE 两处补 `assertWithinRoot`（防御性一致，当前按构造安全）。
 - **A-6**（2026-08-29）：A3 实现期发现 stage-1 测试笔误（agentDefinitionRoutes.test.ts B2 PUT 测试：请求 `body: "new"` 但断言 `toContain("new body")`，任何正确实现都无法通过）。主 agent 裁决按测试自述意图修请求为 `body: "new body"`（增强而非削弱：保持「PUT 确实写入了 body」的非空洞断言）。实现方未动测试，符合规则。
 - **D-3**（2026-08-29）：D4 审查通过后随批记录——DictationViews 的「纠错一次就会记住」空态提示**保留**（仅词典为空时出现=状态门控）；McpBuiltInCatalog 注释漏提 builtInTools.ts 来源、`docs/tool-catalog.md` 仍写 10 个工具，两处并入收尾文档批修正。

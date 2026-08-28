@@ -104,7 +104,7 @@ describe("openDatabase", () => {
       .all() as Array<{ name: string }>;
     const names = columns.map((c) => c.name).sort();
     expect(names).toEqual(
-      ["id", "conversationId", "role", "content", "createdAt"].sort()
+      ["id", "conversationId", "role", "content", "createdAt", "steps"].sort()
     );
   });
 

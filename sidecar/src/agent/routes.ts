@@ -447,7 +447,12 @@ async function handleAgentRun(
     cancellations.release(runId);
   }
 
-  conversations.appendMessage(conversationId, "assistant", loopResult.result);
+  conversations.appendMessage(
+    conversationId,
+    "assistant",
+    loopResult.result,
+    loopResult.steps
+  );
 
   return Response.json({ result: loopResult.result, steps: loopResult.steps, conversationId });
 }

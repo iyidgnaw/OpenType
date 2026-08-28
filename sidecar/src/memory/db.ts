@@ -85,7 +85,44 @@ CREATE TABLE IF NOT EXISTS owner_facts (
   createdAt INTEGER NOT NULL,
   origin TEXT NOT NULL
 );
+`;
 
+/**
+ * Bumped whenever `conversations`/`conversation_messages`'s shape changes.
+ * Deliberately a SEPARATE counter from `SCHEMA_VERSION` above, tracked in its
+ * own `conversations_schema_meta` table rather than a second row/column on
+ * the existing `schema_meta` (whose `id` column is `CHECK (id = 1)`, a
+ * singleton by construction, and whose `version` column is already the one
+ * `test/memory/db.test.ts`'s "applying the schema against an older stored
+ * version drops and rebuilds episodic_events... leaving ... conversations,
+ * conversation_messages ... untouched" test pins as gating `episodic_events`
+ * ONLY -- reusing it here would make lowering it also rebuild conversations,
+ * which that pinned test forbids). Per D0
+ * (docs/superpowers/specs/2026-08-28-skill-agent-ui-and-step-log-persistence.md
+ * §2/§0): no migration. A mismatch drops and recreates *only* `conversations`
+ * + `conversation_messages` -- every other table (including `episodic_events`
+ * and its own version) is untouched by this check, and vice versa.
+ *
+ * Known cost, same tradeoff as `SCHEMA_VERSION`: any conversation history
+ * that exists when this counter is bumped is lost, not carried forward. D0
+ * is the owner's explicit authorization for that loss on this one shape
+ * change (adding the nullable \`steps\` column below); it is not a general
+ * license to reset conversations on every future schema tweak without a
+ * fresh authorization.
+ */
+export const CONVERSATIONS_SCHEMA_VERSION = 1;
+
+const CONVERSATIONS_SCHEMA_META_SQL = `
+CREATE TABLE IF NOT EXISTS conversations_schema_meta (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL
+);
+`;
+
+// Isolated from REST_OF_SCHEMA_SQL so the conversations-version check above
+// can DROP + recreate just these two tables (and their indexes) without
+// touching entity_terms/owner_facts/memory_consolidation_runs.
+const CONVERSATIONS_SQL = `
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   kind TEXT NOT NULL,
@@ -115,7 +152,8 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
   conversationId INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   content TEXT NOT NULL,
-  createdAt INTEGER NOT NULL
+  createdAt INTEGER NOT NULL,
+  steps TEXT
 );
 
 CREATE INDEX IF NOT EXISTS conversation_messages_conversation_id
@@ -140,7 +178,20 @@ export function applySchema(db: Database): void {
   db.exec(SCHEMA_META_SQL);
   db.exec(EPISODIC_EVENTS_SQL);
   db.exec(REST_OF_SCHEMA_SQL);
+  db.exec(CONVERSATIONS_SCHEMA_META_SQL);
+  db.exec(CONVERSATIONS_SQL);
 
+  reconcileEpisodicEventsVersion(db);
+  reconcileConversationsVersion(db);
+}
+
+/**
+ * Reconciles `episodic_events` against `SCHEMA_VERSION` -- unchanged
+ * behavior, extracted to its own function so the conversations-scoped check
+ * below runs unconditionally rather than being skipped by this one's early
+ * return (see `applySchema`).
+ */
+function reconcileEpisodicEventsVersion(db: Database): void {
   db.run("INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, 0)");
   const row = db.query("SELECT version FROM schema_meta WHERE id = 1").get() as
     | { version: number }
@@ -154,6 +205,41 @@ export function applySchema(db: Database): void {
   db.exec("DROP TABLE IF EXISTS episodic_events");
   db.exec(EPISODIC_EVENTS_SQL);
   db.run("UPDATE schema_meta SET version = ? WHERE id = 1", [SCHEMA_VERSION]);
+}
+
+/**
+ * Reconciles `conversations` + `conversation_messages` against
+ * `CONVERSATIONS_SCHEMA_VERSION` (D0, `CONVERSATIONS_SCHEMA_VERSION`'s doc
+ * comment above). Entirely independent of `schema_meta.version` /
+ * `SCHEMA_VERSION`: a database opened by pre-batch code has no
+ * `conversations_schema_meta` row at all (defaults to stored version 0),
+ * which mismatches `CONVERSATIONS_SCHEMA_VERSION` on first open under the new
+ * code and triggers exactly one drop + recreate of these two tables. A
+ * database already reconciled to the current conversations version is a
+ * no-op here, so re-opening it (every subsequent launch) never rebuilds
+ * again.
+ */
+function reconcileConversationsVersion(db: Database): void {
+  db.run("INSERT OR IGNORE INTO conversations_schema_meta (id, version) VALUES (1, 0)");
+  const row = db.query("SELECT version FROM conversations_schema_meta WHERE id = 1").get() as
+    | { version: number }
+    | undefined;
+  const storedVersion = row?.version ?? 0;
+
+  if (storedVersion === CONVERSATIONS_SCHEMA_VERSION) {
+    return;
+  }
+
+  // Children first: harmless either way (bun:sqlite runs with
+  // `foreign_keys = 0`, see CONVERSATIONS_SQL's comment), but this keeps the
+  // drop order the same shape as `ConversationStore.deleteConversation`.
+  db.exec("DROP TABLE IF EXISTS conversation_messages");
+  db.exec("DROP TABLE IF EXISTS conversations");
+  db.exec(CONVERSATIONS_SQL);
+  db.run(
+    "UPDATE conversations_schema_meta SET version = ? WHERE id = 1",
+    [CONVERSATIONS_SCHEMA_VERSION]
+  );
 }
 
 /**

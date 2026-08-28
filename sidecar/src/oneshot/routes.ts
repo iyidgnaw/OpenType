@@ -139,7 +139,7 @@ async function handleAsk(
   );
   const result = loopResult.result.trim();
 
-  conversations.appendMessage(conversationId, "assistant", result);
+  conversations.appendMessage(conversationId, "assistant", result, loopResult.steps);
 
   return Response.json({ result, conversationId });
 }

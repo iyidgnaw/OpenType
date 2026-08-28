@@ -1,6 +1,18 @@
 import type { Database } from "bun:sqlite";
 
 export type ConversationKind = "ask" | "agent";
+
+/**
+ * Layering: the memory layer must not depend upward on the agent module, so
+ * this is a wide structural type of its own rather than an import of
+ * `AgentProgressEvent` from `../agent/loop` -- `agent/routes.ts` and
+ * `oneshot/routes.ts` pass their real `AgentProgressEvent[]` straight
+ * through, which assigns to this wider shape without a cast.
+ */
+export interface ConversationStepRecord {
+  type: string;
+  detail: string;
+}
 export type ConversationMessageRole = "user" | "assistant";
 
 export interface Conversation {
@@ -26,6 +38,16 @@ export interface ConversationMessage {
   role: ConversationMessageRole;
   content: string;
   createdAt: number;
+  /**
+   * The run's step log (`/agent/run`'s `AgentProgressEvent[]`, Pipeline B
+   * §2), persisted on the assistant message only -- a user message never
+   * carries one. `undefined` for a message written before this batch, or
+   * appended with no `steps` argument at all; a run that genuinely produced
+   * zero steps (never happens today -- `runAgentLoop` always emits at least
+   * `thinking`/`done`) would round-trip as `[]`, not `undefined`, since those
+   * are deliberately distinct: omitted vs. explicitly empty.
+   */
+  steps?: ConversationStepRecord[] | null;
 }
 
 export interface ConversationWithMessages extends Conversation {
@@ -48,6 +70,8 @@ interface ConversationMessageRow {
   role: ConversationMessageRole;
   content: string;
   createdAt: number;
+  /** Raw JSON text from the `steps` column, or `null` -- deserialized by `getConversation`. */
+  steps: string | null;
 }
 
 const TITLE_MAX_LENGTH = 40;
@@ -91,16 +115,28 @@ export class ConversationStore {
   /**
    * Appends a message to `conversationId` and bumps the conversation's
    * `updatedAt` so `listConversations` reflects the new activity.
+   *
+   * `steps` (Pipeline B §2) is the run's `AgentProgressEvent[]` step log,
+   * persisted as JSON alongside the message it belongs to -- `agent/routes.ts`
+   * and `oneshot/routes.ts` pass it only when appending the assistant's turn,
+   * never the user's. Omitted or explicitly `null` both store/round-trip as
+   * `null` (JSON has no "key absent" on a single column, so those two inputs
+   * are indistinguishable once written, which is the intended behavior: the
+   * caller-facing contract only ever needs "no steps" vs. "these steps").
+   * `[]` is a distinct, real value -- stored and read back as an empty array,
+   * not coerced to `null`.
    */
   appendMessage(
     conversationId: number,
     role: ConversationMessageRole,
-    content: string
+    content: string,
+    steps?: ConversationStepRecord[] | null
   ): number {
     const now = Date.now();
+    const stepsJson = steps == null ? null : JSON.stringify(steps);
     const result = this.db.run(
-      `INSERT INTO conversation_messages (conversationId, role, content, createdAt) VALUES (?, ?, ?, ?)`,
-      [conversationId, role, content, now]
+      `INSERT INTO conversation_messages (conversationId, role, content, createdAt, steps) VALUES (?, ?, ?, ?, ?)`,
+      [conversationId, role, content, now, stepsJson]
     );
     this.db.run(`UPDATE conversations SET updatedAt = ? WHERE id = ?`, [now, conversationId]);
     return Number(result.lastInsertRowid);
@@ -143,13 +179,21 @@ export class ConversationStore {
       return null;
     }
 
-    const messages = this.db
+    const rows = this.db
       .query(
-        `SELECT id, conversationId, role, content, createdAt FROM conversation_messages
+        `SELECT id, conversationId, role, content, createdAt, steps FROM conversation_messages
          WHERE conversationId = ?
          ORDER BY id ASC`
       )
       .all(id) as ConversationMessageRow[];
+
+    const messages: ConversationMessage[] = rows.map((row) => {
+      const { steps: stepsJson, ...rest } = row;
+      return {
+        ...rest,
+        steps: stepsJson != null ? (JSON.parse(stepsJson) as ConversationStepRecord[]) : undefined,
+      };
+    });
 
     return { ...conversation, messages };
   }

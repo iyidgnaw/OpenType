@@ -25,9 +25,11 @@ private enum McpIcon {
 /// what it does, and whether running it changes anything.
 ///
 /// The list is transcribed from `sidecar/src/agent/coreTools.ts` (plus
-/// `sidecar/src/agent/readHistoryTool.ts`'s `opentype__read_history`) rather
-/// than fetched: the built-in set is compiled into the sidecar binary that
-/// ships with this app, so there is no version skew for a runtime query to
+/// `sidecar/src/agent/readHistoryTool.ts`'s `opentype__read_history` and
+/// `sidecar/src/agent/builtInTools.ts`'s `opentype__remember_fact`/
+/// `opentype__consolidate_memory_now`) rather than fetched: the built-in set
+/// is compiled into the sidecar binary that ships with this app, so there is
+/// no version skew for a runtime query to
 /// protect against, and a panel that goes blank when the sidecar is down
 /// would be answering "what can the agent do" with silence.
 ///

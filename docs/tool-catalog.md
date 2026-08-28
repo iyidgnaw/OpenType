@@ -4,7 +4,7 @@
 
 This catalog covers OpenType's **built-in** tools only. Tools contributed by user-configured MCP servers (`OPENTYPE_MCP_SERVERS`) are resolved at run time and are therefore **not** listed here — the set the model actually sees is this list plus whatever those servers contribute.
 
-Built-in tools: **10**.
+Built-in tools: **16**.
 
 ## `opentype__bash`
 
@@ -37,6 +37,66 @@ Run memory consolidation ("dreaming") immediately: review recent dictation histo
 {
   "type": "object",
   "properties": {}
+}
+```
+
+## `opentype__edit_file`
+
+Replace an exact string in a file with another. old_string must match exactly once unless replace_all is true; if it matches zero or (without replace_all) more than once, the edit is refused and the file is left unchanged. ~ is expanded.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file to edit; ~ is expanded."
+    },
+    "old_string": {
+      "type": "string",
+      "description": "The exact text to find."
+    },
+    "new_string": {
+      "type": "string",
+      "description": "The text to replace it with."
+    },
+    "replace_all": {
+      "type": "boolean",
+      "description": "Replace every occurrence instead of requiring exactly one match."
+    }
+  },
+  "required": [
+    "path",
+    "old_string",
+    "new_string"
+  ]
+}
+```
+
+## `opentype__glob`
+
+Find files by filename pattern (supports * and ? wildcards), searching recursively. Defaults to the user's home directory and a cap of 200 results; skips .git, node_modules, Library, and other dot-directories. Use this to locate a file by name -- for searching file CONTENTS use grep instead. ~ is expanded.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "pattern": {
+      "type": "string",
+      "description": "Filename pattern to match, e.g. \"*.pdf\"."
+    },
+    "path": {
+      "type": "string",
+      "description": "Directory to search; defaults to the user's home directory. ~ is expanded."
+    },
+    "limit": {
+      "type": "number",
+      "description": "Maximum number of results to return (default 200)."
+    }
+  },
+  "required": [
+    "pattern"
+  ]
 }
 ```
 
@@ -80,6 +140,30 @@ List a directory's entries; subdirectories are marked with a trailing "/". Defau
       "description": "Directory to list; defaults to the user's home directory. ~ is expanded."
     }
   }
+}
+```
+
+## `opentype__move_file`
+
+Move or rename a file or directory, creating the destination's missing parent directories. If destination is an existing directory, source moves into it under its own name. Refuses (with no changes made) if destination already exists as a file -- it never overwrites silently. ~ is expanded in both paths.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "source": {
+      "type": "string",
+      "description": "Path of the file/directory to move; ~ is expanded."
+    },
+    "destination": {
+      "type": "string",
+      "description": "Destination path, or an existing directory to move into; ~ is expanded."
+    }
+  },
+  "required": [
+    "source",
+    "destination"
+  ]
 }
 ```
 
@@ -144,6 +228,30 @@ Read a text file and return its contents (long files are truncated). ~ is expand
 }
 ```
 
+## `opentype__read_history`
+
+Read the user's own past turns in full. Pass eventId (from the Recent activity block) for one turn's complete, untruncated record including which app it happened in; pass conversationId for a whole ask/agent thread; pass neither to list the most recent turns in full. Read-only.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "eventId": {
+      "type": "number",
+      "description": "One turn's id, as shown in Recent activity."
+    },
+    "conversationId": {
+      "type": "number",
+      "description": "A thread's id, as shown in Recent activity."
+    },
+    "limit": {
+      "type": "number",
+      "description": "How many recent turns to list when no id is given; defaults to 10."
+    }
+  }
+}
+```
+
 ## `opentype__remember_fact`
 
 Remember something the owner explicitly told you to remember. Use category "term" for a name/alias correction (e.g. "when I say PayPal I mean the company PayPal" -> canonicalTerm "PayPal", aliases ["paypal"]). Use category "profile" for a free-text fact about the owner (e.g. their name or a stated preference) -> content is that fact in plain words. Use it when the owner directly asks you to remember something; you do not need to ask for confirmation first.
@@ -182,6 +290,25 @@ Remember something the owner explicitly told you to remember. Use category "term
 }
 ```
 
+## `opentype__trash`
+
+Move a file or directory to the user's Trash (~/.Trash) instead of deleting it -- always recoverable, never a permanent delete. A name collision in Trash gets a numbered suffix rather than clobbering what's already there. ~ is expanded.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file/directory to trash; ~ is expanded."
+    }
+  },
+  "required": [
+    "path"
+  ]
+}
+```
+
 ## `opentype__web_fetch`
 
 Fetch a URL (following redirects) and return the page as readable plain text with markup stripped; long pages are truncated.
@@ -216,6 +343,30 @@ Search the web (DuckDuckGo) and return the top results as a numbered list of tit
   },
   "required": [
     "query"
+  ]
+}
+```
+
+## `opentype__write_file`
+
+Write content to a file, creating it (and any missing parent directories) if needed, or overwriting it if it already exists. Reports the byte count written and whether an existing file was overwritten. ~ is expanded.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file to write; ~ is expanded."
+    },
+    "content": {
+      "type": "string",
+      "description": "The full text content to write."
+    }
+  },
+  "required": [
+    "path",
+    "content"
   ]
 }
 ```

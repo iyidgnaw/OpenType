@@ -62,7 +62,10 @@ describe("POST /agent/run -- persists the run's steps onto the assistant message
 
     const response = await router(post({ task: "What is the capital of France?" }));
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { steps: unknown[]; conversationId: number };
+    const body = (await response.json()) as {
+      steps: Array<{ type: string; detail: string }>;
+      conversationId: number;
+    };
     expect(body.steps.length).toBeGreaterThan(0);
 
     const conversation = conversations.getConversation(body.conversationId);
@@ -101,8 +104,14 @@ describe("POST /agent/run -- persists the run's steps onto the assistant message
     );
 
     const response = await router(post({ task: "What's the weather?" }));
+    // `detail` is part of the type here even though only `type` is read below:
+    // the runtime response always carries it (every `AgentProgressEvent`
+    // variant requires `detail`, loop.ts:34-39), and the persisted assistant
+    // message's `steps` is `ConversationStepRecord[]`, which requires it too --
+    // narrowing this cast to `{ type: string }` was a type-only omission, not
+    // a reflection of an actually-optional field.
     const body = (await response.json()) as {
-      steps: Array<{ type: string }>;
+      steps: Array<{ type: string; detail: string }>;
       conversationId: number;
     };
     expect(body.steps.map((s) => s.type)).toEqual(
@@ -130,7 +139,7 @@ describe("POST /agent/run -- persists the run's steps onto the assistant message
     const response = await router(
       post({ task: "also mention the deadline", conversationId: existingId })
     );
-    const body = (await response.json()) as { steps: unknown[] };
+    const body = (await response.json()) as { steps: Array<{ type: string; detail: string }> };
 
     const conversation = conversations.getConversation(existingId);
     const assistantMessages = conversation!.messages.filter((m) => m.role === "assistant");

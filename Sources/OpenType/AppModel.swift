@@ -1461,6 +1461,25 @@ final class AppModel: ObservableObject {
         path: "/memory/events"
     )
 
+    /// The HTTP method/path `resetHistory()` sends to clear the sidecar's
+    /// durable per-run step logs (`run-logs/<runId>.jsonl`,
+    /// `sidecar/src/agent/runLog.ts`, served as `DELETE /agent/run-logs` by
+    /// `buildAgentRoutes` in `sidecar/src/agent/routes.ts`). Same discipline
+    /// as `ContextLogResetRequest` above — its own type rather than reusing
+    /// `HistoryEventsRequest`, since this is one DELETE-only resource with no
+    /// per-row CRUD siblings, structurally the `ContextLogResetRequest` case
+    /// — pulled out as its own value so a test can pin the exact method/path
+    /// without constructing a live `AppModel` (see `RunLogsResetRequestTests`);
+    /// `resetHistory()` is this constant's only reader.
+    struct RunLogsResetRequest: Equatable {
+        let method: String
+        let path: String
+    }
+    nonisolated static let runLogsResetRequest = RunLogsResetRequest(
+        method: "DELETE",
+        path: "/agent/run-logs"
+    )
+
     /// Fetches the dictation history page's data from the sidecar's
     /// `episodic_events` table and folds the result into `historyLoadState`
     /// via `HistoryLoadState.afterFetch` — a failed fetch degrades to
@@ -1493,25 +1512,29 @@ final class AppModel: ObservableObject {
         await refreshHistory()
     }
 
-    /// Best-effort clears the sidecar's `episodic_events` table and its
-    /// context-debug log so 「重置输入历史」 actually removes every store it
-    /// promises: the sidecar rows the 听写 history page reads (Task 7, design
-    /// §3.7 — the local `history.json` this used to also clear is gone along
-    /// with `HistoryStore` itself, Task 8), and the
-    /// first-200-characters-of-every-ask/agent-input log the sidecar keeps
-    /// alongside them (`sidecar/src/oneshot/contextDebugLog.ts`). Both
-    /// sidecar calls fire from a detached Task so this method stays
-    /// synchronous and `ClearLocalDataPage`'s button action keeps calling it
-    /// directly — `refreshUsageStats()` above is the same shape. A failure
-    /// from either leg is recorded to `historyResetError` rather than
-    /// dropped, and cleared on the next successful reset so a stale failure
-    /// can't misreport a later good one. The events request is additive
-    /// alongside the existing context-log request, not a replacement for it
-    /// — dropping the context-log call would silently stop clearing that
-    /// log.
+    /// Best-effort clears the sidecar's `episodic_events` table, its
+    /// context-debug log, and its durable per-run step logs so 「重置输入历史」
+    /// actually removes every store it promises: the sidecar rows the 听写
+    /// history page reads (Task 7, design §3.7 — the local `history.json`
+    /// this used to also clear is gone along with `HistoryStore` itself,
+    /// Task 8), the first-200-characters-of-every-ask/agent-input log the
+    /// sidecar keeps alongside them (`sidecar/src/oneshot/
+    /// contextDebugLog.ts`), and `run-logs/<runId>.jsonl` (`sidecar/src/
+    /// agent/runLog.ts`) — a durable record of what the user asked the agent
+    /// to do and everything it did in response, cleared via
+    /// `DELETE /agent/run-logs`. All three sidecar calls fire from a
+    /// detached Task so this method stays synchronous and
+    /// `ClearLocalDataPage`'s button action keeps calling it directly —
+    /// `refreshUsageStats()` above is the same shape. A failure from any leg
+    /// is recorded to `historyResetError` rather than dropped, and cleared
+    /// on the next successful reset so a stale failure can't misreport a
+    /// later good one. Each request is additive alongside the others, not a
+    /// replacement for any of them — dropping any one call would silently
+    /// stop clearing that store.
     func resetHistory() {
         let eventsRequest = Self.historyEventsResetRequest
         let contextLogRequest = Self.contextLogResetRequest
+        let runLogsRequest = Self.runLogsResetRequest
         let client = sidecarClient
         Task.detached(priority: .utility) { [weak self] in
             var failureMessage: String?
@@ -1529,6 +1552,15 @@ final class AppModel: ObservableObject {
                 let _: MemoryDeletionResponseBody = try await client.request(
                     method: contextLogRequest.method,
                     path: contextLogRequest.path
+                )
+            } catch {
+                failureMessage = ErrorMessagePresenter.message(for: error)
+            }
+
+            do {
+                let _: MemoryDeletionResponseBody = try await client.request(
+                    method: runLogsRequest.method,
+                    path: runLogsRequest.path
                 )
             } catch {
                 failureMessage = ErrorMessagePresenter.message(for: error)
@@ -3191,7 +3223,53 @@ final class AppModel: ObservableObject {
 
     private struct MemoryOwnerFactMutationResponseBody: Decodable { let ownerFact: OwnerFactSummary }
 
-    private struct MemoryDeletionResponseBody: Decodable { let deleted: Bool }
+    /// Response shape for every DELETE call in this file that reports "did
+    /// something get removed" — `resetHistory()`'s three legs, plus the
+    /// single-row `/memory/terms/:id` and `/memory/owner-facts/:id` deletes
+    /// elsewhere in this file. The sidecar endpoints do not agree on what
+    /// `deleted` actually IS on the wire: `DELETE /memory/context-log`
+    /// answers a JSON BOOLEAN (`{"deleted": true}`), while
+    /// `DELETE /memory/events` and `DELETE /agent/run-logs` both answer a
+    /// JSON NUMBER — a row/file count (`{"deleted": 3}`). Every call site
+    /// here discards the decoded value (`let _: MemoryDeletionResponseBody =
+    /// ...`), so nothing downstream ever reads `deleted` for its literal
+    /// value — but a *decode failure* is still a thrown error, and
+    /// `resetHistory()` records any thrown error as a spurious
+    /// `historyResetError` even when the delete itself fully succeeded.
+    /// Decoding strictly as `Bool` is exactly what turned a successful
+    /// `DELETE /memory/events` (a JSON number) into that spurious error —
+    /// the custom decoder below accepts either real wire shape: a JSON
+    /// boolean passed straight through, or a JSON number normalized to "did
+    /// it delete anything" (`count > 0` -> `true`, `0` -> `false`).
+    /// Leniency is bounded to exactly those two shapes actually in
+    /// production — a string or a missing key still throws, same as before.
+    ///
+    /// Internal rather than `private` so
+    /// `MemoryDeletionResponseBodyDecodingTests` (`@testable import`) can pin
+    /// this decoding directly — same precedent as `McpBuiltInCatalog`
+    /// (`McpServerViews.swift`)'s "Internal rather than `private`" comment.
+    struct MemoryDeletionResponseBody: Decodable {
+        let deleted: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case deleted
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let boolValue = try? container.decode(Bool.self, forKey: .deleted) {
+                deleted = boolValue
+                return
+            }
+            // Not a boolean on the wire — the only other real shape is a
+            // row/file count. Anything else (a string, an object, a missing
+            // key) throws here exactly as it would have against a plain
+            // `Bool`, since leniency must stay bounded to the two shapes
+            // that are actually live in production.
+            let count = try container.decode(Int.self, forKey: .deleted)
+            deleted = count > 0
+        }
+    }
 
     /// Records a failed dictionary edit: a readable line for the panel (via the
     /// same `ErrorMessagePresenter` every other user-facing failure goes

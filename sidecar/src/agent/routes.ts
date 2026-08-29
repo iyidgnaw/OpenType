@@ -17,6 +17,8 @@ import {
 import { saveSpill } from "./spill";
 import { createRepeatGuard } from "./repeatGuard";
 import { createRunLog, type RunLog } from "./runLog";
+import { readdir, unlink } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import {
   createAskUserBroker,
   createAskUserTool,
@@ -515,6 +517,47 @@ function handleAgentDefinitions(agentDefinitions?: AgentDefinitionsSource): Resp
 }
 
 /**
+ * Backs 「清除本地数据」's third leg (`AppModel.resetHistory()`'s
+ * `RunLogsResetRequest`): deletes every `*.jsonl` file directly under
+ * `runLogRoot` and nothing else -- not the directory itself, not a
+ * non-`.jsonl` file that happens to sit alongside them. Response shape
+ * matches `DELETE /memory/events` (`sidecar/src/memory/routes.ts`):
+ * `{ deleted: <count> }`.
+ *
+ * A missing, empty, or unconfigured root is a 200 no-op (`{ deleted: 0 }`),
+ * never an error -- mirroring `DELETE /memory/context-log`'s reasoning for
+ * the same situation: there is nothing on disk this route could ever have
+ * written, so it reports the same success a real clear-of-nothing would.
+ */
+async function handleDeleteRunLogs(runLogRoot?: string): Promise<Response> {
+  if (!runLogRoot) {
+    return Response.json({ deleted: 0 });
+  }
+  const root = resolve(runLogRoot);
+  let entries: string[];
+  try {
+    entries = await readdir(root);
+  } catch {
+    // Root doesn't exist (never created) or isn't readable -- either way,
+    // nothing this route could delete.
+    return Response.json({ deleted: 0 });
+  }
+  const jsonlNames = entries.filter((name) => name.endsWith(".jsonl"));
+  // Each unlink is isolated (`allSettled`, not `all`): a directory that
+  // happens to be named `*.jsonl`, a file a concurrent run's own
+  // `pruneToRetentionCap` already removed between this handler's `readdir`
+  // and its `unlink`, a permissions error -- any single failure must not
+  // fail the whole request. `resetHistory()` treats any thrown error as a
+  // failed reset, so one bad entry turning the other N successful deletes
+  // into a reported failure would be the exact same "success reported as
+  // failure" shape as the `MemoryDeletionResponseBody` decoder bug. Whatever
+  // couldn't be removed is simply left in place and not counted.
+  const results = await Promise.allSettled(jsonlNames.map((name) => unlink(join(root, name))));
+  const deleted = results.filter((result) => result.status === "fulfilled").length;
+  return Response.json({ deleted });
+}
+
+/**
  * `/agent/run` is still a single blocking call: it runs the whole loop and
  * returns the full (untruncated) step log at once. Live feedback comes from
  * the sidecar-internal progress registry created here: a run dispatched with
@@ -591,6 +634,11 @@ export function buildAgentRoutes(
       method: "GET",
       path: "/agent/definitions",
       handler: () => handleAgentDefinitions(agentDefinitions),
+    },
+    {
+      method: "DELETE",
+      path: "/agent/run-logs",
+      handler: () => handleDeleteRunLogs(runLogRoot),
     },
   ];
 }

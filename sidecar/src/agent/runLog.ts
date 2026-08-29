@@ -19,9 +19,17 @@
  * MODEL EXPERIENCE: nothing here reaches a model request; this records what
  * already happened.
  */
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, stat, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { AgentProgressEvent } from "./loop";
+
+/**
+ * How many `<runId>.jsonl` files `run-logs/` keeps before pruning the
+ * oldest-by-mtime. Nothing else in the product ever deletes these, so
+ * without a cap the directory grows forever. 50 is an owner-chosen number,
+ * not derived from anything.
+ */
+export const RUN_LOG_RETENTION = 50;
 
 /** One durable record. `detail` is the FULL text, unlike the display feed. */
 export interface RunLogEntry {
@@ -53,6 +61,38 @@ function fileFor(root: string, runId: string): string {
 }
 
 /**
+ * If `root` already holds `RUN_LOG_RETENTION` or more `*.jsonl` files,
+ * deletes the oldest-by-mtime ones so that, once the caller's own new file
+ * is written, exactly `RUN_LOG_RETENTION` remain. Deliberately unaware of
+ * whether the caller's write will succeed -- it just makes room.
+ *
+ * Left to throw on its own (an unreadable directory, a permissions error,
+ * `root` not existing yet): the caller is responsible for isolating that
+ * from the write path, since this function has no way to know whether the
+ * write it's making room for is even about to be attempted.
+ */
+async function pruneToRetentionCap(root: string): Promise<void> {
+  const entries = await readdir(root);
+  const jsonlNames = entries.filter((name) => name.endsWith(".jsonl"));
+  if (jsonlNames.length < RUN_LOG_RETENTION) {
+    return;
+  }
+  const withMtimes = await Promise.all(
+    jsonlNames.map(async (name) => {
+      const path = join(root, name);
+      const { mtimeMs } = await stat(path);
+      return { path, mtimeMs };
+    })
+  );
+  withMtimes.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  // +1: after this deletes its share, the caller still writes one more
+  // (possibly brand-new) file, and the end state must total exactly
+  // RUN_LOG_RETENTION.
+  const deleteCount = withMtimes.length - RUN_LOG_RETENTION + 1;
+  await Promise.all(withMtimes.slice(0, deleteCount).map((entry) => unlink(entry.path)));
+}
+
+/**
  * Open a log rooted at `root`.
  *
  * Sequence numbers are per-process and per-run: appends for one run are
@@ -66,6 +106,16 @@ export function createRunLog(root: string): RunLog {
 
   return {
     async append(runId, event) {
+      // A run with no `nextSeq` entry yet is one this `RunLog` instance has
+      // never appended for before -- the same signal the seq counter itself
+      // uses to distinguish "first" from "later". Pruning only here, rather
+      // than on every append, is deliberate: a long-running agent loop can
+      // append many progress events per run, and re-scanning the directory
+      // on every one of them would stat `root` on every progress tick for no
+      // benefit -- the file count `pruneToRetentionCap` cares about only
+      // changes once per run (when a new `<runId>.jsonl` is about to be
+      // created), not once per event within it.
+      const isFirstEventForRun = !nextSeq.has(runId);
       const seq = nextSeq.get(runId) ?? 0;
       nextSeq.set(runId, seq + 1);
       const entry: RunLogEntry = {
@@ -75,6 +125,20 @@ export function createRunLog(root: string): RunLog {
         type: event.type,
         detail: event.detail,
       };
+
+      if (isFirstEventForRun) {
+        // Its own try/catch, separate from the write's below: a prune
+        // failure (unreadable directory, a permissions error, `root` not
+        // existing yet) must never prevent the event itself from being
+        // written, and `append` must keep its "never rejects" contract
+        // either way.
+        try {
+          await pruneToRetentionCap(resolve(root));
+        } catch {
+          // Deliberately silent, same reasoning as the write's catch below.
+        }
+      }
+
       try {
         await mkdir(resolve(root), { recursive: true, mode: 0o700 });
         // JSON.stringify escapes newlines, which is what keeps the

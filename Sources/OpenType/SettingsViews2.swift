@@ -762,9 +762,9 @@ struct SettingsDetailColumn: View {
         case .languageModel:
             SettingsPageScroll { LLMProviderSetupContent(model: model) }
         case .agentTools:
-            AgentToolsPage(model: model) { model.settingsRoute = nil }
+            AgentToolsPage(model: model)
         case .skillsAndAgents:
-            SkillAgentPage(model: model) { model.settingsRoute = nil }
+            SkillAgentPage(model: model)
         case .auditLog:
             AuditLogPage()
         case .clearLocalData:

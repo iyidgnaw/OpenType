@@ -16,7 +16,6 @@ import SwiftUI
 /// consequence copy.
 struct SkillAgentPage: View {
     @ObservedObject var model: AppModel
-    var onBack: () -> Void
 
     @State private var sheet: SkillAgentSheet?
     /// A sheet queued to open right after the current one finishes
@@ -26,18 +25,22 @@ struct SkillAgentPage: View {
     /// synchronously in one action.
     @State private var pendingSheet: SkillAgentSheet?
 
+    // The pushed-page chrome (back chevron + title) is drawn once by the
+    // shared `SettingsDetailColumn` for every `SettingsRoute`, this one
+    // included — see its `ColumnHeader` — so this page draws content only.
+    // It used to also draw its own chevron + title row here, which is what
+    // produced the doubled header the 2026-08-29 fix removed; `AuditLogPage`/
+    // `ClearLocalDataPage` are the other sub-pages that correctly own no
+    // header of their own.
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            GeometryReader { proxy in
-                let narrow = proxy.size.width < DS.Size.narrowBreakpoint
-                ScrollView {
-                    columns(narrow: narrow)
-                        .padding(.horizontal, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
-                        .padding(.bottom, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
-                }
-                .scrollIndicators(.hidden)
+        GeometryReader { proxy in
+            let narrow = proxy.size.width < DS.Size.narrowBreakpoint
+            ScrollView {
+                columns(narrow: narrow)
+                    .padding(.horizontal, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
+                    .padding(.bottom, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
             }
+            .scrollIndicators(.hidden)
         }
         .background(DS.Colour.canvas)
         .task {
@@ -52,29 +55,6 @@ struct SkillAgentPage: View {
         }) { target in
             sheetContent(for: target)
         }
-    }
-
-    // MARK: Header
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onBack) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 20))
-                    .foregroundStyle(DS.Colour.accent)
-            }
-            .buttonStyle(.plain)
-            .help(OpenTypeL10n.text("返回设置", english: "Back to Settings"))
-
-            Text(SettingsRoute.skillsAndAgents.title)
-                .font(DS.Text.title())
-                .tracking(DS.Tracking.title)
-
-            Spacer()
-        }
-        .padding(.leading, DS.Space.content)
-        .padding(.trailing, DS.Space.pageWide)
-        .frame(height: DS.Size.headerHeight)
     }
 
     // MARK: Columns

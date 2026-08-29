@@ -219,9 +219,6 @@ enum McpBuiltInCatalog {
 /// `OPENTYPE_MCP_SERVERS` **wholesale** rather than merging with it.
 struct AgentToolsPage: View {
     @ObservedObject var model: AppModel
-    /// Pops back to Settings. The page is a second-level view, so it owns its
-    /// own back affordance rather than assuming a navigation container.
-    var onBack: () -> Void
 
     @State private var sheet: McpSheetTarget?
     /// Tools the last passing test found, per server name.
@@ -234,18 +231,24 @@ struct AgentToolsPage: View {
     @State private var copyNotice: String?
     @State private var isCopying = false
 
+    // The pushed-page chrome (back chevron + title) is drawn once by the
+    // shared `SettingsDetailColumn` for every `SettingsRoute`, this one
+    // included — see its `ColumnHeader` — so this page draws content only.
+    // It used to also draw its own chevron + title row here, which doubled
+    // the header exactly the way the 2026-08-29 fix found on `SkillAgentPage`;
+    // `AuditLogPage`/`ClearLocalDataPage` are the other sub-pages that
+    // correctly own no header of their own. The row's one action (「重启服务并
+    // 连接」) is re-homed onto `serverSection`'s group header below, next to
+    // 「添加服务器」, rather than lost.
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            GeometryReader { proxy in
-                let narrow = proxy.size.width < DS.Size.narrowBreakpoint
-                ScrollView {
-                    columns(narrow: narrow)
-                        .padding(.horizontal, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
-                        .padding(.bottom, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
-                }
-                .scrollIndicators(.hidden)
+        GeometryReader { proxy in
+            let narrow = proxy.size.width < DS.Size.narrowBreakpoint
+            ScrollView {
+                columns(narrow: narrow)
+                    .padding(.horizontal, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
+                    .padding(.bottom, narrow ? DS.Space.pageNarrow : DS.Space.pageWide)
             }
+            .scrollIndicators(.hidden)
         }
         .background(DS.Colour.canvas)
         .task { await model.refreshMcpServers() }
@@ -262,40 +265,22 @@ struct AgentToolsPage: View {
         }
     }
 
-    // MARK: Header
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            Button(action: onBack) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: McpIcon.back))
-                    .foregroundStyle(DS.Colour.accent)
-            }
-            .buttonStyle(.plain)
-            .help(OpenTypeL10n.text("返回设置", english: "Back to Settings"))
-
-            Text(OpenTypeL10n.text("Agent 工具", english: "Agent tools"))
-                .font(DS.Text.title())
-                .tracking(DS.Tracking.title)
-
-            Spacer()
-
-            McpButton(
-                title: OpenTypeL10n.text("重启服务并连接", english: "Restart and connect"),
-                icon: "arrow.clockwise",
-                border: DS.Colour.controlBorder,
-                paddingH: 11
-            ) {
-                model.restartSidecarManually()
-            }
-            .help(OpenTypeL10n.text(
-                "保存只重新连接改动过的服务器；这个按钮会把所有已启用的服务器都重新连接一次，找回一个配置没问题、但连接已经断开的服务器。",
-                english: "A save only reconnects servers whose configuration changed. This button reconnects every enabled server, which is how you recover one whose configuration is fine but whose connection has died."
-            ))
+    /// Was the header's own trailing button (7A). Reconnects every *enabled*
+    /// server, not just ones whose configuration changed the way a save
+    /// does — how you recover a server that is configured fine but whose
+    /// connection has died. Not tied to `isEnvironmentOnly` the way 「添加服务
+    /// 器」 is, since a dead connection can happen either way.
+    private var restartButton: some View {
+        McpButton(
+            title: OpenTypeL10n.text("重启服务并连接", english: "Restart and connect"),
+            icon: "arrow.clockwise"
+        ) {
+            model.restartSidecarManually()
         }
-        .padding(.leading, DS.Space.content)
-        .padding(.trailing, DS.Space.pageWide)
-        .frame(height: DS.Size.headerHeight)
+        .help(OpenTypeL10n.text(
+            "保存只重新连接改动过的服务器；这个按钮会把所有已启用的服务器都重新连接一次，找回一个配置没问题、但连接已经断开的服务器。",
+            english: "A save only reconnects servers whose configuration changed. This button reconnects every enabled server, which is how you recover one whose configuration is fine but whose connection has died."
+        ))
     }
 
     // MARK: Columns
@@ -369,14 +354,18 @@ struct AgentToolsPage: View {
                 ),
                 alignment: .center
             ) {
-                if isEnvironmentOnly {
-                    // 7D puts both actions in the card itself, so the header
-                    // link would be a second door to the same sheet.
-                    EmptyView()
-                } else {
-                    McpLinkButton(title: OpenTypeL10n.text("添加服务器", english: "Add a server")) {
-                        sheet = McpSheetTarget(existing: nil)
+                HStack(spacing: 10) {
+                    if isEnvironmentOnly {
+                        // 7D puts both actions in the card itself, so the
+                        // header link would be a second door to the same
+                        // sheet.
+                        EmptyView()
+                    } else {
+                        McpLinkButton(title: OpenTypeL10n.text("添加服务器", english: "Add a server")) {
+                            sheet = McpSheetTarget(existing: nil)
+                        }
                     }
+                    restartButton
                 }
             }
 

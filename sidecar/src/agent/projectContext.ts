@@ -43,6 +43,15 @@ export interface ProjectContextObserver {
 export interface CreateProjectContextObserverOptions {
   /** The §10.2 upward-walk boundary -- see `findProjectAgentsMd`. */
   homeDir: string;
+  /**
+   * Optional per-run default directory: relative first-party `cwd` / `path`
+   * args are resolved against it before project discovery.
+   */
+  defaultWorkingDirectory?: string;
+}
+
+function isTildePath(value: string): boolean {
+  return value === "~" || value.startsWith("~/");
 }
 
 /** Pulls a `cwd` or `path` string out of a tool call's parsed arguments, if either is usable. */
@@ -58,6 +67,20 @@ function extractPathArg(args: unknown): string | undefined {
     return record.path;
   }
   return undefined;
+}
+
+function resolveObservedPath(
+  rawPath: string,
+  defaultWorkingDirectory?: string
+): string {
+  if (
+    !defaultWorkingDirectory ||
+    path.isAbsolute(rawPath) ||
+    isTildePath(rawPath)
+  ) {
+    return rawPath;
+  }
+  return path.resolve(defaultWorkingDirectory, rawPath);
 }
 
 /**
@@ -93,7 +116,7 @@ function resolveDirFromArg(rawPath: string): string {
 export function createProjectContextObserver(
   options: CreateProjectContextObserverOptions
 ): ProjectContextObserver {
-  const { homeDir } = options;
+  const { homeDir, defaultWorkingDirectory } = options;
   const reportedPaths = new Set<string>();
 
   return {
@@ -102,7 +125,7 @@ export function createProjectContextObserver(
       if (!rawPath) {
         return undefined;
       }
-      const dir = resolveDirFromArg(rawPath);
+      const dir = resolveDirFromArg(resolveObservedPath(rawPath, defaultWorkingDirectory));
       const found = findProjectAgentsMd(dir, homeDir);
       if (!found) {
         return undefined;

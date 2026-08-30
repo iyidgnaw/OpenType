@@ -46,6 +46,7 @@ import {
 } from "./agentDefinitions";
 import { findProjectAgentsMd, renderProjectAgentsMd } from "./projectAgentsMd";
 import { createProjectContextObserver } from "./projectContext";
+import { withWorkingDirectoryDefaults } from "./workingDirectoryToolWrapper";
 
 interface AgentRunRequestBody {
   task?: string;
@@ -325,7 +326,12 @@ async function handleAgentRun(
       ? findProjectAgentsMd(workingDirectory, homeDir)
       : undefined;
   const projectAgentsMdBlock = projectAgentsMd ? renderProjectAgentsMd(projectAgentsMd) : undefined;
-  const projectContextObserver = homeDir ? createProjectContextObserver({ homeDir }) : undefined;
+  const projectContextObserver = homeDir
+    ? createProjectContextObserver({ homeDir, defaultWorkingDirectory: workingDirectory })
+    : undefined;
+  const runScopedTools = workingDirectory
+    ? withWorkingDirectoryDefaults(runTools, workingDirectory)
+    : runTools;
 
   // With a `runId`, the loop's (previously unused) `onProgress` hook feeds
   // the in-memory progress registry so `GET /agent/progress/:runId` can show
@@ -382,7 +388,7 @@ async function handleAgentRun(
         // `OPENTYPE_AGENT_APPROVAL=prompt` restores today's behavior exactly.
         tools: withApproval(
           mergeToolSets(
-            runTools,
+            runScopedTools,
             createAskUserTool(askUser, { runId, timeoutMs: ASK_USER_TIMEOUT_MS })
           ),
           approvalMode === "prompt"

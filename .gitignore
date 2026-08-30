@@ -6,6 +6,7 @@ dist/
 **/.DS_Store
 **/xcuserdata/
 DerivedData/
+.worktrees/
 
 sidecar/node_modules/
 sidecar/dist/

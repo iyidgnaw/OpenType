@@ -1,6 +1,6 @@
 # 2026-08-30 Direct/Tidy 就地纠错后的记忆回写
 
-Status: approved（产品负责人确认，本批 Stage-1 测试即契约）。
+Status: **已完成**（2026-08-30 随批次合并到 `main` @ `c4e454c`；实现与 Stage-1 测试契约一致：sidecar 全量 1375 用例通过，Swift 全量通过）。
 基线：`fix/cwd-and-correction-history` @ `cd58850`（该分支上的 cwd 批次 `437bed3` 与本批无关，仅同分支共存）。
 
 执行方式：按 CLAUDE.md 约定的 4 阶段 TDD 管线。本文件描述本批全部行为；实现偏离时回来改这份文档，不要让它烂掉。

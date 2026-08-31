@@ -212,6 +212,70 @@ export function buildMemoryRoutes(
       },
     },
     {
+      // The one write mouth a Direct/Tidy in-place correction has back into
+      // this table (2026-08-30 batch). An in-place correction pastes only the
+      // replacement into the target app, so `correctedTranscript`/`result` --
+      // what this row stores as the post-ASR, actually-delivered text -- still
+      // carry the pre-correction version, which is what the dictation history
+      // page and the ask/agent recent-activity injection keep showing (design
+      // §一). Swift is the only side that knows both the full delivered text
+      // and which span was corrected, so it calls this narrow PATCH after a
+      // correction lands: exactly the two columns that describe the delivered
+      // text move, and `rawTranscript` (what ASR actually heard before every
+      // rewrite) plus every other column stay as they were.
+      //
+      // Both fields are required and must be non-blank: they are the same
+      // reconstructed full text on the Swift side, and a blank/partial body is
+      // either a caller bug or a correction that produced no text worth
+      // recording -- the row is left untouched either way, never half-updated.
+      // The values are stored as sent (not trimmed): this body is the
+      // reconstruction of text the user actually saw delivered, so it is
+      // authoritative and must not be normalized on the way in.
+      //
+      // Id handling matches `DELETE /memory/events/:id` above: a numeric id
+      // that names no row (unknown or negative) updates nothing and is a 404,
+      // and a malformed id is `parseIdParam`'s 400.
+      method: "PATCH",
+      path: "/memory/events/:id",
+      handler: async (req) => {
+        const id = parseIdParam(req);
+        const body = (await req.json()) as Record<string, unknown>;
+        if (
+          typeof body.correctedTranscript !== "string"
+          || body.correctedTranscript.trim().length === 0
+        ) {
+          throw new ApiError("corrected_transcript_is_required", 400);
+        }
+        if (typeof body.result !== "string" || body.result.trim().length === 0) {
+          throw new ApiError("result_is_required", 400);
+        }
+
+        const result = store.db.run(
+          "UPDATE episodic_events SET correctedTranscript = ?, result = ? WHERE id = ?",
+          [body.correctedTranscript, body.result, id]
+        );
+        if (result.changes === 0) {
+          throw new ApiError("event_not_found", 404);
+        }
+        // A deliberately narrow echo rather than the raw `SELECT *` row:
+        // `test/memory/routes.test.ts` pins the response event to exactly the
+        // columns a correction could have changed (plus the row's identity),
+        // and the history page / recent-activity readers re-read the row via
+        // `GET /memory/events`/`recentEvents` anyway — this echo is a
+        // confirmation of what moved, not a second data source.
+        const event = store.getEventById(id)!;
+        return Response.json({
+          event: {
+            id: event.id,
+            rawTranscript: event.rawTranscript,
+            correctedTranscript: event.correctedTranscript,
+            result: event.result,
+            applicationName: event.applicationName,
+          },
+        });
+      },
+    },
+    {
       // Backs the Settings/Memory panel's "重置输入历史" (reset input
       // history) button, alongside the existing `DELETE /memory/context-log`.
       // Touches `episodic_events` only -- the dictionary the user hand-

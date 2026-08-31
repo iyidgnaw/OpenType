@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { openDatabase } from "../../src/memory/db";
 import { MemoryStore } from "../../src/memory/MemoryStore";
 import { ConversationStore } from "../../src/memory/conversations";
+import { buildRecentActivityContext } from "../../src/memory/recentActivity";
 import { buildMemoryRoutes } from "../../src/memory/routes";
 import { createRouter } from "../../src/router";
 import type { CallLLM } from "../../src/memory/consolidator";
@@ -1878,6 +1879,295 @@ describe("GET /memory/events limit clamping", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { events: unknown[] };
     expect(body.events).toHaveLength(CEILING);
+  });
+});
+
+describe("PATCH /memory/events/:id", () => {
+  test("updates only the named episodic row, preserving rawTranscript and leaving other rows untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const keepId = seedEvent(store, {
+      rawTranscript: "keep raw",
+      correctedTranscript: "keep corrected",
+      applicationName: "Notes",
+    });
+    const updateId = seedEvent(store, {
+      rawTranscript: "请把这笔钱通过呸泡转给他",
+      correctedTranscript: "请把这笔钱通过呸泡转给他",
+      applicationName: "WeChat",
+    });
+
+    const response = await router(
+      patch(`/memory/events/${updateId}`, {
+        correctedTranscript: "请把这笔钱通过PayPal转给他",
+        result: "请把这笔钱通过PayPal转给他",
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      event: {
+        id: number;
+        rawTranscript: string;
+        correctedTranscript: string;
+        result: string | null;
+        applicationName: string;
+      };
+    };
+    expect(body.event).toEqual({
+      id: updateId,
+      rawTranscript: "请把这笔钱通过呸泡转给他",
+      correctedTranscript: "请把这笔钱通过PayPal转给他",
+      result: "请把这笔钱通过PayPal转给他",
+      applicationName: "WeChat",
+    });
+
+    const updated = store.getEventById(updateId);
+    expect(updated).toMatchObject({
+      id: updateId,
+      rawTranscript: "请把这笔钱通过呸泡转给他",
+      correctedTranscript: "请把这笔钱通过PayPal转给他",
+      result: "请把这笔钱通过PayPal转给他",
+    });
+
+    const untouched = store.getEventById(keepId);
+    expect(untouched).toMatchObject({
+      id: keepId,
+      rawTranscript: "keep raw",
+      correctedTranscript: "keep corrected",
+      result: null,
+    });
+  });
+
+  test("after a patch, history reads and recent-activity context both surface the updated text", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const id = seedEvent(store, {
+      rawTranscript: "把🍣发给小王",
+      correctedTranscript: "把🍣发给小王",
+      applicationName: "Messages",
+    });
+
+    const patchResponse = await router(
+      patch(`/memory/events/${id}`, {
+        correctedTranscript: "把寿司发给小王",
+        result: "把寿司发给小王",
+      })
+    );
+    expect(patchResponse.status).toBe(200);
+
+    const historyResponse = await router(get("/memory/events"));
+    expect(historyResponse.status).toBe(200);
+    const history = (await historyResponse.json()) as {
+      events: Array<{ id: number; correctedTranscript: string; result: string | null }>;
+    };
+    expect(history.events[0]).toMatchObject({
+      id,
+      correctedTranscript: "把寿司发给小王",
+      result: "把寿司发给小王",
+    });
+
+    const recent = buildRecentActivityContext(store.recentEvents(10), {
+      includeIds: true,
+    });
+    const recentEntry = JSON.parse(recent.trim().split("\n")[1] ?? "") as {
+      eventId: number;
+      input: string;
+      result: string;
+    };
+    expect(recentEntry).toMatchObject({
+      eventId: id,
+      input: "把寿司发给小王",
+      result: "把寿司发给小王",
+    });
+  });
+
+  test("an unknown id is a 404 once the route itself is proven to exist", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const id = seedEvent(store, {
+      correctedTranscript: "before",
+    });
+
+    const probe = await router(
+      patch(`/memory/events/${id}`, {
+        correctedTranscript: "after",
+        result: "after",
+      })
+    );
+    expect(probe.status).toBe(200);
+
+    const response = await router(
+      patch("/memory/events/999999", {
+        correctedTranscript: "missing",
+        result: "missing",
+      })
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  test("a non-numeric id is a 400 invalid_id and leaves real rows untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const id = seedEvent(store, { correctedTranscript: "still here" });
+
+    const response = await router(
+      patch("/memory/events/not-an-id", {
+        correctedTranscript: "missing",
+        result: "missing",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid_id" });
+    expect(store.getEventById(id)).toMatchObject({
+      id,
+      correctedTranscript: "still here",
+      result: null,
+    });
+  });
+
+  test("a negative numeric id is a 404 and leaves real rows untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const id = seedEvent(store, { correctedTranscript: "still here" });
+
+    const probe = await router(
+      patch(`/memory/events/${id}`, {
+        correctedTranscript: "updated once",
+        result: "updated once",
+      })
+    );
+    expect(probe.status).toBe(200);
+
+    const response = await router(
+      patch("/memory/events/-1", {
+        correctedTranscript: "missing",
+        result: "missing",
+      })
+    );
+
+    expect(response.status).toBe(404);
+    expect(store.getEventById(id)).toMatchObject({
+      id,
+      correctedTranscript: "updated once",
+      result: "updated once",
+    });
+  });
+
+  test("missing correctedTranscript returns 400 and leaves the row untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const probeId = seedEvent(store, { correctedTranscript: "probe" });
+    const targetId = seedEvent(store, { correctedTranscript: "still here" });
+
+    const probe = await router(
+      patch(`/memory/events/${probeId}`, {
+        correctedTranscript: "probe updated",
+        result: "probe updated",
+      })
+    );
+    expect(probe.status).toBe(200);
+
+    const response = await router(
+      patch(`/memory/events/${targetId}`, {
+        result: "missing correctedTranscript",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.getEventById(targetId)).toMatchObject({
+      id: targetId,
+      correctedTranscript: "still here",
+      result: null,
+    });
+  });
+
+  test("a whitespace-only correctedTranscript returns 400 and leaves the row untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const probeId = seedEvent(store, { correctedTranscript: "probe" });
+    const targetId = seedEvent(store, { correctedTranscript: "before" });
+
+    const probe = await router(
+      patch(`/memory/events/${probeId}`, {
+        correctedTranscript: "probe updated",
+        result: "probe updated",
+      })
+    );
+    expect(probe.status).toBe(200);
+
+    const response = await router(
+      patch(`/memory/events/${targetId}`, {
+        correctedTranscript: " \n\t ",
+        result: "after",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.getEventById(targetId)).toMatchObject({
+      id: targetId,
+      correctedTranscript: "before",
+      result: null,
+    });
+  });
+
+  test("a whitespace-only result returns 400 and leaves the row untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const probeId = seedEvent(store, { correctedTranscript: "probe" });
+    const targetId = seedEvent(store, { correctedTranscript: "before" });
+
+    const probe = await router(
+      patch(`/memory/events/${probeId}`, {
+        correctedTranscript: "probe updated",
+        result: "probe updated",
+      })
+    );
+    expect(probe.status).toBe(200);
+
+    const response = await router(
+      patch(`/memory/events/${targetId}`, {
+        correctedTranscript: "after",
+        result: " \n\t ",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.getEventById(targetId)).toMatchObject({
+      id: targetId,
+      correctedTranscript: "before",
+      result: null,
+    });
+  });
+
+  test("missing result returns 400 and leaves the row untouched", async () => {
+    const store = makeStore();
+    const router = createRouter(buildMemoryRoutes(store, noOpCallLLM()));
+    const probeId = seedEvent(store, { correctedTranscript: "probe" });
+    const targetId = seedEvent(store, { correctedTranscript: "before" });
+
+    const probe = await router(
+      patch(`/memory/events/${probeId}`, {
+        correctedTranscript: "probe updated",
+        result: "probe updated",
+      })
+    );
+    expect(probe.status).toBe(200);
+
+    const response = await router(
+      patch(`/memory/events/${targetId}`, {
+        correctedTranscript: "after",
+      })
+    );
+
+    expect(response.status).toBe(400);
+    expect(store.getEventById(targetId)).toMatchObject({
+      id: targetId,
+      correctedTranscript: "before",
+      result: null,
+    });
   });
 });
 

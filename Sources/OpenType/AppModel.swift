@@ -340,7 +340,19 @@ final class AppModel: ObservableObject {
     /// loses one episodic row and must never affect delivery or surface to
     /// the user. `sidecarClient` is captured into a local before entering the
     /// detached task so the task doesn't need to hop back through `self`.
-    private func recordEpisodicEvent(for status: AuditEventStatus, isPractice: Bool, _ body: EpisodicEventBody) {
+    ///
+    /// - Parameter retainForInPlaceCorrection: Whether this delivery's row id
+    ///   should be kept for the in-place correction PATCH (2026-08-30 batch).
+    ///   `true` only for a Direct/Tidy delivery — the one variant whose text
+    ///   can be corrected in place; Review/ask/agent must leave the retained
+    ///   id alone. Defaults to `false` so every existing call site keeps its
+    ///   current behaviour unless it opts in.
+    private func recordEpisodicEvent(
+        for status: AuditEventStatus,
+        isPractice: Bool,
+        _ body: EpisodicEventBody,
+        retainForInPlaceCorrection: Bool = false
+    ) {
         guard EpisodicEventRecorder.shouldRecord(
             for: status, keepHistory: configuration.keepHistory, isPractice: isPractice
         ) else { return }
@@ -352,12 +364,21 @@ final class AppModel: ObservableObject {
                 path: "/memory/events",
                 body: body
             )
-            // One of the two refresh points design §3.7 calls for (the other
-            // is the dictation page's own `.task` on open): a row that just
-            // landed should show up without the user having to leave and
-            // reopen the page. Only on success — a failed write recorded
-            // nothing new to show.
-            if ack != nil {
+            if let ack {
+                if retainForInPlaceCorrection {
+                    // The id is known only here, after the sidecar has
+                    // confirmed the write; hop back to the main actor once to
+                    // store it (the same hop `refreshHistory()` below needs).
+                    let eventId = ack.eventId
+                    await MainActor.run { [weak self] in
+                        self?.lastDirectTidyEventId = eventId
+                    }
+                }
+                // One of the two refresh points design §3.7 calls for (the other
+                // is the dictation page's own `.task` on open): a row that just
+                // landed should show up without the user having to leave and
+                // reopen the page. Only on success — a failed write recorded
+                // nothing new to show.
                 await self?.refreshHistory()
             }
         }
@@ -470,6 +491,28 @@ final class AppModel: ObservableObject {
     /// selection being corrected is the one that was live *then*, not whatever
     /// the user happens to have selected when the recording ends.
     private var inPlaceCorrection: InPlaceCorrectionSession?
+    /// The `eventId` of the most recent Direct/Tidy delivery's episodic row
+    /// (`POST /memory/events`'s Ack, design §3.2), retained so an in-place
+    /// correction can PATCH that row to the corrected full text (2026-08-30
+    /// batch, design §四).
+    ///
+    /// Only Direct/Tidy deliveries arm a correction window — the one delivery
+    /// an in-place correction can fix — so only their ids are retained here.
+    /// `ask`/`agent` (and the Review commit, which goes through
+    /// `POST /transcribe/correct` instead) must never overwrite it with an id
+    /// whose row an in-place correction could not target. Written from inside
+    /// `recordEpisodicEvent`'s detached task, so the value is only updated
+    /// once the sidecar has actually acknowledged the write.
+    private var lastDirectTidyEventId: Int?
+    /// The full text of the most recent Direct/Tidy delivery, as it stands
+    /// *after* any in-place corrections. This is the "delivered text" basis
+    /// `DeliveredTextCorrection.reconstruct` runs against when the next
+    /// correction lands, so consecutive corrections chain: each PATCHes the
+    /// same episodic row to the latest full text rather than re-correcting
+    /// from the pre-correction version. Set at delivery time (where
+    /// `armCorrectionWindow` also receives it), advanced by
+    /// `processInPlaceCorrection` when a reconstruction succeeds.
+    private var lastDirectTidyDeliveredText: String?
     /// Detached, un-awaited units of work for in-flight `/agent/run` calls,
     /// keyed by `AgentRunRecord.id`. Deliberately not awaited by
     /// `process(audioURL:)` — see `dispatchAgentRun(...)` — so a slow Agent
@@ -2216,6 +2259,44 @@ final class AppModel: ObservableObject {
                     supersedesEventId: session.supersedesEventId
                 )
             )
+
+            // 2026-08-30 batch: this correction rewrote
+            // `session.selectedText` → `replacement` in the target app, but
+            // the delivery's episodic row still holds the pre-correction full
+            // text — which is what the Dictation history page and the
+            // ask/agent recent-activity injection would keep showing (design
+            // §一). Reconstruct the corrected whole from the delivered text
+            // and PATCH the row: best-effort and fire-and-forget exactly like
+            // `recordEpisodicEvent`, so a failed write never touches delivery
+            // or the audit trail (which the `.corrected` event above already
+            // records). `nil` reconstruction — the selection is absent or
+            // ambiguous — sends nothing and leaves history untouched.
+            // The reconstructed full text also becomes the basis for the next
+            // round, so consecutive corrections each PATCH the same row to the
+            // latest version rather than re-correcting from the original.
+            if let eventId = lastDirectTidyEventId,
+               let delivered = lastDirectTidyDeliveredText,
+               let request = AppModel.historyEventCorrectionRequest(
+                   id: eventId,
+                   deliveredText: delivered,
+                   selectedText: session.selectedText,
+                   replacement: replacement
+               ) {
+                lastDirectTidyDeliveredText = request.body.correctedTranscript
+                let client = sidecarClient
+                Task.detached(priority: .utility) {
+                    struct PatchAck: Decodable {}
+                    // A 404 here only means the row has not landed yet or was
+                    // deleted since — a history this correction cannot reach,
+                    // not a failure of the correction itself.
+                    let patchAck: PatchAck? = try? await client.request(
+                        method: request.method,
+                        path: request.path,
+                        body: request.body
+                    )
+                    _ = patchAck
+                }
+            }
 
             // Re-arm rather than end: fixing two words in a row is common, and
             // the second fix should not cost a re-dictation.
@@ -4294,6 +4375,20 @@ final class AppModel: ObservableObject {
             // `isPractice: practice` — the value captured at the top of
             // `process(audioURL:)` before its `defer` clears
             // `isPracticeSession`.
+            //
+            // 2026-08-30 batch: this is the one delivery an in-place
+            // correction can fix, so it keeps the delivered text as the
+            // correction's reconstruction basis and opts the row id into
+            // retention — see `lastDirectTidyDeliveredText` and
+            // `lastDirectTidyEventId`. The two are set together here so they
+            // can never describe different deliveries. The id itself lands
+            // asynchronously (from `recordEpisodicEvent`'s Ack); it is
+            // cleared here so a delivery whose row never lands — a failed
+            // POST, or history turned off since the previous delivery — can
+            // never leave the previous delivery's id paired with this one's
+            // text, which would PATCH the wrong row.
+            lastDirectTidyDeliveredText = result
+            lastDirectTidyEventId = nil
             recordEpisodicEvent(
                 for: .completed,
                 isPractice: practice,
@@ -4305,7 +4400,8 @@ final class AppModel: ObservableObject {
                     selectedContext: capturedContext.selectedText,
                     applicationName: capturedContext.applicationName,
                     conversationId: nil
-                )
+                ),
+                retainForInPlaceCorrection: true
             )
 
             // P0-3: the text is delivered and the user is looking at it — for

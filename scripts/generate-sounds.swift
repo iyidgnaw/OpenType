@@ -27,75 +27,51 @@ private struct SoundSpec {
 private let sounds = [
     SoundSpec(
         filename: "OpenTypeReady.wav",
-        duration: 0.135,
-        targetPeak: 0.21,
+        duration: 0.115,
+        targetPeak: 0.14,
+        tones: [
+            Tone(
+                start: 0.000,
+                duration: 0.108,
+                startFrequency: 440,
+                endFrequency: 560,
+                amplitude: 1.00,
+                warmth: 0.04
+            )
+        ],
+        airAmount: 0.020
+    ),
+    SoundSpec(
+        filename: "OpenTypeRelease.wav",
+        duration: 0.105,
+        targetPeak: 0.12,
+        tones: [
+            Tone(
+                start: 0.000,
+                duration: 0.098,
+                startFrequency: 520,
+                endFrequency: 390,
+                amplitude: 1.00,
+                warmth: 0.04
+            )
+        ],
+        airAmount: 0.012
+    ),
+    SoundSpec(
+        filename: "OpenTypeDone.wav",
+        duration: 0.125,
+        targetPeak: 0.13,
         tones: [
             Tone(
                 start: 0.000,
                 duration: 0.118,
-                startFrequency: 720,
-                endFrequency: 865,
+                startFrequency: 620,
+                endFrequency: 560,
                 amplitude: 1.00,
-                warmth: 0.16
-            ),
-            Tone(
-                start: 0.042,
-                duration: 0.083,
-                startFrequency: 1_080,
-                endFrequency: 1_130,
-                amplitude: 0.34,
-                warmth: 0.08
+                warmth: 0.035
             )
         ],
-        airAmount: 0.055
-    ),
-    SoundSpec(
-        filename: "OpenTypeRelease.wav",
-        duration: 0.155,
-        targetPeak: 0.19,
-        tones: [
-            Tone(
-                start: 0.000,
-                duration: 0.140,
-                startFrequency: 820,
-                endFrequency: 610,
-                amplitude: 1.00,
-                warmth: 0.18
-            ),
-            Tone(
-                start: 0.020,
-                duration: 0.110,
-                startFrequency: 1_150,
-                endFrequency: 940,
-                amplitude: 0.22,
-                warmth: 0.06
-            )
-        ],
-        airAmount: 0.030
-    ),
-    SoundSpec(
-        filename: "OpenTypeDone.wav",
-        duration: 0.245,
-        targetPeak: 0.20,
-        tones: [
-            Tone(
-                start: 0.000,
-                duration: 0.145,
-                startFrequency: 640,
-                endFrequency: 675,
-                amplitude: 0.78,
-                warmth: 0.20
-            ),
-            Tone(
-                start: 0.072,
-                duration: 0.160,
-                startFrequency: 900,
-                endFrequency: 980,
-                amplitude: 1.00,
-                warmth: 0.14
-            )
-        ],
-        airAmount: 0.012
+        airAmount: 0.004
     ),
     SoundSpec(
         filename: "OpenTypeIssue.wav",

@@ -6,17 +6,19 @@ asset is copied into OpenType.
 
 ## Cues
 
-- `OpenTypeReady.wav` (135 ms): a short rising air-and-glass cue. It plays only
+- `OpenTypeReady.wav` (115 ms): a soft rising 440–560 Hz air cue. It plays only
   after the microphone is ready, so speech can begin immediately after it.
-- `OpenTypeRelease.wav` (155 ms): a soft falling counterpart that confirms the
+- `OpenTypeRelease.wav` (105 ms): a soft falling 520–390 Hz counterpart that confirms the
   recorder has stopped and processing has begun.
-- `OpenTypeDone.wav` (245 ms): two restrained rising notes for a completed
+- `OpenTypeDone.wav` (125 ms): one rounded 620–560 Hz tap for a completed
   insertion or clipboard result.
 - `OpenTypeIssue.wav` (245 ms): two rounded falling notes. It is distinct but
   deliberately avoids the alarm-like character of the macOS Basso sound.
 
-All files are 48 kHz, mono, 16-bit PCM WAV. Peaks remain between roughly -13 dB
-and -15 dB before the app's per-cue playback gain. Mode changes remain silent
+All files are 48 kHz, mono, 16-bit PCM WAV. Routine cues peak between roughly
+-17 dB and -18 dB before the app's per-cue playback gain; the issue cue remains
+at -15 dB. The routine cues were softened on 2026-09-05: lower pitch, reduced
+upper harmonics, shorter tails, and a single completion tap. Mode changes remain silent
 because the visual status overlay already supplies sufficient feedback.
 
 ## Research inputs

@@ -297,6 +297,8 @@ enum VoiceSurfacePanelMetrics {
 final class OverlayController {
     private let presentation = OverlayPresentation()
     private var panel: NSPanel?
+    private var draggingPanel = false
+    private let positionPreference = "OpenType.overlayPosition.v1"
     private var dismissWorkItem: DispatchWorkItem?
     /// The surface state currently on screen (or, while a transient toast has
     /// preempted it, the one that comes back when the toast is done). While
@@ -990,10 +992,7 @@ final class OverlayController {
         guard let panel, panel.isVisible else { return }
         let size = legacySize(for: state)
         hostingView.frame = NSRect(origin: .zero, size: size)
-        let frame = VoiceSurfacePanelLayout.frame(
-            for: size,
-            visibleFrame: visibleFrame() ?? panel.frame
-        )
+        let frame = positionedFrame(size: size, fallback: panel.frame)
         panel.setFrame(frame, display: true, animate: true)
     }
 
@@ -1110,10 +1109,7 @@ final class OverlayController {
         presentation.learningNoteOwnsPanel = false
 
         let size = VoiceSurfacePanelMetrics.size(for: surface)
-        let frame = VoiceSurfacePanelLayout.frame(
-            for: size,
-            visibleFrame: visibleFrame() ?? panel.frame
-        )
+        let frame = positionedFrame(size: size, fallback: panel.frame)
         hostingView.frame = NSRect(origin: .zero, size: size)
 
         // Animate only a real size change on an already-visible panel: that is
@@ -1199,6 +1195,17 @@ final class OverlayController {
             .stationary
         ]
         panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.isMovable = true
+        panel.onDragStarted = { [weak self] in self?.draggingPanel = true }
+        panel.onDragEnded = { [weak self, weak panel] in
+            guard let self, let panel else { return }
+            self.draggingPanel = false
+            guard let screen = panel.screen?.visibleFrame ?? self.visibleFrame() else { return }
+            let anchor = OverlayPosition.anchor(for: panel.frame, in: screen)
+            UserDefaults.standard.set([Double(anchor.x), Double(anchor.y)], forKey: self.positionPreference)
+            panel.setFrame(OverlayPosition.frame(size: panel.frame.size, screen: screen, anchor: anchor), display: true)
+        }
         panel.contentView = hostingView
         return panel
     }
@@ -1212,13 +1219,21 @@ final class OverlayController {
     }
 
     private func position(_ panel: NSPanel) {
-        guard let frame = visibleFrame() else { return }
-        panel.setFrameOrigin(
-            VoiceSurfacePanelLayout.frame(
-                for: panel.frame.size,
-                visibleFrame: frame
-            ).origin
-        )
+        panel.setFrameOrigin(positionedFrame(size: panel.frame.size, fallback: panel.frame).origin)
+    }
+
+    private func positionedFrame(size: CGSize, fallback: CGRect) -> CGRect {
+        let screen = visibleFrame() ?? fallback
+        if draggingPanel, let panel {
+            return CGRect(x: panel.frame.midX - size.width / 2,
+                          y: panel.frame.minY, width: size.width, height: size.height)
+        }
+        if let saved = UserDefaults.standard.array(forKey: positionPreference) as? [Double],
+           saved.count == 2, saved.allSatisfy({ $0.isFinite }) {
+            return OverlayPosition.frame(size: size, screen: screen,
+                                         anchor: CGPoint(x: saved[0], y: saved[1]))
+        }
+        return VoiceSurfacePanelLayout.frame(for: size, visibleFrame: screen)
     }
 
     private func dismiss(after seconds: TimeInterval) {
@@ -1251,7 +1266,30 @@ private extension VoiceSurfaceState {
 /// whatever the user was typing into. Key status is only ever *taken* for the
 /// result/failed card (see `presentSurface`), never for the pill.
 private final class KeyableOverlayPanel: NSPanel {
+    var onDragStarted: (() -> Void)?
+    var onDragEnded: (() -> Void)?
     override var canBecomeKey: Bool { true }
+}
+
+/// Only the dedicated handle catches mouse events; text and controls keep theirs.
+private struct OverlayDragHandle: NSViewRepresentable {
+    func makeNSView(context: Context) -> HandleView { HandleView() }
+    func updateNSView(_ nsView: HandleView, context: Context) {}
+
+    final class HandleView: NSView {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override var needsPanelToBecomeKey: Bool { false }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func resetCursorRects() { addCursorRect(bounds, cursor: .openHand) }
+        override func mouseDown(with event: NSEvent) {
+            guard let panel = window as? KeyableOverlayPanel else { return }
+            panel.onDragStarted?()
+            NSCursor.closedHand.push()
+            panel.performDrag(with: event)
+            NSCursor.pop()
+            panel.onDragEnded?()
+        }
+    }
 }
 
 /// The panel's content view, with one behaviour AppKit does not give by
@@ -1314,6 +1352,14 @@ private struct OverlayView: View {
                 .strokeBorder(.white.opacity(0.45), lineWidth: 0.75)
         )
         .tint(DS.Colour.accent)
+        .overlay(alignment: .top) {
+            Capsule()
+                .fill(Color.primary.opacity(0.22))
+                .frame(width: 28, height: 3)
+                .frame(width: 72, height: 16)
+                .overlay(OverlayDragHandle())
+                .help(OpenTypeL10n.text("拖动以移动浮层", english: "Drag to move"))
+        }
         .environment(\.locale, OpenTypeL10n.locale)
         // §F: tears down and rebuilds the whole subtree on a live language
         // switch, the same seam `RootView`/`MenuBarPopoverView` use via
